@@ -15,65 +15,27 @@ PathPlannerNode::PathPlannerNode()
     tf_buffer = std::make_unique<tf2_ros::Buffer>(this->get_clock());
     tf_listener = std::make_shared<tf2_ros::TransformListener>(*tf_buffer);
 
-    timer_pose_samples = this->create_wall_timer(std::chrono::duration<double>(0.01), std::bind(&PathPlannerNode::read_pose_samples, this));
-    sub_goal_pose = create_subscription<geometry_msgs::msg::PoseStamped>("goal_pose", 1, bind(&PathPlannerNode::process_goal_request, this, std::placeholders::_1));
+    timer_pose_samples = create_wall_timer(std::chrono::duration<double>(0.01), std::bind(&PathPlannerNode::read_pose_samples, this));
+    sub_goal_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d/goal_pose", 1, bind(&PathPlannerNode::process_goal_request, this, std::placeholders::_1));
 
-    declare_parameter("robot_frame", "robot");
-    declare_parameter("world_frame", "map");
+    // Create a parameter subscriber that can be used to monitor parameter changes
+    // (for this node's parameters as well as other nodes' parameters)
+    param_subscriber = std::make_shared<rclcpp::ParameterEventHandler>(this);
 
-    declare_parameter("dumpOnError", 0);
-    declare_parameter("dumpOnSuccess", 0);
-    declare_parameter("initialPatchRadius", 3.0);
-    declare_parameter("microseconds", 50000000);
+    // Set a callback for this node's integer parameter, "an_int_param"
+    auto cb = [this](const rclcpp::Parameter & p) {
+        RCLCPP_INFO(
+          this->get_logger(), "cb: Received an update to parameter \"%s\" of type %s: \"%ld\"",
+          p.get_name().c_str(),
+          p.get_type_name().c_str(),
+          p.as_int());
+      };
 
-    declare_parameter("maxMotionCurveLength", 100);
-    declare_parameter("minTurningRadius", 1);
-    declare_parameter("multiplierBackward", 3);
-    declare_parameter("multiplierBackwardTurn", 4);
-    declare_parameter("multiplierForward", 1);
-    declare_parameter("multiplierForwardTurn", 2);
-    declare_parameter("multiplierLateral", 4);
-    declare_parameter("multiplierLateralCurve", 4);
-    declare_parameter("multiplierPointTurn", 3);
-    declare_parameter("rotationSpeed", 1.0);
-    declare_parameter("searchProgressSteps", 0.1);
-    declare_parameter("searchRadius", 0.0);
-    declare_parameter("translationSpeed", 1.0);
+    cb_handle = param_subscriber->add_parameter_callback("param_subscriber", cb);
+    path_publisher = this->create_publisher<nav_msgs::msg::Path>("/ugv_nav4d/path", 10);
 
-    declare_parameter("epsilonSteps", 2);
-    declare_parameter("initialEpsilon", 64);
-    declare_parameter("numThreads", 8);
-
-    declare_parameter("cellSkipFactor", 3);
-    declare_parameter("destinationCircleRadius", 10);
-    declare_parameter("generateBackwardMotions", false);
-    declare_parameter("generateForwardMotions", true);
-    declare_parameter("generateLateralMotions", false);
-    declare_parameter("generatePointTurnMotions", true);
-    declare_parameter("gridSize", 0.3);
-    declare_parameter("numAngles", 42);
-    declare_parameter("numEndAngles", 21);
-    declare_parameter("splineOrder", 4.0);
-
-    declare_parameter("allowForwardDownhill", true);
-    declare_parameter("costFunctionDist", 0.0);
-    declare_parameter("distToGround", 0.0);
-    declare_parameter("enableInclineLimitting", true);
-    declare_parameter("gridResolution", 0.3);
-    declare_parameter("inclineLimittingLimit", 0.1);
-    declare_parameter("inclineLimittingMinSlope", 0.2);
-    declare_parameter("initialPatchVariance", 0.0001);
-    declare_parameter("maxSlope", 0.45);
-    declare_parameter("maxStepHeight", 0.2);
-    declare_parameter("minTraversablePercentage", 0.4);
-    declare_parameter("robotHeight", 1.7);
-    declare_parameter("robotSizeX", 0.80);
-    declare_parameter("robotSizeY", 0.80);
-    //declare_parameter("slopeMetric", :NONE);
-    declare_parameter("slopeMetricScale", 1.0);
-
-    setupPlanner();
-    planner.reset(new ugv_nav4d::Planner(splinePrimitiveConfig, traversabilityConfig, mobility, plannerConfig));
+    declareParameters();
+    configurePlanner();
     loadMls("/opt/workspace/src/planning/ugv_nav4d/test_data/Plane1Mio.ply");
 }
 
@@ -110,8 +72,8 @@ bool PathPlannerNode::read_pose_samples(){
     return true;    
 }
 
-void PathPlannerNode::process_goal_request(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
-{
+void PathPlannerNode::process_goal_request(const geometry_msgs::msg::PoseStamped::SharedPtr msg){
+
     start_pose_rbs.position = Eigen::Vector3d(pose_samples.pose.position.x,
                                               pose_samples.pose.position.y,
                                               pose_samples.pose.position.z);
@@ -132,27 +94,28 @@ void PathPlannerNode::process_goal_request(const geometry_msgs::msg::PoseStamped
     plan();
 }
 
-void PathPlannerNode::printConfigs(){
-    std::cout << "SplinePrimitivesConfig: " << std::endl;
-    std::cout << "gridSize: " << splinePrimitiveConfig.gridSize << std::endl;
-    std::cout << "numAngles: " << splinePrimitiveConfig.numAngles << std::endl;
-    std::cout << "numEndAngles: " << splinePrimitiveConfig.numEndAngles << std::endl;
-    std::cout << "destinationCircleRadius: " << splinePrimitiveConfig.destinationCircleRadius << std::endl;
-    std::cout << "cellSkipFactor: " << splinePrimitiveConfig.cellSkipFactor << std::endl;
-    std::cout << "splineOrder: " << splinePrimitiveConfig.splineOrder << std::endl;
-    std::cout << "generateForwardMotions: " << splinePrimitiveConfig.generateForwardMotions << std::endl;
-    std::cout << "generateBackwardMotions: " << splinePrimitiveConfig.generateBackwardMotions << std::endl;
-    std::cout << "generateLateralMotions: " << splinePrimitiveConfig.generateLateralMotions << std::endl;
-    std::cout << "generatePointTurnMotions: " << splinePrimitiveConfig.generatePointTurnMotions << std::endl;
+void PathPlannerNode::printPlannerConfig(){
+
+    RCLCPP_INFO_STREAM(this->get_logger(), "SplinePrimitivesConfig");
+    RCLCPP_INFO_STREAM(this->get_logger(), "gridSize: " << splinePrimitiveConfig.gridSize);
+    RCLCPP_INFO_STREAM(this->get_logger(), "numAngles: " << splinePrimitiveConfig.numAngles);
+    RCLCPP_INFO_STREAM(this->get_logger(), "numEndAngles: " << splinePrimitiveConfig.numEndAngles);
+    RCLCPP_INFO_STREAM(this->get_logger(), "destinationCircleRadius: " << splinePrimitiveConfig.destinationCircleRadius);
+    RCLCPP_INFO_STREAM(this->get_logger(), "cellSkipFactor: " << splinePrimitiveConfig.cellSkipFactor);
+    RCLCPP_INFO_STREAM(this->get_logger(), "splineOrder: " << splinePrimitiveConfig.splineOrder);
+    RCLCPP_INFO_STREAM(this->get_logger(), "generateForwardMotions: " << splinePrimitiveConfig.generateForwardMotions);
+    RCLCPP_INFO_STREAM(this->get_logger(), "generateBackwardMotions: " << splinePrimitiveConfig.generateBackwardMotions);
+    RCLCPP_INFO_STREAM(this->get_logger(), "generateLateralMotions: " << splinePrimitiveConfig.generateLateralMotions);
+    RCLCPP_INFO_STREAM(this->get_logger(), "generatePointTurnMotions: " << splinePrimitiveConfig.generatePointTurnMotions);
 }
 
-bool PathPlannerNode::loadMls(const std::string& path)
-{
+bool PathPlannerNode::loadMls(const std::string& path){
+
     std::ifstream fileIn(path);       
 
     if(path.find(".ply") != std::string::npos)
     {
-        std::cout << "Loading PLY" << std::endl;
+        RCLCPP_INFO_STREAM(this->get_logger(), "Loading PLY");
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
         pcl::PLYReader plyReader;
         if(plyReader.read(path, *cloud) >= 0)
@@ -166,100 +129,183 @@ bool PathPlannerNode::loadMls(const std::string& path)
             pcl::transformPointCloud (*cloud, *cloud, pclTf);
             
             pcl::getMinMax3D (*cloud, mi, ma); 
-            std::cout << "MIN: " << mi << ", MAX: " << ma << std::endl;
+            RCLCPP_INFO_STREAM(this->get_logger(), "MIN: " << mi << ", MAX: " << ma);
         
             const double mls_res = 0.3;
             const double size_x = ma.x;
             const double size_y = ma.y;
             
             const maps::grid::Vector2ui numCells(size_x / mls_res + 1, size_y / mls_res + 1);
-            std::cout << "NUM CELLS: " << numCells << std::endl;
+            RCLCPP_INFO_STREAM(this->get_logger(), "NUM CELLS: " << numCells);
             
             maps::grid::MLSConfig cfg;
             cfg.gapSize = 0.1;
             mlsMap = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
             mlsMap.mergePointCloud(*cloud, base::Transform3d::Identity());
             planner->updateMap(mlsMap);
+            RCLCPP_INFO_STREAM(this->get_logger(), "Loaded Map into Planner");
         }
         return true;
     }
-    std::cerr << "Unabled to load mls. Unknown format" << std::endl;
+    RCLCPP_INFO_STREAM(this->get_logger(), "Unabled to load mls. Unknown format");
     return false;
 }
 
 void PathPlannerNode::plan(){
+
     std::vector<trajectory_follower::SubTrajectory> trajectory2D, trajectory3D;
 
     base::Time time;
-    time.microseconds = 5000000;
+    time.microseconds = get_parameter("planningTime").as_int();
 
-    std::cout << "Planning..." << std::endl;
+    RCLCPP_INFO_STREAM(this->get_logger(), "Planning...");
     ugv_nav4d::Planner::PLANNING_RESULT res = planner->plan(time, start_pose_rbs, goal_pose_rbs, trajectory2D, trajectory3D, false, false);
-    
+
     switch(res)
     {
         case ugv_nav4d::Planner::FOUND_SOLUTION:
-            std::cout << "FOUND_SOLUTION" << std::endl;
+            RCLCPP_INFO_STREAM(this->get_logger(), "FOUND_SOLUTION");
             break;
         case ugv_nav4d::Planner::GOAL_INVALID:
-            std::cout << "GOAL_INVALID" << std::endl;
+            RCLCPP_INFO_STREAM(this->get_logger(), "GOAL_INVALID");
             break;
         case ugv_nav4d::Planner::START_INVALID:
-            std::cout << "START_INVALID" << std::endl;
+            RCLCPP_INFO_STREAM(this->get_logger(), "START_INVALID");
             break;
         case ugv_nav4d::Planner::INTERNAL_ERROR:
-            std::cout << "INTERNAL_ERROR" << std::endl;
+            RCLCPP_INFO_STREAM(this->get_logger(), "INTERNAL_ERROR");
             break;
         case ugv_nav4d::Planner::NO_SOLUTION:
-            std::cout << "NO_SOLUTION" << std::endl;
+            RCLCPP_INFO_STREAM(this->get_logger(), "NO_SOLUTION");
             break;
         case ugv_nav4d::Planner::NO_MAP:
-            std::cout << "NO_MAP" << std::endl;
+            RCLCPP_INFO_STREAM(this->get_logger(), "NO_MAP");
             break;
+    }
+
+    nav_msgs::msg::Path path_message;
+
+    if (res == ugv_nav4d::Planner::FOUND_SOLUTION){
+        for (auto& trajectory : trajectory3D){
+            base::Pose2D start_pose = trajectory.getStartPose();
+            base::Pose2D goal_pose  = trajectory.getGoalPose();
+
+            // Fill current path point to a temporary variable.
+            geometry_msgs::msg::PoseStamped tempPoint;
+            tempPoint.pose.position.x= goal_pose.position.x();
+            tempPoint.pose.position.y= goal_pose.position.y();
+            tempPoint.pose.position.z= get_parameter("distToGround").as_double();
+
+                  // Add points to path.
+            path_message.header.frame_id = "map";
+            path_message.poses.push_back(tempPoint);
+        }
+        path_publisher->publish(path_message);
+        RCLCPP_INFO_STREAM(this->get_logger(), "Published Path...");
     }
 }
 
-void PathPlannerNode::setupPlanner()
-{
-    double res = 0.3;
+void PathPlannerNode::declareParameters(){
 
-    splinePrimitiveConfig.gridSize = res;
-    splinePrimitiveConfig.numAngles = 24;
-    splinePrimitiveConfig.numEndAngles = 12;
-    splinePrimitiveConfig.destinationCircleRadius = 5;
-    splinePrimitiveConfig.cellSkipFactor = 1.0;
-    splinePrimitiveConfig.generatePointTurnMotions = true;
-    splinePrimitiveConfig.generateLateralMotions = false;
-    splinePrimitiveConfig.generateBackwardMotions = true;
-    splinePrimitiveConfig.splineOrder = 4;
+    declare_parameter("robot_frame", "robot");
+    declare_parameter("world_frame", "map");
+    declare_parameter("grid_resolution", 0.3);
+
+    declare_parameter("dumpOnError", 0);
+    declare_parameter("dumpOnSuccess", 0);
+    declare_parameter("initialPatchRadius", 3.0);
+
+    declare_parameter("maxMotionCurveLength", 100.0);
+    declare_parameter("minTurningRadius", 1.0);
+    declare_parameter("multiplierBackward", 3.0);
+    declare_parameter("multiplierBackwardTurn", 4.0);
+    declare_parameter("multiplierForward", 1.0);
+    declare_parameter("multiplierForwardTurn", 2.0);
+    declare_parameter("multiplierLateral", 4.0);
+    declare_parameter("multiplierLateralCurve", 4.0);
+    declare_parameter("multiplierPointTurn", 3.0);
+    declare_parameter("rotationSpeed", 1.0);
+    declare_parameter("searchProgressSteps", 0.1);
+    declare_parameter("searchRadius", 0.0);
+    declare_parameter("translationSpeed", 1.0);
+
+    declare_parameter("epsilonSteps", 2);
+    declare_parameter("initialEpsilon", 64);
+    declare_parameter("numThreads", 8);
+    declare_parameter("planningTime", 50000000); // microseconds
+
+    declare_parameter("cellSkipFactor", 3);
+    declare_parameter("destinationCircleRadius", 10);
+    declare_parameter("generateBackwardMotions", true);
+    declare_parameter("generateForwardMotions", true);
+    declare_parameter("generateLateralMotions", false);
+    declare_parameter("generatePointTurnMotions", true);
+    declare_parameter("numAngles", 42);
+    declare_parameter("numEndAngles", 21);
+    declare_parameter("splineOrder", 4);
+
+    declare_parameter("allowForwardDownhill", true);
+    declare_parameter("costFunctionDist", 0.0);
+    declare_parameter("distToGround", 0.0);
+    declare_parameter("enableInclineLimitting", true);
+    declare_parameter("inclineLimittingLimit", 0.1);
+    declare_parameter("inclineLimittingMinSlope", 0.2);
+    declare_parameter("initialPatchVariance", 0.0001);
+    declare_parameter("maxSlope", 0.45);
+    declare_parameter("maxStepHeight", 0.2);
+    declare_parameter("minTraversablePercentage", 0.4);
+    declare_parameter("robotHeight", 1.7);
+    declare_parameter("robotSizeX", 0.80);
+    declare_parameter("robotSizeY", 0.80);
+    //declare_parameter("slopeMetric", :NONE);
+    declare_parameter("slopeMetricScale", 1.0);    
+}
+
+void PathPlannerNode::updateParameters(){
+
+    splinePrimitiveConfig.gridSize                 = get_parameter("grid_resolution").as_double();
+    splinePrimitiveConfig.numAngles                = get_parameter("numAngles").as_int();
+    splinePrimitiveConfig.numEndAngles             = get_parameter("numEndAngles").as_int();
+    splinePrimitiveConfig.destinationCircleRadius  = get_parameter("destinationCircleRadius").as_int();
+    splinePrimitiveConfig.cellSkipFactor           = get_parameter("cellSkipFactor").as_int();
+    splinePrimitiveConfig.generateForwardMotions   = get_parameter("generateForwardMotions").as_bool();
+    splinePrimitiveConfig.generatePointTurnMotions = get_parameter("generatePointTurnMotions").as_bool();
+    splinePrimitiveConfig.generateLateralMotions   = get_parameter("generateLateralMotions").as_bool();
+    splinePrimitiveConfig.generateBackwardMotions  = get_parameter("generateBackwardMotions").as_bool();
+    splinePrimitiveConfig.splineOrder              = get_parameter("splineOrder").as_int();
     
-    mobility.translationSpeed = 0.2;
-    mobility.rotationSpeed = 0.6;
-    mobility.minTurningRadius = 0.2; // increase this to reduce the number of available motion primitives
-    mobility.searchRadius = 0.0;
-    mobility.multiplierForward = 1;
-    mobility.multiplierBackward = 1;
-    mobility.multiplierLateral = 3;
-    mobility.multiplierBackwardTurn = 1;
-    mobility.multiplierForwardTurn = 1;
-    mobility.multiplierPointTurn = 3;
+    mobility.translationSpeed                      = get_parameter("translationSpeed").as_double();
+    mobility.rotationSpeed                         = get_parameter("rotationSpeed").as_double();
+    mobility.minTurningRadius                      = get_parameter("minTurningRadius").as_double();
+    mobility.searchRadius                          = get_parameter("searchRadius").as_double();
+    mobility.multiplierForward                     = get_parameter("multiplierForward").as_double();
+    mobility.multiplierBackward                    = get_parameter("multiplierBackward").as_double();
+    mobility.multiplierLateral                     = get_parameter("multiplierLateral").as_double();
+    mobility.multiplierBackwardTurn                = get_parameter("multiplierBackwardTurn").as_double();
+    mobility.multiplierForwardTurn                 = get_parameter("multiplierForwardTurn").as_double();
+    mobility.multiplierPointTurn                   = get_parameter("multiplierPointTurn").as_double();
      
-    traversabilityConfig.gridResolution = res;
-    traversabilityConfig.maxSlope = 0.57; //40.0/180.0 * M_PI;
-    traversabilityConfig.maxStepHeight = 0.3; //space below robot
-    traversabilityConfig.robotSizeX = 0.9;
-    traversabilityConfig.robotSizeY =  0.5;
-    traversabilityConfig.robotHeight = 0.9; //incl space below body
-    traversabilityConfig.slopeMetricScale = 0.0;
+    traversabilityConfig.gridResolution            = get_parameter("grid_resolution").as_double();
+    traversabilityConfig.maxSlope                  = get_parameter("maxSlope").as_double();
+    traversabilityConfig.maxStepHeight             = get_parameter("maxStepHeight").as_double();
+    traversabilityConfig.robotSizeX                = get_parameter("robotSizeX").as_double();
+    traversabilityConfig.robotSizeY                = get_parameter("robotSizeY").as_double();
+    traversabilityConfig.robotHeight               = get_parameter("robotHeight").as_double();
+    traversabilityConfig.slopeMetricScale          = get_parameter("slopeMetricScale").as_double();
     traversabilityConfig.slopeMetric = traversability_generator3d::SlopeMetric::NONE;
-    traversabilityConfig.inclineLimittingMinSlope = 0.22; // 10.0 * M_PI/180.0;
-    traversabilityConfig.inclineLimittingLimit = 0.43;// 5.0 * M_PI/180.0;
-    traversabilityConfig.costFunctionDist = 0.0;
-    traversabilityConfig.distToGround = 0.0;
-    traversabilityConfig.minTraversablePercentage = 0.5;
-    traversabilityConfig.allowForwardDownhill = true;
+    traversabilityConfig.inclineLimittingMinSlope  = get_parameter("inclineLimittingMinSlope").as_double(); 
+    traversabilityConfig.inclineLimittingLimit     = get_parameter("inclineLimittingLimit").as_double();
+    traversabilityConfig.costFunctionDist          = get_parameter("costFunctionDist").as_double();
+    traversabilityConfig.distToGround              = get_parameter("distToGround").as_double();
+    traversabilityConfig.minTraversablePercentage  = get_parameter("minTraversablePercentage").as_double();
+    traversabilityConfig.allowForwardDownhill      = get_parameter("allowForwardDownhill").as_bool();
 
-    plannerConfig.epsilonSteps = 2.0;
-    plannerConfig.initialEpsilon = 20.0;
-    plannerConfig.numThreads = 4;    
+    plannerConfig.epsilonSteps                     = get_parameter("epsilonSteps").as_int();
+    plannerConfig.initialEpsilon                   = get_parameter("initialEpsilon").as_int();
+    plannerConfig.numThreads                       = get_parameter("numThreads").as_int(); 
+}
+
+void PathPlannerNode::configurePlanner(){
+    updateParameters();
+    planner.reset(new ugv_nav4d::Planner(splinePrimitiveConfig, traversabilityConfig, mobility, plannerConfig));
 }

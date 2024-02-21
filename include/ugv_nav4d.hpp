@@ -5,9 +5,9 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/buffer.h>
-
 
 #include <ugv_nav4d/Planner.hpp>
 #include <maps/grid/MLSMap.hpp>
@@ -20,13 +20,20 @@ public:
 private:
     bool read_pose_samples();
     void process_goal_request(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
-    void printConfigs();
+    void printPlannerConfig();
     bool loadMls(const std::string& path);
+    void declareParameters();
+    void updateParameters();
+    void configurePlanner();
     void plan();
-    void setupPlanner();
+
+    std::shared_ptr<rclcpp::ParameterEventHandler> param_subscriber;
+    std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle;
 
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_goal_pose;
     rclcpp::TimerBase::SharedPtr timer_pose_samples;
+
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_publisher;
 
     std::shared_ptr<tf2_ros::TransformListener> tf_listener{nullptr};
     std::unique_ptr<tf2_ros::Buffer> tf_buffer;
@@ -44,8 +51,5 @@ private:
     base::samples::RigidBodyState goal_pose_rbs;
 
     maps::grid::MLSMapSloped mlsMap;
-
-
-
 };
 
