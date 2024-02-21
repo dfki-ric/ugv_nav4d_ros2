@@ -1,0 +1,14 @@
+# - Config file for the ugv_nav4d_ros2 package
+# It defines the following variables
+#  ugv_nav4d_ros2_INCLUDE_DIRS - include directories for FooBar
+#  ugv_nav4d_ros2_LIBRARIES    - libraries to link against
+#  ugv_nav4d_ros2_EXECUTABLE   - the bar executable
+
+set(ugv_nav4d_ros2_INCLUDE_DIRS "@CONF_INCLUDE_DIRS@")
+
+# Our library dependencies (contains definitions for IMPORTED targets)
+include("${ugv_nav4d_ros2_DIR}/export_ugv_nav4d_ros2.cmake")
+
+# These are IMPORTED targets created by ugv_nav4d_ros2Targets.cmake
+
+
