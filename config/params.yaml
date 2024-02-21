@@ -2,21 +2,22 @@ ugv_nav4d_node:
   ros__parameters:
     robot_frame: robot
     world_frame: map
+    grid_resolution: 0.3
     dumpOnError: 0
     dumpOnSuccess: 0
     initialPatchRadius: 3.0
 #    maxTime:
     microseconds: 50000000
 #    mobilityConfig:
-    maxMotionCurveLength: 100
-    minTurningRadius: 1
-    multiplierBackward: 3
-    multiplierBackwardTurn: 4
-    multiplierForward: 1
-    multiplierForwardTurn: 2
-    multiplierLateral: 4
-    multiplierLateralCurve: 4
-    multiplierPointTurn: 3
+    maxMotionCurveLength: 100.0
+    minTurningRadius: 1.0
+    multiplierBackward: 3.0
+    multiplierBackwardTurn: 4.0
+    multiplierForward: 1.0
+    multiplierForwardTurn: 2.0
+    multiplierLateral: 4.0
+    multiplierLateralCurve: 4.0
+    multiplierPointTurn: 3.0
     rotationSpeed: 1.0
     searchProgressSteps: 0.1
     searchRadius: 0.0
@@ -28,20 +29,18 @@ ugv_nav4d_node:
 #    primConfig:
     cellSkipFactor: 3
     destinationCircleRadius: 10
-    generateBackwardMotions: false
+    generateBackwardMotions: true
     generateForwardMotions: true
     generateLateralMotions: false
     generatePointTurnMotions: true
-    gridSize: 0.3
     numAngles: 42
     numEndAngles: 21
-    splineOrder: 4.0
+    splineOrder: 4
 #    travConfig:
     allowForwardDownhill: true
     costFunctionDist: 0.0
     distToGround: 0.0
     enableInclineLimitting: false
-    gridResolution: 0.3
     inclineLimittingLimit: 0.1
     inclineLimittingMinSlope: 0.2
     initialPatchVariance: 0.0001
