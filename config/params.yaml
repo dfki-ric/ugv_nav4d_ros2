@@ -1,14 +1,14 @@
 ugv_nav4d_node:
   ros__parameters:
+    #Frame names to get the TF Transform robot2map
     robot_frame: robot
     world_frame: map
+    #Grid resolution used for primitive and trversability parameters
     grid_resolution: 0.3
     dumpOnError: 0
     dumpOnSuccess: 0
     initialPatchRadius: 3.0
-#    maxTime:
-    microseconds: 50000000
-#    mobilityConfig:
+    #Mobility Parameters
     maxMotionCurveLength: 100.0
     minTurningRadius: 1.0
     multiplierBackward: 3.0
@@ -21,12 +21,13 @@ ugv_nav4d_node:
     rotationSpeed: 1.0
     searchProgressSteps: 0.1
     searchRadius: 0.0
-    translationSpeed: 1.0
-#    plannerConfig:
+    translationSpeed: 1.0   
+    #Planner Parameters
     epsilonSteps: 2
     initialEpsilon: 64
     numThreads: 8
-#    primConfig:
+    planningTime: 50000000
+    #Motion Primitive Parameters:
     cellSkipFactor: 3
     destinationCircleRadius: 10
     generateBackwardMotions: true
@@ -36,7 +37,7 @@ ugv_nav4d_node:
     numAngles: 42
     numEndAngles: 21
     splineOrder: 4
-#    travConfig:
+    #Traversability Parameters:
     allowForwardDownhill: true
     costFunctionDist: 0.0
     distToGround: 0.0
