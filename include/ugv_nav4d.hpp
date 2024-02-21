@@ -1,5 +1,8 @@
 #pragma once
 
+#include <memory>
+#include <Eigen/Dense>
+
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <tf2_ros/transform_listener.h>
@@ -7,6 +10,7 @@
 
 
 #include <ugv_nav4d/Planner.hpp>
+#include <maps/grid/MLSMap.hpp>
 
 class PathPlannerNode: public rclcpp::Node
 {
@@ -15,8 +19,11 @@ public:
 
 private:
     bool read_pose_samples();
-    void process_goal_request(const geometry_msgs::msg::PoseStamped::SharedPtr msg) const;
+    void process_goal_request(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
     void printConfigs();
+    bool loadMls(const std::string& path);
+    void plan();
+    void setupPlanner();
 
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_goal_pose;
     rclcpp::TimerBase::SharedPtr timer_pose_samples;
@@ -32,13 +39,13 @@ private:
     geometry_msgs::msg::PoseStamped pose_samples;
     geometry_msgs::msg::PoseStamped goal_pose;
 
-    std::string robot_frame;
-    std::string map_frame;
+    std::unique_ptr<ugv_nav4d::Planner> planner;
+    base::samples::RigidBodyState start_pose_rbs;
+    base::samples::RigidBodyState goal_pose_rbs;
 
-    base::Time maxTime;
-    double initialPatchRadius;
-    double recoveryTimeOut;
-    int dumpOnError;
-    int dumpOnSuccess;
+    maps::grid::MLSMapSloped mlsMap;
+
+
+
 };
 

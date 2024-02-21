@@ -12,36 +12,43 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 # find dependencies
+find_package(Boost REQUIRED COMPONENTS system filesystem serialization)
+#find_package(PCL 1.7 REQUIRED COMPONENTS io common)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ugv_nav4d REQUIRED IMPORTED_TARGET ugv_nav4d)
 
-find_package(Eigen3 3.3 REQUIRED NO_MODULE)
-find_package(ament_cmake REQUIRED)
-find_package(rclcpp REQUIRED)
-find_package(rclcpp_components REQUIRED)
-find_package(std_msgs REQUIRED)
-find_package(geometry_msgs REQUIRED)
-find_package(sensor_msgs REQUIRED)
-find_package(tf2_ros REQUIRED)
-find_package(tf2_geometry_msgs REQUIRED)
-find_package(Boost REQUIRED COMPONENTS system filesystem serialization)
+set(THIS_PACKAGE_INCLUDE_DEPENDS
+  ament_cmake
+  Eigen3
+  rclcpp
+  rclcpp_components
+  tf2_geometry_msgs
+  std_msgs
+  geometry_msgs
+  sensor_msgs
+  tf2_ros
+)
+
+foreach(Dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
+  find_package(${Dependency} REQUIRED)
+endforeach()
 
 # Define the source files for your library
 set(SOURCES
   src/ugv_nav4d.cpp
 )
 
-add_library(ugv_nav4d_ros2 SHARED ${SOURCES})
+add_library(${PROJECT_NAME} SHARED ${SOURCES})
 
-ament_target_dependencies(ugv_nav4d_ros2 geometry_msgs std_msgs rclcpp rclcpp_components tf2_ros tf2_geometry_msgs)
+ament_target_dependencies(${PROJECT_NAME}  ${THIS_PACKAGE_INCLUDE_DEPENDS})
 
-target_include_directories(ugv_nav4d_ros2 PUBLIC 
+target_include_directories(${PROJECT_NAME} PUBLIC 
   ${ugv_nav4d_INCLUDE_DIRS} 
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
 
-target_link_libraries(ugv_nav4d_ros2
+target_link_libraries(${PROJECT_NAME}
   ${ugv_nav4d_LDFLAGS}
   Eigen3::Eigen
 )
@@ -50,10 +57,10 @@ add_executable(ugv_nav4d_node
 	src/ugv_nav4d_node.cpp
 )
 target_link_libraries(ugv_nav4d_node PRIVATE
-    ugv_nav4d_ros2
+  ${PROJECT_NAME}
 )
 
-install(TARGETS ugv_nav4d_ros2
+install(TARGETS ${PROJECT_NAME}
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
@@ -63,7 +70,8 @@ install(
 	DESTINATION lib/${PROJECT_NAME}
 )
 
+install(DIRECTORY config
+  DESTINATION share/${PROJECT_NAME}
+)
+
 ament_package()
-# uncomment the following section in order to fill in
-# further dependencies manually.
-# find_package(<dependency> REQUIRED)
