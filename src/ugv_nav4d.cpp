@@ -14,6 +14,9 @@ PathPlannerNode::PathPlannerNode()
 }
 
 bool PathPlannerNode::read_pose_samples(){
+
+    printConfigs();
+
     try{
         geometry_msgs::msg::TransformStamped t = tf_buffer->lookupTransform(map_frame, robot_frame, tf2::TimePointZero);
         pose_samples.pose.orientation = t.transform.rotation;
@@ -24,9 +27,23 @@ bool PathPlannerNode::read_pose_samples(){
     catch(const tf2::TransformException & ex){
         return false;
     }
-    return true;
+    return true;    
 }
 
 void PathPlannerNode::process_goal_request(const geometry_msgs::msg::PoseStamped::SharedPtr msg) const
 {
+}
+
+void PathPlannerNode::printConfigs(){
+    std::cout << "SplinePrimitivesConfig: " << std::endl;
+    std::cout << "gridSize: " << splinePrimitiveConfig.gridSize << std::endl;
+    std::cout << "numAngles: " << splinePrimitiveConfig.numAngles << std::endl;
+    std::cout << "numEndAngles: " << splinePrimitiveConfig.numEndAngles << std::endl;
+    std::cout << "destinationCircleRadius: " << splinePrimitiveConfig.destinationCircleRadius << std::endl;
+    std::cout << "cellSkipFactor: " << splinePrimitiveConfig.cellSkipFactor << std::endl;
+    std::cout << "splineOrder: " << splinePrimitiveConfig.splineOrder << std::endl;
+    std::cout << "generateForwardMotions: " << splinePrimitiveConfig.generateForwardMotions << std::endl;
+    std::cout << "generateBackwardMotions: " << splinePrimitiveConfig.generateBackwardMotions << std::endl;
+    std::cout << "generateLateralMotions: " << splinePrimitiveConfig.generateLateralMotions << std::endl;
+    std::cout << "generatePointTurnMotions: " << splinePrimitiveConfig.generatePointTurnMotions << std::endl;
 }

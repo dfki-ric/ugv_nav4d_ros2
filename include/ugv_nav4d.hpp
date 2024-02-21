@@ -16,6 +16,7 @@ public:
 private:
     bool read_pose_samples();
     void process_goal_request(const geometry_msgs::msg::PoseStamped::SharedPtr msg) const;
+    void printConfigs();
 
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_goal_pose;
     rclcpp::TimerBase::SharedPtr timer_pose_samples;

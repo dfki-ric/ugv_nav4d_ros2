@@ -37,7 +37,8 @@ ament_target_dependencies(ugv_nav4d_ros2 geometry_msgs std_msgs rclcpp rclcpp_co
 
 target_include_directories(ugv_nav4d_ros2 PUBLIC 
   ${ugv_nav4d_INCLUDE_DIRS} 
-  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
 )
 
 target_link_libraries(ugv_nav4d_ros2
@@ -52,8 +53,13 @@ target_link_libraries(ugv_nav4d_node PRIVATE
     ugv_nav4d_ros2
 )
 
+install(TARGETS ugv_nav4d_ros2
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+
 install(
-	TARGETS ugv_nav4d_node ugv_nav4d_ros2
+	TARGETS ugv_nav4d_node 
 	DESTINATION lib/${PROJECT_NAME}
 )
 
