@@ -5,7 +5,9 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/point.hpp>
 #include <nav_msgs/msg/path.hpp>
+#include <nav_msgs/msg/grid_cells.hpp>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/buffer.h>
 
@@ -28,6 +30,7 @@ private:
     void declareParameters();
     void updateParameters();
     void configurePlanner();
+    void publishTravMap();
 
     //subscriptions
     std::shared_ptr<rclcpp::ParameterEventHandler> param_subscriber;
@@ -39,6 +42,7 @@ private:
 
     //publishers
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_publisher;
+    rclcpp::Publisher<nav_msgs::msg::GridCells>::SharedPtr trav_map_publisher;
 
     //tf
     std::shared_ptr<tf2_ros::TransformListener> tf_listener{nullptr};

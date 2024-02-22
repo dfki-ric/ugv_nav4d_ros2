@@ -34,6 +34,7 @@ PathPlannerNode::PathPlannerNode()
 
     cb_handle = param_subscriber->add_parameter_callback("param_subscriber", cb);
     path_publisher = this->create_publisher<nav_msgs::msg::Path>("/ugv_nav4d/path", 10);
+    trav_map_publisher = this->create_publisher<nav_msgs::msg::GridCells>("/ugv_nav4d/traversability_map", 10);
 
     declareParameters();
     configurePlanner();
@@ -143,13 +144,14 @@ bool PathPlannerNode::loadMls(const std::string& path){
             const double size_x = ma.x;
             const double size_y = ma.y;
             
-            const maps::grid::Vector2ui numCells(size_x / mls_res + 1, size_y / mls_res + 1);
-            RCLCPP_INFO_STREAM(this->get_logger(), "NUM CELLS: " << numCells);
-            
             maps::grid::MLSConfig cfg;
             cfg.gapSize = get_parameter("grid_resolution").as_double();
+            const maps::grid::Vector2ui numCells(size_x / mls_res + 1, size_y / mls_res + 1);
             mlsMap = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
             mlsMap.mergePointCloud(*cloud, base::Transform3d::Identity());
+            RCLCPP_INFO_STREAM(this->get_logger(), "MLS Resolution: " << get_parameter("grid_resolution").as_double());
+            RCLCPP_INFO_STREAM(this->get_logger(), "NUM CELLS: " << numCells);
+            RCLCPP_INFO_STREAM(this->get_logger(), "Cloud Points: " << cloud->size());
             RCLCPP_INFO_STREAM(this->get_logger(), "Generated MLS Map. Loading the Map into Planner...");
             planner->updateMap(mlsMap);
             RCLCPP_INFO_STREAM(this->get_logger(), "Loaded Map into Planner");
@@ -220,6 +222,7 @@ void PathPlannerNode::plan(){
         path_publisher->publish(path_message);
         RCLCPP_INFO_STREAM(this->get_logger(), "Published Path...");
     }
+    publishTravMap();
 }
 
 void PathPlannerNode::declareParameters(){
@@ -328,4 +331,33 @@ void PathPlannerNode::updateParameters(){
 void PathPlannerNode::configurePlanner(){
     updateParameters();
     planner.reset(new ugv_nav4d::Planner(splinePrimitiveConfig, traversabilityConfig, mobility, plannerConfig));
+}
+
+void PathPlannerNode::publishTravMap(){
+
+    RCLCPP_INFO_STREAM(this->get_logger(), "Getting Traversability Map");
+    const auto& trav_map_3d = planner->getTraversabilityMap(); 
+
+    nav_msgs::msg::GridCells grid_map;
+    grid_map.header.frame_id = get_parameter("world_frame").as_string();
+    grid_map.cell_height = trav_map_3d.getResolution().x();
+    grid_map.cell_width  = trav_map_3d.getResolution().y();
+
+    RCLCPP_INFO_STREAM(this->get_logger(), "Reading Traversability Map");
+    for(const maps::grid::LevelList<traversability_generator3d::TravGenNode *> &l : trav_map_3d)
+    {
+        for(const traversability_generator3d::TravGenNode *n : l)
+        {
+            RCLCPP_INFO_STREAM(this->get_logger(), "Found a patch");
+            const Eigen::Vector3d& position = n->getVec3(trav_map_3d.getResolution().x());
+            geometry_msgs::msg::Point cell_center;
+            cell_center.x = position.x();
+            cell_center.y = position.y();
+            cell_center.z = position.z();
+            grid_map.cells.push_back(cell_center);
+        }
+    }
+    RCLCPP_INFO_STREAM(this->get_logger(), "Publishing Traversability Map...");
+    trav_map_publisher->publish(grid_map);
+    RCLCPP_INFO_STREAM(this->get_logger(), "Published Traversability Map");
 }
