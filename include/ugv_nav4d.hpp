@@ -22,10 +22,10 @@ private:
     void process_goal_request(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
     void printPlannerConfig();
     bool loadMls(const std::string& path);
+    void plan();
     void declareParameters();
     void updateParameters();
     void configurePlanner();
-    void plan();
 
     std::shared_ptr<rclcpp::ParameterEventHandler> param_subscriber;
     std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle;
@@ -51,5 +51,6 @@ private:
     base::samples::RigidBodyState goal_pose_rbs;
 
     maps::grid::MLSMapSloped mlsMap;
+    bool initialPatchAdded;
 };
 

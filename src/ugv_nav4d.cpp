@@ -36,7 +36,7 @@ PathPlannerNode::PathPlannerNode()
 
     declareParameters();
     configurePlanner();
-    loadMls("/opt/workspace/src/planning/ugv_nav4d/test_data/Plane1Mio.ply");
+    loadMls(get_parameter("map_ply_path").as_string());
 }
 
 bool PathPlannerNode::read_pose_samples(){
@@ -115,7 +115,7 @@ bool PathPlannerNode::loadMls(const std::string& path){
 
     if(path.find(".ply") != std::string::npos)
     {
-        RCLCPP_INFO_STREAM(this->get_logger(), "Loading PLY");
+        RCLCPP_INFO_STREAM(this->get_logger(), "Loading PLY: " << get_parameter("map_ply_path").as_string());
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
         pcl::PLYReader plyReader;
         if(plyReader.read(path, *cloud) >= 0)
@@ -154,9 +154,15 @@ bool PathPlannerNode::loadMls(const std::string& path){
 void PathPlannerNode::plan(){
 
     std::vector<trajectory_follower::SubTrajectory> trajectory2D, trajectory3D;
-
     base::Time time;
     time.microseconds = get_parameter("planningTime").as_int();
+
+    if(!initialPatchAdded)
+    {
+        RCLCPP_INFO_STREAM(this->get_logger(), "Setting Initial Patch of size: " << get_parameter("initialPatchRadius").as_double());
+        planner->setInitialPatch(start_pose_rbs.getTransform(), get_parameter("initialPatchRadius").as_double());
+        initialPatchAdded = true;
+    }
 
     RCLCPP_INFO_STREAM(this->get_logger(), "Planning...");
     ugv_nav4d::Planner::PLANNING_RESULT res = planner->plan(time, start_pose_rbs, goal_pose_rbs, trajectory2D, trajectory3D, false, false);
@@ -185,6 +191,7 @@ void PathPlannerNode::plan(){
 
     nav_msgs::msg::Path path_message;
 
+    //Publish path if a solution is found
     if (res == ugv_nav4d::Planner::FOUND_SOLUTION){
         for (auto& trajectory : trajectory3D){
             base::Pose2D start_pose = trajectory.getStartPose();
@@ -196,7 +203,7 @@ void PathPlannerNode::plan(){
             tempPoint.pose.position.y= goal_pose.position.y();
             tempPoint.pose.position.z= get_parameter("distToGround").as_double();
 
-                  // Add points to path.
+            // Add points to path.
             path_message.header.frame_id = "map";
             path_message.poses.push_back(tempPoint);
         }
@@ -206,6 +213,8 @@ void PathPlannerNode::plan(){
 }
 
 void PathPlannerNode::declareParameters(){
+
+    declare_parameter("map_ply_path", "default_value");
 
     declare_parameter("robot_frame", "robot");
     declare_parameter("world_frame", "map");

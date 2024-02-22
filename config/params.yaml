@@ -1,5 +1,6 @@
 ugv_nav4d_node:
   ros__parameters:
+    map_ply_path: "/opt/workspace/src/planning/ugv_nav4d/test_data/Plane1Mio.ply"
     #Frame names to get the TF Transform robot2map
     robot_frame: robot
     world_frame: map
