@@ -7,6 +7,7 @@
 #include <fstream>
 
 using namespace rclcpp;
+using namespace ugv_nav4d_ros2;
 
 PathPlannerNode::PathPlannerNode()
     : Node("ugv_nav4d_node")
@@ -22,7 +23,7 @@ PathPlannerNode::PathPlannerNode()
     // (for this node's parameters as well as other nodes' parameters)
     param_subscriber = std::make_shared<rclcpp::ParameterEventHandler>(this);
 
-    // Set a callback for this node's integer parameter, "an_int_param"
+    // Set a callback for this node's parameter updates
     auto cb = [this](const rclcpp::Parameter & p) {
         RCLCPP_INFO(
           this->get_logger(), "cb: Received an update to parameter \"%s\" of type %s: \"%ld\"",
@@ -36,13 +37,19 @@ PathPlannerNode::PathPlannerNode()
 
     declareParameters();
     configurePlanner();
-    loadMls(get_parameter("map_ply_path").as_string());
+    if (get_parameter("map_ply_path").as_string() != "default_value"){
+        //Load map from file only when user explicity sets the parameter
+        loadMls(get_parameter("map_ply_path").as_string());
+    }
+    else{
+        //TODO: Need to get a map over a topic
+    }
 }
 
 bool PathPlannerNode::read_pose_samples(){
 
     /*
-    printConfigs();
+    //printConfigs();
 
     std::string robot_frame = get_parameter("robot_frame").as_string();
     std::string map_frame = get_parameter("map_frame").as_string();
@@ -59,7 +66,7 @@ bool PathPlannerNode::read_pose_samples(){
     }
     */
 
-       //Dummy start for the time being
+    //Dummy start for the time being
     pose_samples.pose.position.x = 2;
     pose_samples.pose.position.y = 2;
     pose_samples.pose.position.z = 0;
@@ -96,6 +103,7 @@ void PathPlannerNode::process_goal_request(const geometry_msgs::msg::PoseStamped
 
 void PathPlannerNode::printPlannerConfig(){
 
+    //TODO: Add other config params to printout
     RCLCPP_INFO_STREAM(this->get_logger(), "SplinePrimitivesConfig");
     RCLCPP_INFO_STREAM(this->get_logger(), "gridSize: " << splinePrimitiveConfig.gridSize);
     RCLCPP_INFO_STREAM(this->get_logger(), "numAngles: " << splinePrimitiveConfig.numAngles);
@@ -198,6 +206,7 @@ void PathPlannerNode::plan(){
             base::Pose2D goal_pose  = trajectory.getGoalPose();
 
             // Fill current path point to a temporary variable.
+            //TODO: Set the z path to the patch height to get a 3D Trajectory
             geometry_msgs::msg::PoseStamped tempPoint;
             tempPoint.pose.position.x= goal_pose.position.x();
             tempPoint.pose.position.y= goal_pose.position.y();
@@ -301,6 +310,7 @@ void PathPlannerNode::updateParameters(){
     traversabilityConfig.robotSizeY                = get_parameter("robotSizeY").as_double();
     traversabilityConfig.robotHeight               = get_parameter("robotHeight").as_double();
     traversabilityConfig.slopeMetricScale          = get_parameter("slopeMetricScale").as_double();
+    //TODO: How can an enum be used in the parameter config? (Probably Int to Enum cast works)
     traversabilityConfig.slopeMetric = traversability_generator3d::SlopeMetric::NONE;
     traversabilityConfig.inclineLimittingMinSlope  = get_parameter("inclineLimittingMinSlope").as_double(); 
     traversabilityConfig.inclineLimittingLimit     = get_parameter("inclineLimittingLimit").as_double();
