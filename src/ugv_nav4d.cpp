@@ -139,7 +139,7 @@ bool PathPlannerNode::loadMls(const std::string& path){
             pcl::getMinMax3D (*cloud, mi, ma); 
             RCLCPP_INFO_STREAM(this->get_logger(), "MIN: " << mi << ", MAX: " << ma);
         
-            const double mls_res = 0.3;
+            const double mls_res = get_parameter("grid_resolution").as_double();
             const double size_x = ma.x;
             const double size_y = ma.y;
             
@@ -147,9 +147,10 @@ bool PathPlannerNode::loadMls(const std::string& path){
             RCLCPP_INFO_STREAM(this->get_logger(), "NUM CELLS: " << numCells);
             
             maps::grid::MLSConfig cfg;
-            cfg.gapSize = 0.1;
+            cfg.gapSize = get_parameter("grid_resolution").as_double();
             mlsMap = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
             mlsMap.mergePointCloud(*cloud, base::Transform3d::Identity());
+            RCLCPP_INFO_STREAM(this->get_logger(), "Generated MLS Map. Loading the Map into Planner...");
             planner->updateMap(mlsMap);
             RCLCPP_INFO_STREAM(this->get_logger(), "Loaded Map into Planner");
         }
