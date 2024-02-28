@@ -12,6 +12,8 @@ using namespace ugv_nav4d_ros2;
 PathPlannerNode::PathPlannerNode()
     : Node("ugv_nav4d_node")
 {
+    declareParameters();
+
     // controller feedback (via TF)
     tf_buffer = std::make_unique<tf2_ros::Buffer>(this->get_clock());
     tf_listener = std::make_shared<tf2_ros::TransformListener>(*tf_buffer);
@@ -36,7 +38,6 @@ PathPlannerNode::PathPlannerNode()
     path_publisher = this->create_publisher<nav_msgs::msg::Path>("/ugv_nav4d/path", 10);
     trav_map_publisher = this->create_publisher<nav_msgs::msg::GridCells>("/ugv_nav4d/traversability_map", 10);
 
-    declareParameters();
     configurePlanner();
     if (get_parameter("map_ply_path").as_string() != "default_value"){
         //Load map from file only when user explicity sets the parameter
@@ -49,14 +50,12 @@ PathPlannerNode::PathPlannerNode()
 
 bool PathPlannerNode::read_pose_samples(){
 
-    /*
     //printConfigs();
-
     std::string robot_frame = get_parameter("robot_frame").as_string();
-    std::string map_frame = get_parameter("map_frame").as_string();
+    std::string world_frame = get_parameter("world_frame").as_string();
 
     try{
-        geometry_msgs::msg::TransformStamped t = tf_buffer->lookupTransform(map_frame, robot_frame, tf2::TimePointZero);
+        geometry_msgs::msg::TransformStamped t = tf_buffer->lookupTransform(world_frame, robot_frame, tf2::TimePointZero);
         pose_samples.pose.orientation = t.transform.rotation;
         pose_samples.pose.position.x =  t.transform.translation.x;
         pose_samples.pose.position.y =  t.transform.translation.y;
@@ -65,18 +64,6 @@ bool PathPlannerNode::read_pose_samples(){
     catch(const tf2::TransformException & ex){
         return false;
     }
-    */
-
-    //Dummy start for the time being
-    pose_samples.pose.position.x = 2;
-    pose_samples.pose.position.y = 2;
-    pose_samples.pose.position.z = 0;
-
-    pose_samples.pose.orientation.w = 1;
-    pose_samples.pose.orientation.x = 0;
-    pose_samples.pose.orientation.y = 0;
-    pose_samples.pose.orientation.z = 0;
-
     return true;    
 }
 
@@ -99,6 +86,15 @@ void PathPlannerNode::process_goal_request(const geometry_msgs::msg::PoseStamped
                                                    msg->pose.orientation.x,
                                                    msg->pose.orientation.y,
                                                    msg->pose.orientation.z);
+
+    RCLCPP_INFO_STREAM(this->get_logger(), "Start Position: " << start_pose_rbs.position.transpose());
+    RCLCPP_INFO_STREAM(this->get_logger(), "Goal Position: "  << goal_pose_rbs.position.transpose());
+
+    //The z = 00 is a hack for now
+    start_pose_rbs.position = Eigen::Vector3d(pose_samples.pose.position.x,
+                                              pose_samples.pose.position.y,
+                                              0.0);
+
     plan();
 }
 
@@ -216,7 +212,7 @@ void PathPlannerNode::plan(){
             tempPoint.pose.position.z= get_parameter("distToGround").as_double();
 
             // Add points to path.
-            path_message.header.frame_id = "map";
+            path_message.header.frame_id = get_parameter("world_frame").as_string();
             path_message.poses.push_back(tempPoint);
         }
         path_publisher->publish(path_message);
@@ -348,13 +344,14 @@ void PathPlannerNode::publishTravMap(){
     {
         for(const traversability_generator3d::TravGenNode *n : l)
         {
-            RCLCPP_INFO_STREAM(this->get_logger(), "Found a patch");
-            const Eigen::Vector3d& position = n->getVec3(trav_map_3d.getResolution().x());
-            geometry_msgs::msg::Point cell_center;
-            cell_center.x = position.x();
-            cell_center.y = position.y();
-            cell_center.z = position.z();
-            grid_map.cells.push_back(cell_center);
+            if (n->getType() == maps::grid::TraversabilityNodeBase::TRAVERSABLE){
+                const Eigen::Vector3d& position = n->getVec3(trav_map_3d.getResolution().x());
+                geometry_msgs::msg::Point cell_center;
+                cell_center.x = position.x();
+                cell_center.y = position.y();
+                cell_center.z = position.z();
+                grid_map.cells.push_back(cell_center);
+            }
         }
     }
     RCLCPP_INFO_STREAM(this->get_logger(), "Publishing Traversability Map...");
