@@ -201,19 +201,35 @@ void PathPlannerNode::plan(){
     //Publish path if a solution is found
     if (res == ugv_nav4d::Planner::FOUND_SOLUTION){
         for (auto& trajectory : trajectory3D){
-            base::Pose2D start_pose = trajectory.getStartPose();
-            base::Pose2D goal_pose  = trajectory.getGoalPose();
 
-            // Fill current path point to a temporary variable.
-            //TODO: Set the z path to the patch height to get a 3D Trajectory
-            geometry_msgs::msg::PoseStamped tempPoint;
-            tempPoint.pose.position.x= goal_pose.position.x();
-            tempPoint.pose.position.y= goal_pose.position.y();
-            tempPoint.pose.position.z= get_parameter("distToGround").as_double();
+            //sample spline:
+            const double stepDist = 0.01;
+            std::vector<double> parameters;
+            //NOTE we dont need the points, but there is no sample() api that returns parameters only
+            const std::vector<base::geometry::Spline3::vector_t> points = trajectory.posSpline.sample(stepDist, &parameters);
+            assert(parameters.size() == points.size());
+            for(size_t i = 0; i < parameters.size(); ++i)
+            {
+                const double param = parameters[i];
+                base::Vector3d point, tangent;
+                std::tie(point,tangent) = trajectory.posSpline.getPointAndTangent(param);
+                //const base::Orientation orientation(std::atan2(tangent.y(), tangent.x()));
 
-            // Add points to path.
-            path_message.header.frame_id = get_parameter("world_frame").as_string();
-            path_message.poses.push_back(tempPoint);
+                //point needs to be offset to the middle of the grid,
+                //as all path computation also starts in the middle
+                //if not we would get a wrong diff
+                point += base::Vector3d(traversabilityConfig.gridResolution /2.0, traversabilityConfig.gridResolution /2.0,0);
+
+                // Fill current path point to a temporary variable.
+                //TODO: Set the z path to the patch height to get a 3D Trajectory
+                geometry_msgs::msg::PoseStamped tempPoint;
+                tempPoint.pose.position.x= point.x();
+                tempPoint.pose.position.y= point.y();
+                tempPoint.pose.position.z= get_parameter("distToGround").as_double();
+                // Add points to path.
+                path_message.header.frame_id = get_parameter("world_frame").as_string();
+                path_message.poses.push_back(tempPoint);
+            }
         }
         path_publisher->publish(path_message);
         RCLCPP_INFO_STREAM(this->get_logger(), "Published Path...");
