@@ -15,7 +15,7 @@ endif()
 find_package(Boost REQUIRED COMPONENTS system filesystem serialization)
 #find_package(PCL 1.7 REQUIRED COMPONENTS io common)
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(ugv_nav4d REQUIRED IMPORTED_TARGET ugv_nav4d)
+pkg_check_modules(ugv_nav4d-qt5 REQUIRED IMPORTED_TARGET ugv_nav4d-qt5)
 
 set(THIS_PACKAGE_INCLUDE_DEPENDS
   ament_cmake
@@ -44,13 +44,13 @@ add_library(${PROJECT_NAME} SHARED ${SOURCES})
 ament_target_dependencies(${PROJECT_NAME}  ${THIS_PACKAGE_INCLUDE_DEPENDS})
 
 target_include_directories(${PROJECT_NAME} PUBLIC 
-  ${ugv_nav4d_INCLUDE_DIRS} 
+  ${ugv_nav4d-qt5_INCLUDE_DIRS} 
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
 
 target_link_libraries(${PROJECT_NAME}
-  ${ugv_nav4d_LDFLAGS}
+  ${ugv_nav4d-qt5_LDFLAGS}
   Eigen3::Eigen
 )
 
