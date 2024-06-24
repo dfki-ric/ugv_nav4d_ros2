@@ -1,4 +1,4 @@
-#include "ugv_nav4d.hpp"
+#include "ugv_nav4d_ros2.hpp"
 
 #include <pcl/io/ply_io.h>
 #include <pcl/common/common.h>
@@ -7,10 +7,11 @@
 #include <fstream>
 
 using namespace rclcpp;
-using namespace ugv_nav4d_ros2;
+
+namespace ugv_nav4d_ros2 {
 
 PathPlannerNode::PathPlannerNode()
-    : Node("ugv_nav4d_node")
+    : Node("ugv_nav4d_ros2")
 {
     declareParameters();
 
@@ -19,11 +20,15 @@ PathPlannerNode::PathPlannerNode()
     tf_listener = std::make_shared<tf2_ros::TransformListener>(*tf_buffer);
 
     timer_pose_samples = create_wall_timer(std::chrono::duration<double>(0.01), std::bind(&PathPlannerNode::read_pose_samples, this));
-    sub_goal_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d/goal_pose", 1, bind(&PathPlannerNode::process_goal_request, this, std::placeholders::_1));
+    sub_goal_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/goal_pose", 1, bind(&PathPlannerNode::process_goal_request, this, std::placeholders::_1));
 
     // Create a parameter subscriber that can be used to monitor parameter changes
     // (for this node's parameters as well as other nodes' parameters)
     param_subscriber = std::make_shared<rclcpp::ParameterEventHandler>(this);
+
+    cloud_subscription_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+      "/ugv_nav4d_ros2/pointcloud", 10,
+      std::bind(&PathPlannerNode::cloud_callback, this, std::placeholders::_1));
 
     // Set a callback for this node's parameter updates
     auto cb = [this](const rclcpp::Parameter & p) {
@@ -35,17 +40,22 @@ PathPlannerNode::PathPlannerNode()
       };
 
     cb_handle = param_subscriber->add_parameter_callback("param_subscriber", cb);
-    path_publisher = this->create_publisher<nav_msgs::msg::Path>("/ugv_nav4d/path", 10);
-    trav_map_publisher = this->create_publisher<nav_msgs::msg::GridCells>("/ugv_nav4d/traversability_map", 10);
+    path_publisher = this->create_publisher<nav_msgs::msg::Path>("/ugv_nav4d_ros2/path", 10);
+    grid_map_publisher = this->create_publisher<nav_msgs::msg::GridCells>("/ugv_nav4d_ros2/grid_map", 10);
+    trav_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::TravMap>("/ugv_nav4d_ros2/trav_map", 10);
 
     configurePlanner();
+
     if (get_parameter("map_ply_path").as_string() != "default_value"){
         //Load map from file only when user explicity sets the parameter
+        RCLCPP_INFO_STREAM(this->get_logger(), "Loading map from file: " + get_parameter("map_ply_path").as_string());
         loadMls(get_parameter("map_ply_path").as_string());
     }
-    else{
-        //TODO: Need to get a map over a topic
-    }
+}
+
+void PathPlannerNode::cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
+{
+    latest_pointcloud_ = msg;
 }
 
 bool PathPlannerNode::read_pose_samples(){
@@ -158,7 +168,48 @@ bool PathPlannerNode::loadMls(const std::string& path){
     return false;
 }
 
+bool PathPlannerNode::generateMls(){
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
+
+    pcl::fromROSMsg(*latest_pointcloud_, *cloud);
+
+    pcl::PointXYZ mi, ma; 
+    pcl::getMinMax3D (*cloud, mi, ma); 
+
+    //transform point cloud to zero (instead we could also use MlsMap::translate later but that seems to be broken?)
+    //Eigen::Affine3f pclTf = Eigen::Affine3f::Identity();
+    //pclTf.translation() << -mi.x, -mi.y, -mi.z;
+    //pcl::transformPointCloud (*cloud, *cloud, pclTf);
+    
+    //pcl::getMinMax3D (*cloud, mi, ma); 
+    RCLCPP_INFO_STREAM(this->get_logger(), "MIN: " << mi << ", MAX: " << ma);
+
+    const double mls_res = get_parameter("grid_resolution").as_double();
+    const double size_x = ma.x;
+    const double size_y = ma.y;
+    
+    maps::grid::MLSConfig cfg;
+    cfg.gapSize = get_parameter("grid_resolution").as_double();
+    const maps::grid::Vector2ui numCells(size_x / mls_res + 1, size_y / mls_res + 1);
+    mlsMap = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
+    mlsMap.mergePointCloud(*cloud, base::Transform3d::Identity());
+    RCLCPP_INFO_STREAM(this->get_logger(), "MLS Resolution: " << get_parameter("grid_resolution").as_double());
+    RCLCPP_INFO_STREAM(this->get_logger(), "NUM CELLS: " << numCells);
+    RCLCPP_INFO_STREAM(this->get_logger(), "Cloud Points: " << cloud->size());
+    RCLCPP_INFO_STREAM(this->get_logger(), "Generated MLS Map. Loading the Map into Planner...");
+    planner->updateMap(mlsMap);
+    RCLCPP_INFO_STREAM(this->get_logger(), "Loaded Map into Planner");
+    return true;
+}
+
+
 void PathPlannerNode::plan(){
+
+    bool load_map_from_topic = get_parameter("load_map_from_topic").as_bool();
+    if (load_map_from_topic){
+        generateMls();
+    }
 
     std::vector<trajectory_follower::SubTrajectory> trajectory2D, trajectory3D;
     base::Time time;
@@ -239,6 +290,7 @@ void PathPlannerNode::plan(){
 
 void PathPlannerNode::declareParameters(){
 
+    declare_parameter("load_map_from_topic", true);
     declare_parameter("map_ply_path", "default_value");
 
     declare_parameter("robot_frame", "robot");
@@ -355,22 +407,54 @@ void PathPlannerNode::publishTravMap(){
     grid_map.cell_height = trav_map_3d.getResolution().x();
     grid_map.cell_width  = trav_map_3d.getResolution().y();
 
+    ugv_nav4d_ros2::msg::TravMap msg;
+    msg.width = 1;
+    msg.height = 1;
+    msg.depth = 1;
+    msg.header.frame_id = get_parameter("world_frame").as_string();
+
     RCLCPP_INFO_STREAM(this->get_logger(), "Reading Traversability Map");
     for(const maps::grid::LevelList<traversability_generator3d::TravGenNode *> &l : trav_map_3d)
     {
         for(const traversability_generator3d::TravGenNode *n : l)
         {
-            if (n->getType() == maps::grid::TraversabilityNodeBase::TRAVERSABLE){
-                const Eigen::Vector3d& position = n->getVec3(trav_map_3d.getResolution().x());
-                geometry_msgs::msg::Point cell_center;
-                cell_center.x = position.x();
-                cell_center.y = position.y();
-                cell_center.z = position.z();
-                grid_map.cells.push_back(cell_center);
+            ugv_nav4d_ros2::msg::TravPatch patch_msg;
+            const Eigen::Vector3d& position = n->getVec3(trav_map_3d.getResolution().x());
+            geometry_msgs::msg::Point cell_center;
+            cell_center.x = position.x();
+            cell_center.y = position.y();
+            cell_center.z = position.z();
+            grid_map.cells.push_back(cell_center);
+
+            patch_msg.a = n->getUserData().plane.normal()(0);
+            patch_msg.b = n->getUserData().plane.normal()(1);
+            patch_msg.c = n->getUserData().plane.normal()(2);
+            patch_msg.d = -n->getUserData().plane.offset();
+            patch_msg.position.x = position.x();
+            patch_msg.position.y = position.y();
+            patch_msg.position.z = position.z();
+
+
+            switch((n->getType())){
+                case maps::grid::TraversabilityNodeBase::TRAVERSABLE:
+                    patch_msg.color.r = 0;
+                    patch_msg.color.g = 1;
+                    patch_msg.color.b = 0;
+                    patch_msg.color.a = 1;
+                    break;                    
             }
+
+            patch_msg.color.r;
+            patch_msg.color.g;
+            patch_msg.color.b;
+            patch_msg.color.a;
+
+            msg.patches.push_back(patch_msg);
         }
     }
-    RCLCPP_INFO_STREAM(this->get_logger(), "Publishing Traversability Map...");
-    trav_map_publisher->publish(grid_map);
-    RCLCPP_INFO_STREAM(this->get_logger(), "Published Traversability Map");
+    grid_map_publisher->publish(grid_map);
+    trav_map_publisher->publish(msg);
+
+    RCLCPP_INFO_STREAM(this->get_logger(), "Published Grid Map");
+   }
 }

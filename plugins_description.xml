@@ -1,0 +1,9 @@
+<library path="ugv_nav4d_ros2_trav_map_plugin">
+  <class name="ugv_nav4d_ros2::ugv_nav4d_ros2_trav_map_plugin::TravMapDisplay"
+         type="ugv_nav4d_ros2::ugv_nav4d_ros2_trav_map_plugin::TravMapDisplay"
+         base_class_type="rviz_common::Display">
+    <description>
+      A custom display plugin for TravMap visualization.
+    </description>
+  </class>
+</library>

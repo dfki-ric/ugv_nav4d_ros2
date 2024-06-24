@@ -1,6 +1,8 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
+from launch.substitutions import LaunchConfiguration
 from ament_index_python.packages import get_package_share_directory
+from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
 
 import os
 
@@ -12,12 +14,24 @@ def generate_launch_description():
         'params.yaml'
         )
 
-    return LaunchDescription([
-        Node(
-            package="ugv_nav4d_ros2",
-            executable="ugv_nav4d_node",
-            name="ugv_nav4d_node",
-            output="screen",
-            parameters=[config]
+    declared_arguments = []
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            'pointcloud_topic',
+            default_value='/ugv_nav4d_ros2/pointcloud',
+            description='Topic name of the pointcloud'
         )
-    ])
+    )
+
+    declared_arguments.append(
+        Node(
+        package="ugv_nav4d_ros2",
+        executable="ugv_nav4d_ros2_node",
+        name="ugv_nav4d_ros2",
+        output="screen",
+        remappings=[("/ugv_nav4d_ros2/pointcloud", LaunchConfiguration("pointcloud_topic"))],
+        parameters=[config],
+        )
+    )
+
+    return LaunchDescription(declared_arguments)

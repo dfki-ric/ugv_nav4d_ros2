@@ -1,6 +1,7 @@
-ugv_nav4d_node:
+ugv_nav4d_ros2:
   ros__parameters:
-    map_ply_path: "/opt/workspace/ugv_build_export/build/planning/ugv_nav4d/src/test_data/Plane1Mio.ply"
+    load_map_from_topic: false
+    map_ply_path: '/opt/workspace/ugv_build_export/build/planning/ugv_nav4d/src/test_data/test_area.ply'
     #Frame names to get the TF Transform robot2map
     robot_frame: husky
     world_frame: odom
