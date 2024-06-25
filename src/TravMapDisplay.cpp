@@ -49,13 +49,17 @@ void TravMapDisplay::processMessage(ugv_nav4d_ros2::msg::TravMap::ConstSharedPtr
     Ogre::Vector3 default_normal(0, 0, 1);
     Ogre::Quaternion orientation = default_normal.getRotationTo(normal);
 
+    // Set the color of the plane
+    Ogre::ColourValue color(patch.color.r, patch.color.g, patch.color.b, patch.color.a);
+
     // Create a plane visual for each patch
     auto plane = scene_manager_->createManualObject();
     plane->begin("BaseWhiteNoLighting", Ogre::RenderOperation::OT_TRIANGLE_LIST);
 
     // Define the vertices of the plane based on the patch parameters
     // Example: A simple square plane, adjust according to your plane parameters
-    float size = 0.1; // Example size, set according to your grid cell size
+    float size = msg->resolution/2;
+
     Ogre::Vector3 corners[4] = {
       position + orientation * Ogre::Vector3(-size, -size, 0),
       position + orientation * Ogre::Vector3(size, -size, 0),
@@ -64,9 +68,13 @@ void TravMapDisplay::processMessage(ugv_nav4d_ros2::msg::TravMap::ConstSharedPtr
     };
 
     plane->position(corners[0]);
+    plane->colour(color);
     plane->position(corners[1]);
+    plane->colour(color);
     plane->position(corners[2]);
+    plane->colour(color);
     plane->position(corners[3]);
+    plane->colour(color);
 
     plane->index(0);
     plane->index(1);
@@ -74,10 +82,6 @@ void TravMapDisplay::processMessage(ugv_nav4d_ros2::msg::TravMap::ConstSharedPtr
     plane->index(2);
     plane->index(3);
     plane->index(0);
-
-    // Set the color of the plane
-    Ogre::ColourValue color(patch.color.r, patch.color.g, patch.color.b, patch.color.a);
-    plane->colour(color);
 
     plane->end();
     scene_node_->attachObject(plane);

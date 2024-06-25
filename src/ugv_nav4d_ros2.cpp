@@ -43,6 +43,7 @@ PathPlannerNode::PathPlannerNode()
     path_publisher = this->create_publisher<nav_msgs::msg::Path>("/ugv_nav4d_ros2/path", 10);
     grid_map_publisher = this->create_publisher<nav_msgs::msg::GridCells>("/ugv_nav4d_ros2/grid_map", 10);
     trav_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::TravMap>("/ugv_nav4d_ros2/trav_map", 10);
+    cloud_map_publisher = this->create_publisher<sensor_msgs::msg::PointCloud2>("/ugv_nav4d_ros2/cloud_map", 10);
 
     configurePlanner();
 
@@ -130,25 +131,25 @@ bool PathPlannerNode::loadMls(const std::string& path){
 
     if(path.find(".ply") != std::string::npos)
     {
-        RCLCPP_INFO_STREAM(this->get_logger(), "Loading PLY: " << get_parameter("map_ply_path").as_string());
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
+        cloud = pcl::PointCloud<pcl::PointXYZ>::Ptr(new pcl::PointCloud<pcl::PointXYZ>());
+
+        RCLCPP_INFO_STREAM(this->get_logger(), "Loading PLY: " << get_parameter("map_ply_path").as_string());        
         pcl::PLYReader plyReader;
         if(plyReader.read(path, *cloud) >= 0)
         {
-            pcl::PointXYZ mi, ma; 
-            pcl::getMinMax3D (*cloud, mi, ma); 
-
+            pcl::PointXYZ min, max; 
+            pcl::getMinMax3D (*cloud, min, max); 
+        
             //transform point cloud to zero (instead we could also use MlsMap::translate later but that seems to be broken?)
             Eigen::Affine3f pclTf = Eigen::Affine3f::Identity();
-            pclTf.translation() << -mi.x, -mi.y, -mi.z;
+            pclTf.translation() << -min.x, -min.y, -min.z;
             pcl::transformPointCloud (*cloud, *cloud, pclTf);
             
-            pcl::getMinMax3D (*cloud, mi, ma); 
-            RCLCPP_INFO_STREAM(this->get_logger(), "MIN: " << mi << ", MAX: " << ma);
-        
+            //pcl::getMinMax3D (*cloud, min, max); 
+
             const double mls_res = get_parameter("grid_resolution").as_double();
-            const double size_x = ma.x;
-            const double size_y = ma.y;
+            const double size_x = max.x - min.x;
+            const double size_y = max.y - min.y;
             
             maps::grid::MLSConfig cfg;
             cfg.gapSize = get_parameter("grid_resolution").as_double();
@@ -411,7 +412,16 @@ void PathPlannerNode::publishTravMap(){
     msg.width = 1;
     msg.height = 1;
     msg.depth = 1;
+    msg.resolution = get_parameter("grid_resolution").as_double();
     msg.header.frame_id = get_parameter("world_frame").as_string();
+
+    // Convert PCL Point Cloud to ROS2 PointCloud2 message
+    sensor_msgs::msg::PointCloud2 cloud_map_msg;
+    pcl::toROSMsg(*cloud, cloud_map_msg);
+    cloud_map_msg.header.frame_id = "odom";
+    cloud_map_msg.header.stamp = this->get_clock()->now();
+    cloud_map_publisher->publish(cloud_map_msg);
+
 
     RCLCPP_INFO_STREAM(this->get_logger(), "Reading Traversability Map");
     for(const maps::grid::LevelList<traversability_generator3d::TravGenNode *> &l : trav_map_3d)
@@ -434,7 +444,6 @@ void PathPlannerNode::publishTravMap(){
             patch_msg.position.y = position.y();
             patch_msg.position.z = position.z();
 
-
             switch((n->getType())){
                 case maps::grid::TraversabilityNodeBase::TRAVERSABLE:
                     patch_msg.color.r = 0;
@@ -442,12 +451,31 @@ void PathPlannerNode::publishTravMap(){
                     patch_msg.color.b = 0;
                     patch_msg.color.a = 1;
                     break;                    
+                case maps::grid::TraversabilityNodeBase::OBSTACLE:
+                    patch_msg.color.r = 1;
+                    patch_msg.color.g = 0;
+                    patch_msg.color.b = 0;
+                    patch_msg.color.a = 1;
+                    break;    
+                case maps::grid::TraversabilityNodeBase::FRONTIER:
+                    patch_msg.color.r = 0;
+                    patch_msg.color.g = 0;
+                    patch_msg.color.b = 1;
+                    patch_msg.color.a = 1;
+                    break;   
+                case maps::grid::TraversabilityNodeBase::UNSET:
+                    patch_msg.color.r = 1;
+                    patch_msg.color.g = 1;
+                    patch_msg.color.b = 0;
+                    patch_msg.color.a = 1;
+                    break;   
+                case maps::grid::TraversabilityNodeBase::UNKNOWN:
+                    patch_msg.color.r = 0.5;
+                    patch_msg.color.g = 0;
+                    patch_msg.color.b = 0.5;
+                    patch_msg.color.a = 1;
+                    break;   
             }
-
-            patch_msg.color.r;
-            patch_msg.color.g;
-            patch_msg.color.b;
-            patch_msg.color.a;
 
             msg.patches.push_back(patch_msg);
         }

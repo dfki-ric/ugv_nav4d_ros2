@@ -59,6 +59,7 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_publisher;
     rclcpp::Publisher<nav_msgs::msg::GridCells>::SharedPtr grid_map_publisher;
     rclcpp::Publisher<ugv_nav4d_ros2::msg::TravMap>::SharedPtr trav_map_publisher;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_map_publisher;
 
     //tf
     std::shared_ptr<tf2_ros::TransformListener> tf_listener{nullptr};
@@ -76,6 +77,8 @@ private:
 
     maps::grid::MLSMapSloped mlsMap;
     bool initialPatchAdded;
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
 };
 
 } // namespace ugv_nav4d_ros2 
