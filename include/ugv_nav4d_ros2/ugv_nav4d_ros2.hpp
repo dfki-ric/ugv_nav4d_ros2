@@ -79,6 +79,7 @@ private:
     bool initialPatchAdded;
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
+    
 };
 
 } // namespace ugv_nav4d_ros2 
