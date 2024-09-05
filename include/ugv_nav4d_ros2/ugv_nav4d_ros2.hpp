@@ -10,6 +10,9 @@
 #include <nav_msgs/msg/path.hpp>
 #include <nav_msgs/msg/grid_cells.hpp>
 
+#include "ugv_nav4d_ros2/msg/mls_map.hpp"
+#include "ugv_nav4d_ros2/msg/mls_patch.hpp"
+
 #include "ugv_nav4d_ros2/msg/trav_map.hpp"
 #include "ugv_nav4d_ros2/msg/trav_patch.hpp"
 
@@ -42,6 +45,7 @@ private:
     void updateParameters();
     void configurePlanner();
     void publishTravMap();
+    void publishMLSMap();
     void cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
 
     //subscriptions
@@ -53,12 +57,13 @@ private:
     geometry_msgs::msg::PoseStamped goal_pose;
 
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_subscription_;
-    sensor_msgs::msg::PointCloud2::SharedPtr latest_pointcloud_;
+    sensor_msgs::msg::PointCloud2::SharedPtr latest_pointcloud;
 
     //publishers
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_publisher;
     rclcpp::Publisher<nav_msgs::msg::GridCells>::SharedPtr grid_map_publisher;
     rclcpp::Publisher<ugv_nav4d_ros2::msg::TravMap>::SharedPtr trav_map_publisher;
+    rclcpp::Publisher<ugv_nav4d_ros2::msg::MLSMap>::SharedPtr mls_map_publisher;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_map_publisher;
 
     //tf

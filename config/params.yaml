@@ -7,10 +7,10 @@ ugv_nav4d_ros2:
     world_frame: odom
     #Grid resolution used for primitive and trversability parameters
     grid_resolution: 0.3
-    grid_max_x: 50
-    grid_min_x: -50
-    grid_max_y: 50
-    grid_min_y: -50
+    grid_max_x: 20
+    grid_min_x: 0
+    grid_max_y: 20
+    grid_min_y: 0
     dumpOnError: 0
     dumpOnSuccess: 0
     initialPatchRadius: 3.0

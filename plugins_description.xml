@@ -7,3 +7,13 @@
     </description>
   </class>
 </library>
+
+<library path="ugv_nav4d_ros2_mls_map_plugin">
+  <class name="ugv_nav4d_ros2::ugv_nav4d_ros2_mls_map_plugin::MLSMapDisplay"
+         type="ugv_nav4d_ros2::ugv_nav4d_ros2_mls_map_plugin::MLSMapDisplay"
+         base_class_type="rviz_common::Display">
+    <description>
+      A custom display plugin for MLSMap visualization.
+    </description>
+  </class>
+</library>

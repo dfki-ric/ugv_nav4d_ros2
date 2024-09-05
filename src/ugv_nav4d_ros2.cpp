@@ -43,6 +43,7 @@ PathPlannerNode::PathPlannerNode()
     path_publisher = this->create_publisher<nav_msgs::msg::Path>("/ugv_nav4d_ros2/path", 10);
     grid_map_publisher = this->create_publisher<nav_msgs::msg::GridCells>("/ugv_nav4d_ros2/grid_map", 10);
     trav_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::TravMap>("/ugv_nav4d_ros2/trav_map", 10);
+    mls_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::MLSMap>("/ugv_nav4d_ros2/mls_map", 10);
     cloud_map_publisher = this->create_publisher<sensor_msgs::msg::PointCloud2>("/ugv_nav4d_ros2/cloud_map", 10);
 
     configurePlanner();
@@ -73,7 +74,7 @@ PathPlannerNode::PathPlannerNode()
 
 void PathPlannerNode::cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
 {
-    latest_pointcloud_ = msg;
+    latest_pointcloud = msg;
 
     bool load_map_from_topic = get_parameter("load_map_from_topic").as_bool();
     if (load_map_from_topic){
@@ -185,6 +186,7 @@ bool PathPlannerNode::loadMls(const std::string& path){
             RCLCPP_INFO_STREAM(this->get_logger(), "Generated MLS Map. Loading the Map into Planner...");
             planner->updateMap(mlsMap);
             RCLCPP_INFO_STREAM(this->get_logger(), "Loaded Map into Planner");
+            publishMLSMap();
         }
         return true;
     }
@@ -195,36 +197,29 @@ bool PathPlannerNode::loadMls(const std::string& path){
 bool PathPlannerNode::generateMls(){
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
-    pcl::fromROSMsg(*latest_pointcloud_, *cloud);
+    pcl::fromROSMsg(*latest_pointcloud, *cloud);
 
     std::string world_frame = get_parameter("world_frame").as_string();
-    geometry_msgs::msg::PoseStamped sensor_pose;
+    base::Transform3d cloud2MLS;
 
     try{
         geometry_msgs::msg::TransformStamped t = tf_buffer->lookupTransform(world_frame, "husky/base_link/front_laser", tf2::TimePointZero);
-        sensor_pose.pose.orientation = t.transform.rotation;
-        sensor_pose.pose.position.x =  t.transform.translation.x;
-        sensor_pose.pose.position.y =  t.transform.translation.y;
-        sensor_pose.pose.position.z =  t.transform.translation.z;
+        cloud2MLS.translation() << t.transform.translation.x, t.transform.translation.y, t.transform.translation.z;
+        Eigen::Quaterniond quat(t.transform.rotation.w, 
+                                t.transform.rotation.x, 
+                                t.transform.rotation.y, 
+                                t.transform.rotation.z);
+        cloud2MLS.rotate(quat);
     }
     catch(const tf2::TransformException & ex){
         return false;
     }
 
-
-    base::Transform3d cloud2MLS;
-    cloud2MLS.translation() << sensor_pose.pose.position.x, sensor_pose.pose.position.y, sensor_pose.pose.position.z;
-
-    Eigen::Quaterniond quat(sensor_pose.pose.orientation.w, 
-                            sensor_pose.pose.orientation.x, 
-                            sensor_pose.pose.orientation.y, 
-                            sensor_pose.pose.orientation.z);
-    cloud2MLS.rotate(quat);
- 
     mlsMap.mergePointCloud(*cloud, cloud2MLS);
     RCLCPP_INFO_STREAM(this->get_logger(), "MLS Resolution: " << get_parameter("grid_resolution").as_double());
     RCLCPP_INFO_STREAM(this->get_logger(), "Cloud Points: " << cloud->size());
     RCLCPP_INFO_STREAM(this->get_logger(), "Generated MLS Map. Loading the Map into Planner...");
+    RCLCPP_INFO_STREAM(this->get_logger(), "MLS Cells: " << mlsMap.getNumCells().transpose());
 
     planner->updateMap(mlsMap);
     RCLCPP_INFO_STREAM(this->get_logger(), "Loaded Map into Planner");
@@ -234,6 +229,15 @@ bool PathPlannerNode::generateMls(){
         planner->setInitialPatch(start_pose_rbs.getTransform(), get_parameter("initialPatchRadius").as_double());
         initialPatchAdded = true;
     }
+
+    sensor_msgs::msg::PointCloud2::SharedPtr cloud_ros = std::make_shared<sensor_msgs::msg::PointCloud2>();
+
+    // Convert PCL PointCloud to ROS PointCloud2 message
+    pcl::toROSMsg(*cloud, *cloud_ros);
+    cloud_ros->header.frame_id = get_parameter("world_frame").as_string();
+    cloud_ros->header.stamp = this->now();
+    cloud_map_publisher->publish(*cloud_ros);
+    publishMLSMap();
 
     return true;
 }
@@ -423,6 +427,77 @@ void PathPlannerNode::updateParameters(){
 void PathPlannerNode::configurePlanner(){
     updateParameters();
     planner.reset(new ugv_nav4d::Planner(splinePrimitiveConfig, traversabilityConfig, mobility, plannerConfig));
+}
+
+void PathPlannerNode::publishMLSMap(){
+
+    ugv_nav4d_ros2::msg::MLSMap map_msg;    
+    map_msg.width = 1;
+    map_msg.height = 1;
+    map_msg.depth = 1;
+    map_msg.resolution = get_parameter("grid_resolution").as_double();
+    map_msg.header.frame_id = get_parameter("world_frame").as_string();
+
+    int minMeasurements = 1;
+    maps::grid::Vector2ui num_cell = mlsMap.getNumCells();
+    for (size_t x = 0; x < num_cell.x(); x++)
+    {
+        for (size_t y = 0; y < num_cell.y(); y++)
+        {
+            ugv_nav4d_ros2::msg::MLSPatch patch_msg;
+
+            patch_msg.color.r = 0;
+            patch_msg.color.g = 1;
+            patch_msg.color.b = 0;
+            patch_msg.color.a = 1;
+
+            typedef maps::grid::MLSMap<maps::grid::MLSConfig::SLOPE>::CellType Cell;
+            const Cell &list = mlsMap.at(x, y);
+
+            maps::grid::Vector2d pos(0.00, 0.00);
+            // Calculate the position of the cell center.
+            pos = (maps::grid::Index(x, y).cast<double>() + maps::grid::Vector2d(0.5, 0.5)).array() * mlsMap.getResolution().array();
+            if (list.size()){
+                for (Cell::const_iterator it = list.begin(); it != list.end(); it++)
+                {
+                    const maps::grid::SurfacePatch<maps::grid::MLSConfig::SLOPE>& p = *it;  
+
+                    if(p.getNumberOfMeasurements() < minMeasurements){
+                        //TODO: What does this do?
+                        return;
+                    }
+
+                    float minZ, maxZ;
+                    p.getRange(minZ, maxZ);
+                    minZ -= 5e-4f;
+                    maxZ += 5e-4f;
+                    Eigen::Vector3f normal = p.getNormal();
+                    if(normal.z() < 0)
+                        normal *= -1.0;
+
+                    if(normal.allFinite())
+                    {
+                        Eigen::Hyperplane<float, 3> plane = Eigen::Hyperplane<float, 3>(normal, p.getCenter());
+                        patch_msg.a = plane.normal()(0);
+                        patch_msg.b = plane.normal()(1);
+                        patch_msg.c = plane.normal()(2);
+                        patch_msg.d = -plane.offset();                       
+                        patch_msg.position.x = pos.x();
+                        patch_msg.position.y = pos.y();
+                        patch_msg.position.z = p.getTop();
+                    }
+                    else
+                    {
+                        //TODO
+                        //float height = (maxZ - minZ) + 1e-3f;
+                        //geode.drawBox(maxZ, height, osg::Vec3(0.f,0.f,1.f));
+                    }
+                } 
+            }
+            map_msg.patches.push_back(patch_msg);
+        } 
+    }
+    mls_map_publisher->publish(map_msg);
 }
 
 void PathPlannerNode::publishTravMap(){

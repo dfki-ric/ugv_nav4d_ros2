@@ -42,6 +42,8 @@ endforeach()
 rosidl_generate_interfaces("ugv_nav4d_ros2_msgs"
   "msg/TravPatch.msg"
   "msg/TravMap.msg"
+  "msg/MLSPatch.msg"
+  "msg/MLSMap.msg"
   DEPENDENCIES geometry_msgs std_msgs
   LIBRARY_NAME ${PROJECT_NAME}
 )
@@ -59,14 +61,30 @@ target_link_libraries(${PROJECT_NAME}
   Eigen3::Eigen
 )
 
-qt5_wrap_cpp(MOC_FILES include/ugv_nav4d_ros2_trav_map_plugin/TravMapDisplay.hpp)
+qt5_wrap_cpp(MOC_TRAV_MAP_FILES include/ugv_nav4d_ros2_trav_map_plugin/TravMapDisplay.hpp)
 # Create the plugin library
-add_library(ugv_nav4d_ros2_trav_map_plugin SHARED src/TravMapDisplay.cpp ${MOC_FILES})
+add_library(ugv_nav4d_ros2_trav_map_plugin SHARED src/TravMapDisplay.cpp ${MOC_TRAV_MAP_FILES})
 rosidl_target_interfaces(ugv_nav4d_ros2_trav_map_plugin "ugv_nav4d_ros2_msgs" "rosidl_typesupport_cpp")
 ament_target_dependencies(ugv_nav4d_ros2_trav_map_plugin  ${THIS_PACKAGE_INCLUDE_DEPENDS})
 target_include_directories(ugv_nav4d_ros2_trav_map_plugin PUBLIC 
   ${ugv_nav4d-qt5_INCLUDE_DIRS} 
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/ugv_nav4d_ros2_trav_map_plugin/>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(${PROJECT_NAME}
+  Eigen3::Eigen  
+  Qt5::Core
+  Qt5::Widgets
+)
+
+qt5_wrap_cpp(MOC_MLS_MAP_FILES include/ugv_nav4d_ros2_mls_map_plugin/MLSMapDisplay.hpp)
+# Create the plugin library
+add_library(ugv_nav4d_ros2_mls_map_plugin SHARED src/MLSMapDisplay.cpp ${MOC_MLS_MAP_FILES})
+rosidl_target_interfaces(ugv_nav4d_ros2_mls_map_plugin "ugv_nav4d_ros2_msgs" "rosidl_typesupport_cpp")
+ament_target_dependencies(ugv_nav4d_ros2_mls_map_plugin  ${THIS_PACKAGE_INCLUDE_DEPENDS})
+target_include_directories(ugv_nav4d_ros2_mls_map_plugin PUBLIC 
+  ${ugv_nav4d-qt5_INCLUDE_DIRS} 
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/ugv_nav4d_ros2_mls_map_plugin/>
   $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(${PROJECT_NAME}
@@ -89,6 +107,11 @@ install(TARGETS ${PROJECT_NAME}
   RUNTIME DESTINATION bin)
 
 install(TARGETS ugv_nav4d_ros2_trav_map_plugin
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+
+install(TARGETS ugv_nav4d_ros2_mls_map_plugin
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
