@@ -66,10 +66,10 @@ PathPlannerNode::PathPlannerNode()
     const double grid_size_y = (grid_max_y - grid_min_y)/mls_res;
     
     maps::grid::MLSConfig cfg;
-    cfg.gapSize = get_parameter("grid_resolution").as_double();
+    //cfg.gapSize = get_parameter("grid_resolution").as_double();
     const maps::grid::Vector2ui numCells(grid_size_x, grid_size_y);
     mlsMap = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
-    mlsMap.translate(Eigen::Vector3d(grid_min_x, grid_min_y, 0));
+    mlsMap.translate(Eigen::Vector3d(-grid_size_x/2, -grid_size_y/2, 0));
 }
 
 void PathPlannerNode::cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
