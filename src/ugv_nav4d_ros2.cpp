@@ -19,7 +19,10 @@ PathPlannerNode::PathPlannerNode()
     tf_buffer = std::make_unique<tf2_ros::Buffer>(this->get_clock());
     tf_listener = std::make_shared<tf2_ros::TransformListener>(*tf_buffer);
 
-    timer_pose_samples = create_wall_timer(std::chrono::duration<double>(0.01), std::bind(&PathPlannerNode::read_pose_samples, this));
+    initialPatchAdded = false;
+
+    timer_pose_samples = create_wall_timer(std::chrono::duration<double>(0.01), std::bind(&PathPlannerNode::pose_samples_callback, this));
+    timer_map_publish = create_wall_timer(std::chrono::seconds(5), std::bind(&PathPlannerNode::map_publish_callback, this));
     sub_goal_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/goal_pose", 1, bind(&PathPlannerNode::process_goal_request, this, std::placeholders::_1));
 
     // Create a parameter subscriber that can be used to monitor parameter changes
@@ -66,10 +69,17 @@ PathPlannerNode::PathPlannerNode()
     const double grid_size_y = (grid_max_y - grid_min_y)/mls_res;
     
     maps::grid::MLSConfig cfg;
-    //cfg.gapSize = get_parameter("grid_resolution").as_double();
+    cfg.gapSize = get_parameter("grid_resolution").as_double();
     const maps::grid::Vector2ui numCells(grid_size_x, grid_size_y);
     mlsMap = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
-    mlsMap.translate(Eigen::Vector3d(-grid_size_x/2, -grid_size_y/2, 0));
+    mlsMap.translate(Eigen::Vector3d(grid_min_x, grid_min_y, 0));
+}
+
+void PathPlannerNode::map_publish_callback()
+{
+    if (publishMLSMap()){
+        RCLCPP_INFO(this->get_logger(), "Published MLS map.");  
+    }
 }
 
 void PathPlannerNode::cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
@@ -78,12 +88,17 @@ void PathPlannerNode::cloud_callback(const sensor_msgs::msg::PointCloud2::Shared
 
     bool load_map_from_topic = get_parameter("load_map_from_topic").as_bool();
     if (load_map_from_topic){
-        read_pose_samples();
-        generateMls();
+        if (pose_samples_callback()){
+            generateMls();
+        }
+        else{
+            RCLCPP_ERROR_STREAM(this->get_logger(), "ERROR: Failed to read robot pose! No map generated.");
+        }
+            
     }
 }
 
-bool PathPlannerNode::read_pose_samples(){
+bool PathPlannerNode::pose_samples_callback(){
 
     //printConfigs();
     std::string robot_frame = get_parameter("robot_frame").as_string();
@@ -186,7 +201,7 @@ bool PathPlannerNode::loadMls(const std::string& path){
             RCLCPP_INFO_STREAM(this->get_logger(), "Generated MLS Map. Loading the Map into Planner...");
             planner->updateMap(mlsMap);
             RCLCPP_INFO_STREAM(this->get_logger(), "Loaded Map into Planner");
-            publishMLSMap();
+            //publishMLSMap();
         }
         return true;
     }
@@ -209,7 +224,7 @@ bool PathPlannerNode::generateMls(){
                                 t.transform.rotation.x, 
                                 t.transform.rotation.y, 
                                 t.transform.rotation.z);
-        cloud2MLS.rotate(quat);
+        cloud2MLS.linear() = quat.toRotationMatrix();
     }
     catch(const tf2::TransformException & ex){
         return false;
@@ -230,14 +245,19 @@ bool PathPlannerNode::generateMls(){
         initialPatchAdded = true;
     }
 
-    sensor_msgs::msg::PointCloud2::SharedPtr cloud_ros = std::make_shared<sensor_msgs::msg::PointCloud2>();
+    //Eigen::Affine3d pclTf = Eigen::Affine3d::Identity();
+    //pclTf.translation() = cloud2MLS.translation();
+    //pclTf.linear() = cloud2MLS.linear();
+    //pcl::transformPointCloud (*cloud, *cloud, pclTf);
+
+    //sensor_msgs::msg::PointCloud2::SharedPtr cloud_ros = std::make_shared<sensor_msgs::msg::PointCloud2>();
 
     // Convert PCL PointCloud to ROS PointCloud2 message
-    pcl::toROSMsg(*cloud, *cloud_ros);
-    cloud_ros->header.frame_id = get_parameter("world_frame").as_string();
-    cloud_ros->header.stamp = this->now();
-    cloud_map_publisher->publish(*cloud_ros);
-    publishMLSMap();
+    //pcl::toROSMsg(*cloud, *cloud_ros);
+    //cloud_ros->header.frame_id = get_parameter("world_frame").as_string();
+    //cloud_ros->header.stamp = this->now();
+    //cloud_map_publisher->publish(*cloud_ros);
+    //publishMLSMap();
 
     return true;
 }
@@ -429,7 +449,7 @@ void PathPlannerNode::configurePlanner(){
     planner.reset(new ugv_nav4d::Planner(splinePrimitiveConfig, traversabilityConfig, mobility, plannerConfig));
 }
 
-void PathPlannerNode::publishMLSMap(){
+bool PathPlannerNode::publishMLSMap(){
 
     ugv_nav4d_ros2::msg::MLSMap map_msg;    
     map_msg.width = 1;
@@ -440,64 +460,72 @@ void PathPlannerNode::publishMLSMap(){
 
     int minMeasurements = 1;
     maps::grid::Vector2ui num_cell = mlsMap.getNumCells();
+    typedef maps::grid::MLSMap<maps::grid::MLSConfig::SLOPE>::CellType Cell;
+
+    double grid_min_x = get_parameter("grid_min_x").as_int();
+    double grid_min_y = get_parameter("grid_min_y").as_int();
+
+
     for (size_t x = 0; x < num_cell.x(); x++)
     {
         for (size_t y = 0; y < num_cell.y(); y++)
         {
-            ugv_nav4d_ros2::msg::MLSPatch patch_msg;
-
-            patch_msg.color.r = 0;
-            patch_msg.color.g = 1;
-            patch_msg.color.b = 0;
-            patch_msg.color.a = 1;
-
-            typedef maps::grid::MLSMap<maps::grid::MLSConfig::SLOPE>::CellType Cell;
             const Cell &list = mlsMap.at(x, y);
+            for (Cell::const_iterator it = list.begin(); it != list.end(); it++)
+            {
+                const maps::grid::SurfacePatch<maps::grid::MLSConfig::SLOPE>& p = *it;  
+                if(p.getNumberOfMeasurements() < minMeasurements){
+                    //TODO: What does this do?
+                    std::cout << "Too few measurements!" << std::endl;
+                    continue;
+                }
 
-            maps::grid::Vector2d pos(0.00, 0.00);
-            // Calculate the position of the cell center.
-            pos = (maps::grid::Index(x, y).cast<double>() + maps::grid::Vector2d(0.5, 0.5)).array() * mlsMap.getResolution().array();
-            if (list.size()){
-                for (Cell::const_iterator it = list.begin(); it != list.end(); it++)
+                float minZ, maxZ;
+                p.getRange(minZ, maxZ);
+                minZ -= 5e-4f;
+                maxZ += 5e-4f;
+                Eigen::Vector3f normal = p.getNormal();
+                if(normal.z() < 0)
+                    normal *= -1.0;
+
+                if(normal.allFinite())
                 {
-                    const maps::grid::SurfacePatch<maps::grid::MLSConfig::SLOPE>& p = *it;  
+                    Eigen::Hyperplane<float, 3> plane = Eigen::Hyperplane<float, 3>(normal, p.getCenter());
+                    ugv_nav4d_ros2::msg::MLSPatch patch_msg;
 
-                    if(p.getNumberOfMeasurements() < minMeasurements){
-                        //TODO: What does this do?
-                        return;
-                    }
-
-                    float minZ, maxZ;
-                    p.getRange(minZ, maxZ);
-                    minZ -= 5e-4f;
-                    maxZ += 5e-4f;
-                    Eigen::Vector3f normal = p.getNormal();
-                    if(normal.z() < 0)
-                        normal *= -1.0;
-
-                    if(normal.allFinite())
-                    {
-                        Eigen::Hyperplane<float, 3> plane = Eigen::Hyperplane<float, 3>(normal, p.getCenter());
-                        patch_msg.a = plane.normal()(0);
-                        patch_msg.b = plane.normal()(1);
-                        patch_msg.c = plane.normal()(2);
-                        patch_msg.d = -plane.offset();                       
-                        patch_msg.position.x = pos.x();
-                        patch_msg.position.y = pos.y();
-                        patch_msg.position.z = p.getTop();
-                    }
-                    else
-                    {
-                        //TODO
-                        //float height = (maxZ - minZ) + 1e-3f;
-                        //geode.drawBox(maxZ, height, osg::Vec3(0.f,0.f,1.f));
-                    }
-                } 
+                    patch_msg.color.r = 0;
+                    patch_msg.color.g = 1;
+                    patch_msg.color.b = 0;
+                    patch_msg.color.a = 1;
+                    maps::grid::Vector2d pos(0.00, 0.00);
+                    // Calculate the position of the cell center.
+                    pos = (maps::grid::Index(x, y).cast<double>() + maps::grid::Vector2d(0.5, 0.5)).array() * mlsMap.getResolution().array();
+                    patch_msg.a = plane.normal()(0);
+                    patch_msg.b = plane.normal()(1);
+                    patch_msg.c = plane.normal()(2);
+                    patch_msg.d = -plane.offset();                       
+                    patch_msg.position.x = pos.x() + grid_min_x;
+                    patch_msg.position.y = pos.y() + grid_min_y;
+                    patch_msg.position.z = p.getCenter().z();
+                    map_msg.patches.push_back(patch_msg);
+                }
+                else
+                {
+                    //TODO
+                    //float height = (maxZ - minZ) + 1e-3f;
+                    //geode.drawBox(maxZ, height, osg::Vec3(0.f,0.f,1.f));
+                }
             }
-            map_msg.patches.push_back(patch_msg);
-        } 
+        }
     }
-    mls_map_publisher->publish(map_msg);
+
+    if (map_msg.patches.size() > 0){
+        mls_map_publisher->publish(map_msg);
+        return true;
+    }
+    else{
+        return false;
+    }
 }
 
 void PathPlannerNode::publishTravMap(){

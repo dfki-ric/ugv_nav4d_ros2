@@ -35,7 +35,10 @@ public:
     PathPlannerNode();
 
 private:
-    bool read_pose_samples();
+    bool pose_samples_callback();
+    void map_publish_callback();
+    void cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
+
     void process_goal_request(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
     void printPlannerConfig();
     bool loadMls(const std::string& path);
@@ -45,14 +48,15 @@ private:
     void updateParameters();
     void configurePlanner();
     void publishTravMap();
-    void publishMLSMap();
-    void cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
+    bool publishMLSMap();
 
     //subscriptions
     std::shared_ptr<rclcpp::ParameterEventHandler> param_subscriber;
     std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_goal_pose;
     rclcpp::TimerBase::SharedPtr timer_pose_samples;
+    rclcpp::TimerBase::SharedPtr timer_map_publish;
+
     geometry_msgs::msg::PoseStamped pose_samples;
     geometry_msgs::msg::PoseStamped goal_pose;
 
