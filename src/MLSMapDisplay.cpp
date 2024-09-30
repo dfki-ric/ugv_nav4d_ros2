@@ -39,6 +39,21 @@ void MLSMapDisplay::processMessage(ugv_nav4d_ros2::msg::MLSMap::ConstSharedPtr m
 
   std::cout << "Patches are " << msg->patches.size() << std::endl;
 
+  // Variables to keep track of height range
+  float min_height = std::numeric_limits<float>::max();
+  float max_height = std::numeric_limits<float>::min();
+
+  // First pass to find the min and max height
+  for (const auto& patch : msg->patches) {
+      if (patch.position.z < min_height) {
+          min_height = patch.position.z;
+      }
+      if (patch.position.z > max_height) {
+          max_height = patch.position.z;
+      }
+  }
+
+
   for (const auto& patch : msg->patches) {
     // Convert the plane parameters to a visual representation
     Ogre::Vector3 position(patch.position.x, patch.position.y, patch.position.z);
@@ -51,8 +66,16 @@ void MLSMapDisplay::processMessage(ugv_nav4d_ros2::msg::MLSMap::ConstSharedPtr m
     Ogre::Vector3 default_normal(0, 0, 1);
     Ogre::Quaternion orientation = default_normal.getRotationTo(normal);
 
-    // Set the color of the plane
-    Ogre::ColourValue color(patch.color.r, patch.color.g, patch.color.b, patch.color.a);
+
+    // Normalize the height of the patch between 0 and 1
+    float height_normalized = (patch.position.z - min_height) / (max_height - min_height);
+
+    // Map the normalized height to a color gradient (e.g., blue at low heights, red at high heights)
+    Ogre::ColourValue color;
+    color.r = height_normalized;   // Red increases with height
+    color.g = 1.0f;                // Green remains constant (or can be adjusted if needed)
+    color.b = 1.0f - height_normalized; // Blue decreases with height
+    color.a = 1.0f;                // Fully opaque
 
     // Create a plane visual for each patch
     auto plane = scene_manager_->createManualObject();
