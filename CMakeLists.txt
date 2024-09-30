@@ -33,6 +33,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
   rviz_common
   rviz_rendering
   pluginlib
+  std_srvs
 )
 
 foreach(Dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
