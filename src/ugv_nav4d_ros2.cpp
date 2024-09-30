@@ -22,8 +22,13 @@ PathPlannerNode::PathPlannerNode()
     initialPatchAdded = false;
 
     timer_pose_samples = create_wall_timer(std::chrono::duration<double>(0.01), std::bind(&PathPlannerNode::pose_samples_callback, this));
-    timer_map_publish = create_wall_timer(std::chrono::seconds(5), std::bind(&PathPlannerNode::map_publish_callback, this));
-    sub_goal_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/goal_pose", 1, bind(&PathPlannerNode::process_goal_request, this, std::placeholders::_1));
+    //timer_map_publish = create_wall_timer(std::chrono::seconds(5), std::bind(&PathPlannerNode::map_publish_callback, this));
+    
+    map_publish_service = this->create_service<std_srvs::srv::Trigger>(
+            "/ugv_nav4d_ros2/map_publish", std::bind(&PathPlannerNode::map_publish_callback, this, std::placeholders::_1, std::placeholders::_2));
+
+    sub_goal_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/goal_pose", 1, 
+            bind(&PathPlannerNode::process_goal_request, this, std::placeholders::_1));
 
     // Create a parameter subscriber that can be used to monitor parameter changes
     // (for this node's parameters as well as other nodes' parameters)
@@ -69,17 +74,24 @@ PathPlannerNode::PathPlannerNode()
     const double grid_size_y = (grid_max_y - grid_min_y)/mls_res;
     
     maps::grid::MLSConfig cfg;
-    cfg.gapSize = get_parameter("grid_resolution").as_double();
+    cfg.gapSize = get_parameter("mls_gap_size").as_double();
+    cfg.thickness = 0.2;
     const maps::grid::Vector2ui numCells(grid_size_x, grid_size_y);
     mlsMap = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
     mlsMap.translate(Eigen::Vector3d(grid_min_x, grid_min_y, 0));
 }
 
-void PathPlannerNode::map_publish_callback()
+void PathPlannerNode::map_publish_callback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                    std::shared_ptr<std_srvs::srv::Trigger::Response> response)
 {
+    RCLCPP_INFO(this->get_logger(), "Service request for map publish received! Executing map_publish_callback...");
+    
     if (publishMLSMap()){
         RCLCPP_INFO(this->get_logger(), "Published MLS map.");  
     }
+
+    response->success = true;
+    response->message = "Published MLS map!";
 }
 
 void PathPlannerNode::cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
@@ -140,11 +152,6 @@ void PathPlannerNode::process_goal_request(const geometry_msgs::msg::PoseStamped
     RCLCPP_INFO_STREAM(this->get_logger(), "Start Position: " << start_pose_rbs.position.transpose());
     RCLCPP_INFO_STREAM(this->get_logger(), "Goal Position: "  << goal_pose_rbs.position.transpose());
 
-    //The z = 00 is a hack for now
-    start_pose_rbs.position = Eigen::Vector3d(pose_samples.pose.position.x,
-                                              pose_samples.pose.position.y,
-                                              0.0);
-
     plan();
 }
 
@@ -191,7 +198,7 @@ bool PathPlannerNode::loadMls(const std::string& path){
             const double size_y = max.y - min.y;
             
             maps::grid::MLSConfig cfg;
-            cfg.gapSize = get_parameter("grid_resolution").as_double();
+            cfg.gapSize = get_parameter("mls_gap_size").as_double();
             const maps::grid::Vector2ui numCells(size_x / mls_res + 1, size_y / mls_res + 1);
             mlsMap = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
             mlsMap.mergePointCloud(*cloud, base::Transform3d::Identity());
@@ -343,6 +350,7 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("robot_frame", "robot");
     declare_parameter("world_frame", "map");
     declare_parameter("grid_resolution", 0.3);
+    declare_parameter("mls_gap_size", 0.1);
 
     declare_parameter("grid_max_x", 50);
     declare_parameter("grid_min_x", -50);

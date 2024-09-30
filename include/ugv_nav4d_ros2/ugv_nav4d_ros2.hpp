@@ -4,6 +4,9 @@
 #include <Eigen/Dense>
 
 #include <rclcpp/rclcpp.hpp>
+
+#include <std_srvs/srv/trigger.hpp>
+
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/point.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -36,7 +39,8 @@ public:
 
 private:
     bool pose_samples_callback();
-    void map_publish_callback();
+    void map_publish_callback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                    std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
 
     void process_goal_request(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
@@ -69,6 +73,9 @@ private:
     rclcpp::Publisher<ugv_nav4d_ros2::msg::TravMap>::SharedPtr trav_map_publisher;
     rclcpp::Publisher<ugv_nav4d_ros2::msg::MLSMap>::SharedPtr mls_map_publisher;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_map_publisher;
+
+    //services
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_publish_service; 
 
     //tf
     std::shared_ptr<tf2_ros::TransformListener> tf_listener{nullptr};
