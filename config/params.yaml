@@ -1,10 +1,11 @@
 ugv_nav4d_ros2:
   ros__parameters:
-    load_map_from_topic: true
-    map_ply_path: '/opt/workspace/ugv_build_export/build/planning/ugv_nav4d/src/test_data/Plane1Mio.ply'
+    read_cloud_from_ply: false
+    read_pose_from_topic: true
+    map_ply_path: 'path to ply file'
     #Frame names to get the TF Transform robot2map
-    robot_frame: husky
-    world_frame: odom
+    robot_frame: husky/base_link
+    world_frame: map
     #Grid resolution used for primitive and trversability parameters
     grid_resolution: 0.3
     grid_max_x: 100
@@ -39,7 +40,7 @@ ugv_nav4d_ros2:
     generateBackwardMotions: true
     generateForwardMotions: true
     generateLateralMotions: false
-    generatePointTurnMotions: true
+    generatePointTurnMotions: false
     numAngles: 42
     numEndAngles: 21
     splineOrder: 4
@@ -54,8 +55,8 @@ ugv_nav4d_ros2:
     maxSlope: 0.45
     maxStepHeight: 0.2
     minTraversablePercentage: 0.4
-    robotHeight: 1.7
-    robotSizeX: 0.80
-    robotSizeY: 0.80
+    robotHeight: 1.0
+    robotSizeX: 0.9
+    robotSizeY: 0.6
     slopeMetric: :NONE
     slopeMetricScale: 1.0

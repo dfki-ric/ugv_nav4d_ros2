@@ -3,6 +3,7 @@
 #include <pcl/io/ply_io.h>
 #include <pcl/common/common.h>
 #include <pcl/common/transforms.h>
+#include <pcl/filters/filter.h> // For removeNaNFromPointCloud
 
 #include <fstream>
 
@@ -20,9 +21,7 @@ PathPlannerNode::PathPlannerNode()
     tf_listener = std::make_shared<tf2_ros::TransformListener>(*tf_buffer);
 
     initialPatchAdded = false;
-
-    timer_pose_samples = create_wall_timer(std::chrono::duration<double>(0.01), std::bind(&PathPlannerNode::pose_samples_callback, this));
-    //timer_map_publish = create_wall_timer(std::chrono::seconds(5), std::bind(&PathPlannerNode::map_publish_callback, this));
+    inPlanningPhase = false;
     
     map_publish_service = this->create_service<std_srvs::srv::Trigger>(
             "/ugv_nav4d_ros2/map_publish", std::bind(&PathPlannerNode::map_publish_callback, this, std::placeholders::_1, std::placeholders::_2));
@@ -30,11 +29,15 @@ PathPlannerNode::PathPlannerNode()
     sub_goal_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/goal_pose", 1, 
             bind(&PathPlannerNode::process_goal_request, this, std::placeholders::_1));
 
+    sub_start_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/start_pose", 1, 
+            bind(&PathPlannerNode::read_start_pose, this, std::placeholders::_1));
+
+
     // Create a parameter subscriber that can be used to monitor parameter changes
     // (for this node's parameters as well as other nodes' parameters)
     param_subscriber = std::make_shared<rclcpp::ParameterEventHandler>(this);
 
-    cloud_subscription_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+    cloud_subscription = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       "/ugv_nav4d_ros2/pointcloud", 10,
       std::bind(&PathPlannerNode::cloud_callback, this, std::placeholders::_1));
 
@@ -49,16 +52,13 @@ PathPlannerNode::PathPlannerNode()
 
     cb_handle = param_subscriber->add_parameter_callback("param_subscriber", cb);
     path_publisher = this->create_publisher<nav_msgs::msg::Path>("/ugv_nav4d_ros2/path", 10);
-    grid_map_publisher = this->create_publisher<nav_msgs::msg::GridCells>("/ugv_nav4d_ros2/grid_map", 10);
     trav_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::TravMap>("/ugv_nav4d_ros2/trav_map", 10);
     mls_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::MLSMap>("/ugv_nav4d_ros2/mls_map", 10);
     cloud_map_publisher = this->create_publisher<sensor_msgs::msg::PointCloud2>("/ugv_nav4d_ros2/cloud_map", 10);
 
     configurePlanner();
 
-    if (get_parameter("map_ply_path").as_string() != "default_value" && get_parameter("load_map_from_topic").as_bool() == false){
-        //Load map from file only when user explicity sets the parameter
-        RCLCPP_INFO_STREAM(this->get_logger(), "Loading map from file: " + get_parameter("map_ply_path").as_string());
+    if (get_parameter("map_ply_path").as_string() != "default_value" && get_parameter("read_cloud_from_ply").as_bool() == true){
         loadMls(get_parameter("map_ply_path").as_string());
     }
 
@@ -85,11 +85,7 @@ void PathPlannerNode::map_publish_callback(const std::shared_ptr<std_srvs::srv::
                     std::shared_ptr<std_srvs::srv::Trigger::Response> response)
 {
     RCLCPP_INFO(this->get_logger(), "Service request for map publish received! Executing map_publish_callback...");
-    
-    if (publishMLSMap()){
-        RCLCPP_INFO(this->get_logger(), "Published MLS map.");  
-    }
-
+    publishMLSMap();
     response->success = true;
     response->message = "Published MLS map!";
 }
@@ -97,31 +93,19 @@ void PathPlannerNode::map_publish_callback(const std::shared_ptr<std_srvs::srv::
 void PathPlannerNode::cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
 {
     latest_pointcloud = msg;
-
-    bool load_map_from_topic = get_parameter("load_map_from_topic").as_bool();
-    if (load_map_from_topic){
-        if (pose_samples_callback()){
-            generateMls();
-        }
-        else{
-            RCLCPP_ERROR_STREAM(this->get_logger(), "ERROR: Failed to read robot pose! No map generated.");
-        }
-            
-    }
+    generateMls();
 }
 
-bool PathPlannerNode::pose_samples_callback(){
-
-    //printConfigs();
+bool PathPlannerNode::read_pose_from_tf(){
     std::string robot_frame = get_parameter("robot_frame").as_string();
     std::string world_frame = get_parameter("world_frame").as_string();
 
     try{
         geometry_msgs::msg::TransformStamped t = tf_buffer->lookupTransform(world_frame, robot_frame, tf2::TimePointZero);
-        pose_samples.pose.orientation = t.transform.rotation;
-        pose_samples.pose.position.x =  t.transform.translation.x;
-        pose_samples.pose.position.y =  t.transform.translation.y;
-        pose_samples.pose.position.z =  t.transform.translation.z;
+        start_pose.pose.orientation = t.transform.rotation;
+        start_pose.pose.position.x =  t.transform.translation.x;
+        start_pose.pose.position.y =  t.transform.translation.y;
+        start_pose.pose.position.z =  t.transform.translation.z;
     }
     catch(const tf2::TransformException & ex){
         return false;
@@ -131,14 +115,23 @@ bool PathPlannerNode::pose_samples_callback(){
 
 void PathPlannerNode::process_goal_request(const geometry_msgs::msg::PoseStamped::SharedPtr msg){
 
-    start_pose_rbs.position = Eigen::Vector3d(pose_samples.pose.position.x,
-                                              pose_samples.pose.position.y,
-                                              pose_samples.pose.position.z);
+    if (!get_parameter("read_pose_from_topic").as_bool())
+    {
+        if (!read_pose_from_tf()){
+            RCLCPP_INFO_STREAM(this->get_logger(), "Failed to read start pose of the robot!");
+            return;
+        }
 
-    start_pose_rbs.orientation = Eigen::Quaterniond(pose_samples.pose.orientation.w,
-                                                    pose_samples.pose.orientation.x,
-                                                    pose_samples.pose.orientation.y,
-                                                    pose_samples.pose.orientation.z);
+    }
+
+    start_pose_rbs.position = Eigen::Vector3d(start_pose.pose.position.x,
+                                              start_pose.pose.position.y,
+                                              start_pose.pose.position.z);
+
+    start_pose_rbs.orientation = Eigen::Quaterniond(start_pose.pose.orientation.w,
+                                                    start_pose.pose.orientation.x,
+                                                    start_pose.pose.orientation.y,
+                                                    start_pose.pose.orientation.z);
 
     goal_pose_rbs.position = Eigen::Vector3d(msg->pose.position.x,
                                              msg->pose.position.y,
@@ -148,11 +141,21 @@ void PathPlannerNode::process_goal_request(const geometry_msgs::msg::PoseStamped
                                                    msg->pose.orientation.x,
                                                    msg->pose.orientation.y,
                                                    msg->pose.orientation.z);
+    if (!inPlanningPhase){
+        plan();
+    }
+}
 
-    RCLCPP_INFO_STREAM(this->get_logger(), "Start Position: " << start_pose_rbs.position.transpose());
-    RCLCPP_INFO_STREAM(this->get_logger(), "Goal Position: "  << goal_pose_rbs.position.transpose());
+void PathPlannerNode::read_start_pose(const geometry_msgs::msg::PoseStamped::SharedPtr msg){
 
-    plan();
+    start_pose.pose.position.x = msg->pose.position.x;
+    start_pose.pose.position.y = msg->pose.position.y;
+    start_pose.pose.position.z = msg->pose.position.z;
+
+    start_pose.pose.orientation.w = msg->pose.orientation.w;
+    start_pose.pose.orientation.x = msg->pose.orientation.x;
+    start_pose.pose.orientation.y = msg->pose.orientation.y;
+    start_pose.pose.orientation.z = msg->pose.orientation.z;
 }
 
 void PathPlannerNode::printPlannerConfig(){
@@ -172,14 +175,10 @@ void PathPlannerNode::printPlannerConfig(){
 }
 
 bool PathPlannerNode::loadMls(const std::string& path){
-
     std::ifstream fileIn(path);       
-
     if(path.find(".ply") != std::string::npos)
     {
         cloud = pcl::PointCloud<pcl::PointXYZ>::Ptr(new pcl::PointCloud<pcl::PointXYZ>());
-
-        RCLCPP_INFO_STREAM(this->get_logger(), "Loading PLY: " << get_parameter("map_ply_path").as_string());        
         pcl::PLYReader plyReader;
         if(plyReader.read(path, *cloud) >= 0)
         {
@@ -190,9 +189,10 @@ bool PathPlannerNode::loadMls(const std::string& path){
             Eigen::Affine3f pclTf = Eigen::Affine3f::Identity();
             pclTf.translation() << -min.x, -min.y, -min.z;
             pcl::transformPointCloud (*cloud, *cloud, pclTf);
-            
-            //pcl::getMinMax3D (*cloud, min, max); 
 
+            std::vector<int> indices;
+            pcl::removeNaNFromPointCloud(*cloud, *cloud, indices);
+            
             const double mls_res = get_parameter("grid_resolution").as_double();
             const double size_x = max.x - min.x;
             const double size_y = max.y - min.y;
@@ -202,17 +202,11 @@ bool PathPlannerNode::loadMls(const std::string& path){
             const maps::grid::Vector2ui numCells(size_x / mls_res + 1, size_y / mls_res + 1);
             mlsMap = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
             mlsMap.mergePointCloud(*cloud, base::Transform3d::Identity());
-            RCLCPP_INFO_STREAM(this->get_logger(), "MLS Resolution: " << get_parameter("grid_resolution").as_double());
-            RCLCPP_INFO_STREAM(this->get_logger(), "NUM CELLS: " << numCells);
-            RCLCPP_INFO_STREAM(this->get_logger(), "Cloud Points: " << cloud->size());
-            RCLCPP_INFO_STREAM(this->get_logger(), "Generated MLS Map. Loading the Map into Planner...");
             planner->updateMap(mlsMap);
-            RCLCPP_INFO_STREAM(this->get_logger(), "Loaded Map into Planner");
-            //publishMLSMap();
         }
         return true;
     }
-    RCLCPP_INFO_STREAM(this->get_logger(), "Unabled to load mls. Unknown format");
+    RCLCPP_INFO_STREAM(this->get_logger(), "Unabled to load mls. Unknown format!");
     return false;
 }
 
@@ -224,48 +218,40 @@ bool PathPlannerNode::generateMls(){
     std::string world_frame = get_parameter("world_frame").as_string();
     base::Transform3d cloud2MLS;
 
-    try{
-        geometry_msgs::msg::TransformStamped t = tf_buffer->lookupTransform(world_frame, "husky/base_link/front_laser", tf2::TimePointZero);
-        cloud2MLS.translation() << t.transform.translation.x, t.transform.translation.y, t.transform.translation.z;
-        Eigen::Quaterniond quat(t.transform.rotation.w, 
-                                t.transform.rotation.x, 
-                                t.transform.rotation.y, 
-                                t.transform.rotation.z);
+    if (latest_pointcloud->header.frame_id != world_frame){
+        try{
+            geometry_msgs::msg::TransformStamped t = tf_buffer->lookupTransform(world_frame, latest_pointcloud->header.frame_id, tf2::TimePointZero);
+            cloud2MLS.translation() << t.transform.translation.x, t.transform.translation.y, t.transform.translation.z;
+            Eigen::Quaterniond quat(t.transform.rotation.w, 
+                                    t.transform.rotation.x, 
+                                    t.transform.rotation.y, 
+                                    t.transform.rotation.z);
+            cloud2MLS.linear() = quat.toRotationMatrix();
+        }
+        catch(const tf2::TransformException & ex){
+            RCLCPP_INFO_STREAM(this->get_logger(), "Failed to transform " << latest_pointcloud->header.frame_id << " to "  << world_frame);
+            return false;
+        }
+    }
+    else{
+        cloud2MLS.translation() << 0,0,0;
+        Eigen::Quaterniond quat(1,0,0,0);
         cloud2MLS.linear() = quat.toRotationMatrix();
     }
-    catch(const tf2::TransformException & ex){
-        return false;
-    }
+
+    std::vector<int> indices;
+    pcl::removeNaNFromPointCloud(*cloud, *cloud, indices);
 
     mlsMap.mergePointCloud(*cloud, cloud2MLS);
-    RCLCPP_INFO_STREAM(this->get_logger(), "MLS Resolution: " << get_parameter("grid_resolution").as_double());
-    RCLCPP_INFO_STREAM(this->get_logger(), "Cloud Points: " << cloud->size());
-    RCLCPP_INFO_STREAM(this->get_logger(), "Generated MLS Map. Loading the Map into Planner...");
-    RCLCPP_INFO_STREAM(this->get_logger(), "MLS Cells: " << mlsMap.getNumCells().transpose());
-
-    planner->updateMap(mlsMap);
-    RCLCPP_INFO_STREAM(this->get_logger(), "Loaded Map into Planner");
+    if (!inPlanningPhase){
+        planner->updateMap(mlsMap);
+    }
     if(!initialPatchAdded)
     {
-        RCLCPP_INFO_STREAM(this->get_logger(), "Setting Initial Patch of size: " << get_parameter("initialPatchRadius").as_double());
         planner->setInitialPatch(start_pose_rbs.getTransform(), get_parameter("initialPatchRadius").as_double());
         initialPatchAdded = true;
+        RCLCPP_INFO(this->get_logger(), "Ready to Plan...");
     }
-
-    //Eigen::Affine3d pclTf = Eigen::Affine3d::Identity();
-    //pclTf.translation() = cloud2MLS.translation();
-    //pclTf.linear() = cloud2MLS.linear();
-    //pcl::transformPointCloud (*cloud, *cloud, pclTf);
-
-    //sensor_msgs::msg::PointCloud2::SharedPtr cloud_ros = std::make_shared<sensor_msgs::msg::PointCloud2>();
-
-    // Convert PCL PointCloud to ROS PointCloud2 message
-    //pcl::toROSMsg(*cloud, *cloud_ros);
-    //cloud_ros->header.frame_id = get_parameter("world_frame").as_string();
-    //cloud_ros->header.stamp = this->now();
-    //cloud_map_publisher->publish(*cloud_ros);
-    //publishMLSMap();
-
     return true;
 }
 
@@ -278,6 +264,7 @@ void PathPlannerNode::plan(){
 
     RCLCPP_INFO_STREAM(this->get_logger(), "Planning...");
     ugv_nav4d::Planner::PLANNING_RESULT res = planner->plan(time, start_pose_rbs, goal_pose_rbs, trajectory2D, trajectory3D, false, false);
+    inPlanningPhase = false;
 
     switch(res)
     {
@@ -337,18 +324,20 @@ void PathPlannerNode::plan(){
             }
         }
         path_publisher->publish(path_message);
-        RCLCPP_INFO_STREAM(this->get_logger(), "Published Path...");
         publishTravMap();
     }
 }
 
 void PathPlannerNode::declareParameters(){
 
-    declare_parameter("load_map_from_topic", true);
+    declare_parameter("read_cloud_from_ply", false);
+    declare_parameter("read_pose_from_topic", false);
+
     declare_parameter("map_ply_path", "default_value");
 
     declare_parameter("robot_frame", "robot");
     declare_parameter("world_frame", "map");
+
     declare_parameter("grid_resolution", 0.3);
     declare_parameter("mls_gap_size", 0.1);
 
@@ -458,7 +447,6 @@ void PathPlannerNode::configurePlanner(){
 }
 
 bool PathPlannerNode::publishMLSMap(){
-
     ugv_nav4d_ros2::msg::MLSMap map_msg;    
     map_msg.width = 1;
     map_msg.height = 1;
@@ -527,25 +515,16 @@ bool PathPlannerNode::publishMLSMap(){
         }
     }
 
-    if (map_msg.patches.size() > 0){
-        mls_map_publisher->publish(map_msg);
-        return true;
-    }
-    else{
+    if (map_msg.patches.size() == 0){
         return false;
     }
+
+    mls_map_publisher->publish(map_msg);
+    return true;
 }
 
 void PathPlannerNode::publishTravMap(){
-
-    RCLCPP_INFO_STREAM(this->get_logger(), "Getting Traversability Map");
     const auto& trav_map_3d = planner->getTraversabilityMap(); 
-
-    nav_msgs::msg::GridCells grid_map;
-    grid_map.header.frame_id = get_parameter("world_frame").as_string();
-    grid_map.cell_height = trav_map_3d.getResolution().x();
-    grid_map.cell_width  = trav_map_3d.getResolution().y();
-
     ugv_nav4d_ros2::msg::TravMap msg;
     msg.width = 1;
     msg.height = 1;
@@ -553,25 +532,21 @@ void PathPlannerNode::publishTravMap(){
     msg.resolution = get_parameter("grid_resolution").as_double();
     msg.header.frame_id = get_parameter("world_frame").as_string();
 
-    RCLCPP_INFO_STREAM(this->get_logger(), "Reading Traversability Map");
+    double grid_min_x = get_parameter("grid_min_x").as_int();
+    double grid_min_y = get_parameter("grid_min_y").as_int();
+
     for(const maps::grid::LevelList<traversability_generator3d::TravGenNode *> &l : trav_map_3d)
     {
         for(const traversability_generator3d::TravGenNode *n : l)
         {
             ugv_nav4d_ros2::msg::TravPatch patch_msg;
             const Eigen::Vector3d& position = n->getVec3(trav_map_3d.getResolution().x());
-            geometry_msgs::msg::Point cell_center;
-            cell_center.x = position.x();
-            cell_center.y = position.y();
-            cell_center.z = position.z();
-            grid_map.cells.push_back(cell_center);
-
             patch_msg.a = n->getUserData().plane.normal()(0);
             patch_msg.b = n->getUserData().plane.normal()(1);
             patch_msg.c = n->getUserData().plane.normal()(2);
             patch_msg.d = -n->getUserData().plane.offset();
-            patch_msg.position.x = position.x();
-            patch_msg.position.y = position.y();
+            patch_msg.position.x = position.x() + grid_min_x;
+            patch_msg.position.y = position.y() + grid_min_y;
             patch_msg.position.z = position.z();
 
             switch((n->getType())){
@@ -606,13 +581,9 @@ void PathPlannerNode::publishTravMap(){
                     patch_msg.color.a = 1;
                     break;   
             }
-
             msg.patches.push_back(patch_msg);
         }
     }
-    grid_map_publisher->publish(grid_map);
     trav_map_publisher->publish(msg);
-
-    RCLCPP_INFO_STREAM(this->get_logger(), "Published Grid Map");
-   }
+}
 }

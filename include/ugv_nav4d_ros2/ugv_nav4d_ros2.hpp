@@ -38,12 +38,13 @@ public:
     PathPlannerNode();
 
 private:
-    bool pose_samples_callback();
+    bool read_pose_from_tf();
     void map_publish_callback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                     std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
 
     void process_goal_request(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
+    void read_start_pose(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
     void printPlannerConfig();
     bool loadMls(const std::string& path);
     bool generateMls();
@@ -58,18 +59,16 @@ private:
     std::shared_ptr<rclcpp::ParameterEventHandler> param_subscriber;
     std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_goal_pose;
-    rclcpp::TimerBase::SharedPtr timer_pose_samples;
-    rclcpp::TimerBase::SharedPtr timer_map_publish;
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_start_pose;
 
-    geometry_msgs::msg::PoseStamped pose_samples;
+    geometry_msgs::msg::PoseStamped start_pose;
     geometry_msgs::msg::PoseStamped goal_pose;
 
-    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_subscription_;
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_subscription;
     sensor_msgs::msg::PointCloud2::SharedPtr latest_pointcloud;
 
     //publishers
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_publisher;
-    rclcpp::Publisher<nav_msgs::msg::GridCells>::SharedPtr grid_map_publisher;
     rclcpp::Publisher<ugv_nav4d_ros2::msg::TravMap>::SharedPtr trav_map_publisher;
     rclcpp::Publisher<ugv_nav4d_ros2::msg::MLSMap>::SharedPtr mls_map_publisher;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_map_publisher;
@@ -93,6 +92,7 @@ private:
 
     maps::grid::MLSMapSloped mlsMap;
     bool initialPatchAdded;
+    bool inPlanningPhase;
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
     
