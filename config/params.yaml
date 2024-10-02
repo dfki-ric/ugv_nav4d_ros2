@@ -3,6 +3,7 @@ ugv_nav4d_ros2:
     read_cloud_from_ply: false
     read_pose_from_topic: true
     map_ply_path: 'path to ply file'
+    mls_gap_size: 0.1
     #Frame names to get the TF Transform robot2map
     robot_frame: husky/base_link
     world_frame: map
@@ -56,7 +57,7 @@ ugv_nav4d_ros2:
     maxStepHeight: 0.2
     minTraversablePercentage: 0.4
     robotHeight: 1.0
-    robotSizeX: 0.9
-    robotSizeY: 0.6
+    robotSizeX: 1.2
+    robotSizeY: 0.8
     slopeMetric: :NONE
     slopeMetricScale: 1.0
