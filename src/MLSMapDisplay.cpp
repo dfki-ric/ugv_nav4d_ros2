@@ -6,7 +6,6 @@
 #include <rviz_common/properties/int_property.hpp>
 #include <geometry_msgs/msg/point.hpp>
 #include <OgreSceneManager.h>
-#include <OgreManualObject.h>
 
 namespace ugv_nav4d_ros2 {
 
@@ -35,7 +34,10 @@ void MLSMapDisplay::reset()
 void MLSMapDisplay::processMessage(ugv_nav4d_ros2::msg::MLSMap::ConstSharedPtr msg)
 {
   // Clear any previous visuals
-  scene_manager_->destroyAllManualObjects();
+  for (auto& object : manual_objects_) {
+      scene_manager_->destroyManualObject(object);
+  }
+  manual_objects_.clear();
 
   std::cout << "Patches are " << msg->patches.size() << std::endl;
 
@@ -79,6 +81,7 @@ void MLSMapDisplay::processMessage(ugv_nav4d_ros2::msg::MLSMap::ConstSharedPtr m
 
     // Create a plane visual for each patch
     auto plane = scene_manager_->createManualObject();
+    manual_objects_.push_back(plane);
     plane->begin("BaseWhiteNoLighting", Ogre::RenderOperation::OT_TRIANGLE_LIST);
 
     // Define the vertices of the plane based on the patch parameters

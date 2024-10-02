@@ -5,6 +5,10 @@
 #include <ugv_nav4d_ros2/msg/trav_map.hpp>
 #include <rviz_common/message_filter_display.hpp>
 #include <memory>
+#include <vector>
+
+#include <OgreManualObject.h>
+
 
 namespace ugv_nav4d_ros2 {
 
@@ -23,6 +27,7 @@ protected:
 
 private:
   void processMessage(ugv_nav4d_ros2::msg::TravMap::ConstSharedPtr msg) override;
+  std::vector<Ogre::ManualObject*> manual_objects_;
 };
 
 } // ugv_nav4d_ros2_trav_map_plugin

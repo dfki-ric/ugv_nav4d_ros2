@@ -5,6 +5,9 @@
 #include <ugv_nav4d_ros2/msg/mls_map.hpp>
 #include <rviz_common/message_filter_display.hpp>
 #include <memory>
+#include <vector>
+
+#include <OgreManualObject.h>
 
 namespace ugv_nav4d_ros2 {
 
@@ -23,6 +26,7 @@ protected:
 
 private:
   void processMessage(ugv_nav4d_ros2::msg::MLSMap::ConstSharedPtr msg) override;
+  std::vector<Ogre::ManualObject*> manual_objects_;
 };
 
 } // ugv_nav4d_ros2_mls_map_plugin
