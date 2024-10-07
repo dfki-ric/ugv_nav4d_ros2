@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.8)
 project(ugv_nav4d_ros2)
 
-set(ugv_nav4d_ros2_MAJOR_VERSION 0)
+set(ugv_nav4d_ros2_MAJOR_VERSION 1)
 set(ugv_nav4d_ros2_MINOR_VERSION 0)
 set(ugv_nav4d_ros2_PATCH_VERSION 0)
 set(ugv_nav4d_ros2_VERSION
@@ -11,7 +11,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-# Find dependencis
+# Find dependencies
 find_package(Qt5 COMPONENTS Core Widgets REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system filesystem serialization)
 find_package(rosidl_default_generators REQUIRED)
