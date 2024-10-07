@@ -22,6 +22,7 @@ PathPlannerNode::PathPlannerNode()
 
     initialPatchAdded = false;
     inPlanningPhase = false;
+    gotMap = false;
     
     map_publish_service = this->create_service<std_srvs::srv::Trigger>(
             "/ugv_nav4d_ros2/map_publish", std::bind(&PathPlannerNode::map_publish_callback, this, std::placeholders::_1, std::placeholders::_2));
@@ -32,68 +33,122 @@ PathPlannerNode::PathPlannerNode()
     sub_start_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/start_pose", 1, 
             bind(&PathPlannerNode::read_start_pose, this, std::placeholders::_1));
 
-
-    // Create a parameter subscriber that can be used to monitor parameter changes
-    // (for this node's parameters as well as other nodes' parameters)
-    param_subscriber = std::make_shared<rclcpp::ParameterEventHandler>(this);
-
     cloud_subscription = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       "/ugv_nav4d_ros2/pointcloud", 10,
       std::bind(&PathPlannerNode::cloud_callback, this, std::placeholders::_1));
 
-    // Set a callback for this node's parameter updates
-    auto cb = [this](const rclcpp::Parameter & p) {
-        RCLCPP_INFO(
-          this->get_logger(), "cb: Received an update to parameter \"%s\" of type %s: \"%ld\"",
-          p.get_name().c_str(),
-          p.get_type_name().c_str(),
-          p.as_int());
-      };
+    callback_handle = this->add_on_set_parameters_callback(
+        std::bind(&PathPlannerNode::parametersCallback, this, std::placeholders::_1));
 
-    cb_handle = param_subscriber->add_parameter_callback("param_subscriber", cb);
+    timer = this->create_wall_timer(
+        std::chrono::milliseconds(1000),  // Timer period
+        std::bind(&PathPlannerNode::parameterUpdateTimerCallback, this)  // Callback function
+    );
+
     path_publisher = this->create_publisher<nav_msgs::msg::Path>("/ugv_nav4d_ros2/path", 10);
     trav_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::TravMap>("/ugv_nav4d_ros2/trav_map", 10);
     mls_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::MLSMap>("/ugv_nav4d_ros2/mls_map", 10);
     cloud_map_publisher = this->create_publisher<sensor_msgs::msg::PointCloud2>("/ugv_nav4d_ros2/cloud_map", 10);
 
-    configurePlanner();
-
     if (get_parameter("map_ply_path").as_string() != "default_value" && get_parameter("read_cloud_from_ply").as_bool() == true){
-        loadMls(get_parameter("map_ply_path").as_string());
+        if (loadMls(get_parameter("map_ply_path").as_string())){
+            gotMap = true;
+        }
+    }
+    else{
+        const double mls_res = get_parameter("grid_resolution").as_double();
+        const double grid_max_x = get_parameter("grid_max_x").as_int();
+        const double grid_max_y = get_parameter("grid_max_y").as_int();
+        const double grid_min_x = get_parameter("grid_min_x").as_int();
+        const double grid_min_y = get_parameter("grid_min_y").as_int();
+        const double grid_size_x = (grid_max_x - grid_min_x)/mls_res;
+        const double grid_size_y = (grid_max_y - grid_min_y)/mls_res;
+        
+        maps::grid::MLSConfig cfg;
+        cfg.gapSize = get_parameter("mls_gap_size").as_double();
+        cfg.thickness = 0.2;
+        const maps::grid::Vector2ui numCells(grid_size_x, grid_size_y);
+        mlsMap = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
+        mlsMap.translate(Eigen::Vector3d(grid_min_x, grid_min_y, 0));
+    }
+    configurePlanner();
+}
+
+void PathPlannerNode::parameterUpdateTimerCallback(){
+    if (!parameters_to_update.empty())
+    {
+        this->set_parameters(parameters_to_update);
+        parameters_to_update.clear();
+        configurePlanner();
+    }
+}
+
+rcl_interfaces::msg::SetParametersResult PathPlannerNode::parametersCallback(const std::vector<rclcpp::Parameter> &parameters){
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = true;
+    result.reason = "success";
+
+    for (const auto &param: parameters)
+    {
+        if (this->has_parameter(param.get_name()))
+        {
+            RCLCPP_INFO(this->get_logger(), "Parameter '%s' changed.", param.get_name().c_str());
+            if (param.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER)
+            {
+                parameters_to_update.push_back(rclcpp::Parameter(param.get_name(), param.as_int()));
+            }
+            else if (param.get_type() == rclcpp::ParameterType::PARAMETER_STRING)
+            {
+                parameters_to_update.push_back(rclcpp::Parameter(param.get_name(), param.as_string()));
+            }
+            else if (param.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE)
+            {
+                parameters_to_update.push_back(rclcpp::Parameter(param.get_name(), param.as_double()));
+            }
+        }
+        else
+        {
+            RCLCPP_WARN(this->get_logger(), "Parameter '%s' is not declared in the node.", param.get_name().c_str());
+            result.successful = false;
+            result.reason = "Parameter not found.";
+        }
     }
 
-    const double mls_res = get_parameter("grid_resolution").as_double();
-
-    const double grid_max_x = get_parameter("grid_max_x").as_int();
-    const double grid_max_y = get_parameter("grid_max_y").as_int();
-
-    const double grid_min_x = get_parameter("grid_min_x").as_int();
-    const double grid_min_y = get_parameter("grid_min_y").as_int();
-
-    const double grid_size_x = (grid_max_x - grid_min_x)/mls_res;
-    const double grid_size_y = (grid_max_y - grid_min_y)/mls_res;
-    
-    maps::grid::MLSConfig cfg;
-    cfg.gapSize = get_parameter("mls_gap_size").as_double();
-    cfg.thickness = 0.2;
-    const maps::grid::Vector2ui numCells(grid_size_x, grid_size_y);
-    mlsMap = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
-    mlsMap.translate(Eigen::Vector3d(grid_min_x, grid_min_y, 0));
+    return result;
 }
+
 
 void PathPlannerNode::map_publish_callback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                     std::shared_ptr<std_srvs::srv::Trigger::Response> response)
 {
-    RCLCPP_INFO(this->get_logger(), "Service request for map publish received! Executing map_publish_callback...");
+    RCLCPP_INFO(this->get_logger(), "Received service request to publish map.");
     publishMLSMap();
     response->success = true;
-    response->message = "Published MLS map!";
+    response->message = "Published MLS map.";
+    RCLCPP_INFO(this->get_logger(), "Published MLS map.");
+
 }
 
 void PathPlannerNode::cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
 {
     latest_pointcloud = msg;
-    generateMls();
+    gotMap = generateMls();
+
+    if (gotMap){
+        if (!inPlanningPhase){
+            RCLCPP_INFO(this->get_logger(), "Planner state: Got Map");
+            planner->updateMap(mlsMap);
+            if (!initialPatchAdded){
+                planner->setInitialPatch(start_pose_rbs.getTransform(), get_parameter("initialPatchRadius").as_double());
+                initialPatchAdded = true;
+                RCLCPP_INFO(this->get_logger(), "Initial patch added.");
+            }
+            RCLCPP_INFO(this->get_logger(), "Planner state: Ready");
+        }
+        else{
+            RCLCPP_INFO(this->get_logger(), "Map not loaded because planner is in state: Planning");
+        }
+    }
 }
 
 bool PathPlannerNode::read_pose_from_tf(){
@@ -118,7 +173,7 @@ void PathPlannerNode::process_goal_request(const geometry_msgs::msg::PoseStamped
     if (!get_parameter("read_pose_from_topic").as_bool())
     {
         if (!read_pose_from_tf()){
-            RCLCPP_INFO_STREAM(this->get_logger(), "Failed to read start pose of the robot!");
+            RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to read start pose of the robot!");
             return;
         }
 
@@ -202,16 +257,14 @@ bool PathPlannerNode::loadMls(const std::string& path){
             const maps::grid::Vector2ui numCells(size_x / mls_res + 1, size_y / mls_res + 1);
             mlsMap = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
             mlsMap.mergePointCloud(*cloud, base::Transform3d::Identity());
-            planner->updateMap(mlsMap);
         }
         return true;
     }
-    RCLCPP_INFO_STREAM(this->get_logger(), "Unabled to load mls. Unknown format!");
+    RCLCPP_ERROR_STREAM(this->get_logger(), "Unabled to load mls. Unknown format!");
     return false;
 }
 
 bool PathPlannerNode::generateMls(){
-
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
     pcl::fromROSMsg(*latest_pointcloud, *cloud);
 
@@ -229,7 +282,7 @@ bool PathPlannerNode::generateMls(){
             cloud2MLS.linear() = quat.toRotationMatrix();
         }
         catch(const tf2::TransformException & ex){
-            RCLCPP_INFO_STREAM(this->get_logger(), "Failed to transform " << latest_pointcloud->header.frame_id << " to "  << world_frame);
+            RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to transform " << latest_pointcloud->header.frame_id << " to "  << world_frame);
             return false;
         }
     }
@@ -243,18 +296,8 @@ bool PathPlannerNode::generateMls(){
     pcl::removeNaNFromPointCloud(*cloud, *cloud, indices);
 
     mlsMap.mergePointCloud(*cloud, cloud2MLS);
-    if (!inPlanningPhase){
-        planner->updateMap(mlsMap);
-    }
-    if(!initialPatchAdded)
-    {
-        planner->setInitialPatch(start_pose_rbs.getTransform(), get_parameter("initialPatchRadius").as_double());
-        initialPatchAdded = true;
-        RCLCPP_INFO(this->get_logger(), "Ready to Plan...");
-    }
     return true;
 }
-
 
 void PathPlannerNode::plan(){
 
@@ -262,7 +305,8 @@ void PathPlannerNode::plan(){
     base::Time time;
     time.microseconds = get_parameter("planningTime").as_int();
 
-    RCLCPP_INFO_STREAM(this->get_logger(), "Planning...");
+    RCLCPP_INFO_STREAM(this->get_logger(), "Planner state: Planning");
+    inPlanningPhase = true;
     ugv_nav4d::Planner::PLANNING_RESULT res = planner->plan(time, start_pose_rbs, goal_pose_rbs, trajectory2D, trajectory3D, false, false);
     inPlanningPhase = false;
 
@@ -442,8 +486,29 @@ void PathPlannerNode::updateParameters(){
 }
 
 void PathPlannerNode::configurePlanner(){
-    updateParameters();
-    planner.reset(new ugv_nav4d::Planner(splinePrimitiveConfig, traversabilityConfig, mobility, plannerConfig));
+    if (!inPlanningPhase){
+        updateParameters();
+
+        planner.reset(new ugv_nav4d::Planner(splinePrimitiveConfig, traversabilityConfig, mobility, plannerConfig));
+        RCLCPP_INFO_STREAM(this->get_logger(), "Planner state: Reset");
+      
+        if (gotMap){
+            RCLCPP_INFO_STREAM(this->get_logger(), "Loading map.");
+            planner->updateMap(mlsMap);
+            RCLCPP_INFO_STREAM(this->get_logger(), "Loaded map.");  
+
+            planner->setInitialPatch(start_pose_rbs.getTransform(), get_parameter("initialPatchRadius").as_double());
+            initialPatchAdded = true;
+            RCLCPP_INFO(this->get_logger(), "Initial patch added.");
+            RCLCPP_INFO(this->get_logger(), "Planner state: Ready");
+        }
+        else{
+            RCLCPP_INFO(this->get_logger(), "No map found. Planner state: No Map");
+        }
+    }
+    else{
+        RCLCPP_INFO_STREAM(this->get_logger(), "Unable to update parameter due to planner is in state: Planning");
+    }
 }
 
 bool PathPlannerNode::publishMLSMap(){
@@ -472,7 +537,7 @@ bool PathPlannerNode::publishMLSMap(){
                 const maps::grid::SurfacePatch<maps::grid::MLSConfig::SLOPE>& p = *it;  
                 if(p.getNumberOfMeasurements() < minMeasurements){
                     //TODO: What does this do?
-                    std::cout << "Too few measurements!" << std::endl;
+                    RCLCPP_WARN(this->get_logger(),"Too few measurements!");
                     continue;
                 }
 

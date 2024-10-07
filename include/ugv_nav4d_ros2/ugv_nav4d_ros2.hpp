@@ -4,6 +4,7 @@
 #include <Eigen/Dense>
 
 #include <rclcpp/rclcpp.hpp>
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
 
 #include <std_srvs/srv/trigger.hpp>
 
@@ -54,10 +55,12 @@ private:
     void configurePlanner();
     void publishTravMap();
     bool publishMLSMap();
+    void parameterUpdateTimerCallback();
+
+    rcl_interfaces::msg::SetParametersResult parametersCallback(const std::vector<rclcpp::Parameter> &parameters);
 
     //subscriptions
-    std::shared_ptr<rclcpp::ParameterEventHandler> param_subscriber;
-    std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle;
+    OnSetParametersCallbackHandle::SharedPtr callback_handle;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_goal_pose;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_start_pose;
 
@@ -93,8 +96,12 @@ private:
     maps::grid::MLSMapSloped mlsMap;
     bool initialPatchAdded;
     bool inPlanningPhase;
+    bool gotMap;
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
+
+    std::vector<rclcpp::Parameter> parameters_to_update;
+    rclcpp::TimerBase::SharedPtr timer;
     
 };
 
