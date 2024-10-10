@@ -309,6 +309,7 @@ void PathPlannerNode::plan(){
     inPlanningPhase = true;
     ugv_nav4d::Planner::PLANNING_RESULT res = planner->plan(time, start_pose_rbs, goal_pose_rbs, trajectory2D, trajectory3D, false, false);
     inPlanningPhase = false;
+    publishTravMap();
 
     switch(res)
     {
@@ -368,7 +369,6 @@ void PathPlannerNode::plan(){
             }
         }
         path_publisher->publish(path_message);
-        publishTravMap();
     }
 }
 
