@@ -66,7 +66,6 @@ PathPlannerNode::PathPlannerNode()
         
         maps::grid::MLSConfig cfg;
         cfg.gapSize = get_parameter("mls_gap_size").as_double();
-        cfg.thickness = 0.2;
         const maps::grid::Vector2ui numCells(grid_size_x, grid_size_y);
         mlsMap = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
         mlsMap.translate(Eigen::Vector3d(grid_min_x, grid_min_y, 0));
@@ -305,9 +304,12 @@ void PathPlannerNode::plan(){
     base::Time time;
     time.microseconds = get_parameter("planningTime").as_int();
 
+    bool dumpOnError = get_parameter("dumpOnError").as_bool();
+    bool dumpOnSuccess = get_parameter("dumpOnSuccess").as_bool();
+
     RCLCPP_INFO_STREAM(this->get_logger(), "Planner state: Planning");
     inPlanningPhase = true;
-    ugv_nav4d::Planner::PLANNING_RESULT res = planner->plan(time, start_pose_rbs, goal_pose_rbs, trajectory2D, trajectory3D, false, false);
+    ugv_nav4d::Planner::PLANNING_RESULT res = planner->plan(time, start_pose_rbs, goal_pose_rbs, trajectory2D, trajectory3D, dumpOnError, dumpOnSuccess);
     inPlanningPhase = false;
     publishTravMap();
 
@@ -362,7 +364,7 @@ void PathPlannerNode::plan(){
                 geometry_msgs::msg::PoseStamped tempPoint;
                 tempPoint.pose.position.x= point.x();
                 tempPoint.pose.position.y= point.y();
-                tempPoint.pose.position.z= get_parameter("distToGround").as_double();
+                tempPoint.pose.position.z= point.z();
                 // Add points to path.
                 path_message.header.frame_id = get_parameter("world_frame").as_string();
                 path_message.poses.push_back(tempPoint);
@@ -390,8 +392,8 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("grid_max_y", 50);
     declare_parameter("grid_min_y", -50);
 
-    declare_parameter("dumpOnError", 0);
-    declare_parameter("dumpOnSuccess", 0);
+    declare_parameter("dumpOnError", false);
+    declare_parameter("dumpOnSuccess", false);
     declare_parameter("initialPatchRadius", 3.0);
 
     declare_parameter("maxMotionCurveLength", 100.0);
@@ -407,13 +409,15 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("searchProgressSteps", 0.1);
     declare_parameter("searchRadius", 0.0);
     declare_parameter("translationSpeed", 1.0);
+    declare_parameter("spline_sampling_resolution", 0.05);
+    declare_parameter("remove_goal_offset", false);
 
     declare_parameter("epsilonSteps", 2);
     declare_parameter("initialEpsilon", 64);
     declare_parameter("numThreads", 8);
     declare_parameter("planningTime", 50000000); // microseconds
 
-    declare_parameter("cellSkipFactor", 3);
+    declare_parameter("cellSkipFactor", 0.1);
     declare_parameter("destinationCircleRadius", 10);
     declare_parameter("generateBackwardMotions", true);
     declare_parameter("generateForwardMotions", true);
@@ -446,7 +450,7 @@ void PathPlannerNode::updateParameters(){
     splinePrimitiveConfig.numAngles                = get_parameter("numAngles").as_int();
     splinePrimitiveConfig.numEndAngles             = get_parameter("numEndAngles").as_int();
     splinePrimitiveConfig.destinationCircleRadius  = get_parameter("destinationCircleRadius").as_int();
-    splinePrimitiveConfig.cellSkipFactor           = get_parameter("cellSkipFactor").as_int();
+    splinePrimitiveConfig.cellSkipFactor           = get_parameter("cellSkipFactor").as_double();
     splinePrimitiveConfig.generateForwardMotions   = get_parameter("generateForwardMotions").as_bool();
     splinePrimitiveConfig.generatePointTurnMotions = get_parameter("generatePointTurnMotions").as_bool();
     splinePrimitiveConfig.generateLateralMotions   = get_parameter("generateLateralMotions").as_bool();
@@ -463,7 +467,9 @@ void PathPlannerNode::updateParameters(){
     mobility.multiplierBackwardTurn                = get_parameter("multiplierBackwardTurn").as_double();
     mobility.multiplierForwardTurn                 = get_parameter("multiplierForwardTurn").as_double();
     mobility.multiplierPointTurn                   = get_parameter("multiplierPointTurn").as_double();
-     
+    mobility.spline_sampling_resolution            = get_parameter("spline_sampling_resolution").as_double();
+    mobility.remove_goal_offset                    = get_parameter("remove_goal_offset").as_bool();
+
     traversabilityConfig.gridResolution            = get_parameter("grid_resolution").as_double();
     traversabilityConfig.maxSlope                  = get_parameter("maxSlope").as_double();
     traversabilityConfig.maxStepHeight             = get_parameter("maxStepHeight").as_double();

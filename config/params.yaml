@@ -6,36 +6,38 @@ ugv_nav4d_ros2:
     mls_gap_size: 0.1
     robot_frame: husky/base_link
     world_frame: map
-    grid_resolution: 0.3
+    grid_resolution: 0.5
     grid_max_x: 100
     grid_min_x: -100
     grid_max_y: 100
     grid_min_y: -100
-    dumpOnError: 0
-    dumpOnSuccess: 0
+    dumpOnError: false
+    dumpOnSuccess: false
     initialPatchRadius: 3.0
     #Mobility Parameters
     maxMotionCurveLength: 100.0
-    minTurningRadius: 1.0
-    multiplierBackward: 3.0
-    multiplierBackwardTurn: 4.0
+    minTurningRadius: 0.8
+    multiplierBackward: 2.0
+    multiplierBackwardTurn: 3.0
     multiplierForward: 1.0
     multiplierForwardTurn: 2.0
     multiplierLateral: 4.0
     multiplierLateralCurve: 4.0
-    multiplierPointTurn: 3.0
+    multiplierPointTurn: 2.0
     rotationSpeed: 1.0
     searchProgressSteps: 0.1
-    searchRadius: 0.0
+    searchRadius: 1.0
     translationSpeed: 1.0   
+    spline_sampling_resolution: 0.05
+    remove_goal_offset: false
     #Planner Parameters
     epsilonSteps: 2
     initialEpsilon: 64
     numThreads: 8
-    planningTime: 50000000
+    planningTime: 500000000
     #Motion Primitive Parameters:
-    cellSkipFactor: 3
-    destinationCircleRadius: 10
+    cellSkipFactor: 0.1
+    destinationCircleRadius: 6
     generateBackwardMotions: true
     generateForwardMotions: true
     generateLateralMotions: false
@@ -52,7 +54,7 @@ ugv_nav4d_ros2:
     inclineLimittingMinSlope: 0.2
     initialPatchVariance: 0.0001
     maxSlope: 0.45
-    maxStepHeight: 0.2
+    maxStepHeight: 0.25
     minTraversablePercentage: 0.4
     robotHeight: 1.0
     robotSizeX: 1.2
