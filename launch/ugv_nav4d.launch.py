@@ -19,17 +19,26 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'pointcloud_topic',
             default_value='/ugv_nav4d_ros2/pointcloud',
-            description='Topic name of the pointcloud'
+            description='Topic name of the pointcloud used to generate MLS map'
         )
     )
-
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            'goal_topic',
+            default_value='/ugv_nav4d_ros2/goal_pose',
+            description='Topic name of the goal pose'
+        )
+    )
     declared_arguments.append(
         Node(
         package="ugv_nav4d_ros2",
         executable="ugv_nav4d_ros2_node",
         name="ugv_nav4d_ros2",
         output="screen",
-        remappings=[("/ugv_nav4d_ros2/pointcloud", LaunchConfiguration("pointcloud_topic"))],
+        remappings=[
+                ("/ugv_nav4d_ros2/pointcloud", LaunchConfiguration("pointcloud_topic")),
+                ("/ugv_nav4d_ros2/goal_pose", LaunchConfiguration("goal_topic")),
+            ],
         parameters=[config],
         )
     )
