@@ -50,6 +50,17 @@ PathPlannerNode::PathPlannerNode()
     mls_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::MLSMap>("/ugv_nav4d_ros2/mls_map", 10);
     cloud_map_publisher = this->create_publisher<sensor_msgs::msg::PointCloud2>("/ugv_nav4d_ros2/cloud_map", 10);
 
+    min_point.x() = get_parameter("dist_min_x").as_int();
+    min_point.y() = get_parameter("dist_min_y").as_int(); 
+    min_point.z() = get_parameter("dist_min_z").as_int(); 
+
+    max_point.x() = get_parameter("dist_max_x").as_int();
+    max_point.y() = get_parameter("dist_max_y").as_int(); 
+    max_point.z() = get_parameter("dist_max_z").as_int(); 
+
+    box_filter.setMin(min_point);  // Set minimum bound
+    box_filter.setMax(max_point);  // Set maximum bound
+
     if (get_parameter("map_ply_path").as_string() != "default_value" && get_parameter("read_cloud_from_ply").as_bool() == true){
         if (loadMls(get_parameter("map_ply_path").as_string())){
             gotMap = true;
@@ -57,18 +68,18 @@ PathPlannerNode::PathPlannerNode()
     }
     else{
         const double mls_res = get_parameter("grid_resolution").as_double();
-        const double grid_max_x = get_parameter("grid_max_x").as_int();
-        const double grid_max_y = get_parameter("grid_max_y").as_int();
-        const double grid_min_x = get_parameter("grid_min_x").as_int();
-        const double grid_min_y = get_parameter("grid_min_y").as_int();
-        const double grid_size_x = (grid_max_x - grid_min_x)/mls_res;
-        const double grid_size_y = (grid_max_y - grid_min_y)/mls_res;
+        const double dist_max_x = get_parameter("dist_max_x").as_int();
+        const double dist_max_y = get_parameter("dist_max_y").as_int();
+        const double dist_min_x = get_parameter("dist_min_x").as_int();
+        const double dist_min_y = get_parameter("dist_min_y").as_int();
+        const double grid_size_x = (dist_max_x - dist_min_x)/mls_res;
+        const double grid_size_y = (dist_max_y - dist_min_y)/mls_res;
         
         maps::grid::MLSConfig cfg;
         cfg.gapSize = get_parameter("mls_gap_size").as_double();
         const maps::grid::Vector2ui numCells(grid_size_x, grid_size_y);
         mlsMap = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
-        mlsMap.translate(Eigen::Vector3d(grid_min_x, grid_min_y, 0));
+        mlsMap.translate(Eigen::Vector3d(dist_min_x, dist_min_y, 0));
     }
     configurePlanner();
 }
@@ -212,22 +223,6 @@ void PathPlannerNode::read_start_pose(const geometry_msgs::msg::PoseStamped::Sha
     start_pose.pose.orientation.z = msg->pose.orientation.z;
 }
 
-void PathPlannerNode::printPlannerConfig(){
-
-    //TODO: Add other config params to printout
-    RCLCPP_INFO_STREAM(this->get_logger(), "SplinePrimitivesConfig");
-    RCLCPP_INFO_STREAM(this->get_logger(), "gridSize: " << splinePrimitiveConfig.gridSize);
-    RCLCPP_INFO_STREAM(this->get_logger(), "numAngles: " << splinePrimitiveConfig.numAngles);
-    RCLCPP_INFO_STREAM(this->get_logger(), "numEndAngles: " << splinePrimitiveConfig.numEndAngles);
-    RCLCPP_INFO_STREAM(this->get_logger(), "destinationCircleRadius: " << splinePrimitiveConfig.destinationCircleRadius);
-    RCLCPP_INFO_STREAM(this->get_logger(), "cellSkipFactor: " << splinePrimitiveConfig.cellSkipFactor);
-    RCLCPP_INFO_STREAM(this->get_logger(), "splineOrder: " << splinePrimitiveConfig.splineOrder);
-    RCLCPP_INFO_STREAM(this->get_logger(), "generateForwardMotions: " << splinePrimitiveConfig.generateForwardMotions);
-    RCLCPP_INFO_STREAM(this->get_logger(), "generateBackwardMotions: " << splinePrimitiveConfig.generateBackwardMotions);
-    RCLCPP_INFO_STREAM(this->get_logger(), "generateLateralMotions: " << splinePrimitiveConfig.generateLateralMotions);
-    RCLCPP_INFO_STREAM(this->get_logger(), "generatePointTurnMotions: " << splinePrimitiveConfig.generatePointTurnMotions);
-}
-
 bool PathPlannerNode::loadMls(const std::string& path){
     std::ifstream fileIn(path);       
     if(path.find(".ply") != std::string::npos)
@@ -246,7 +241,11 @@ bool PathPlannerNode::loadMls(const std::string& path){
 
             std::vector<int> indices;
             pcl::removeNaNFromPointCloud(*cloud, *cloud, indices);
-            
+
+            pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
+            box_filter.setInputCloud(cloud);
+            box_filter.filter(*cloud_filtered);
+    
             const double mls_res = get_parameter("grid_resolution").as_double();
             const double size_x = max.x - min.x;
             const double size_y = max.y - min.y;
@@ -255,7 +254,7 @@ bool PathPlannerNode::loadMls(const std::string& path){
             cfg.gapSize = get_parameter("mls_gap_size").as_double();
             const maps::grid::Vector2ui numCells(size_x / mls_res + 1, size_y / mls_res + 1);
             mlsMap = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
-            mlsMap.mergePointCloud(*cloud, base::Transform3d::Identity());
+            mlsMap.mergePointCloud(*cloud_filtered, base::Transform3d::Identity());
         }
         return true;
     }
@@ -294,7 +293,11 @@ bool PathPlannerNode::generateMls(){
     std::vector<int> indices;
     pcl::removeNaNFromPointCloud(*cloud, *cloud, indices);
 
-    mlsMap.mergePointCloud(*cloud, cloud2MLS);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
+    box_filter.setInputCloud(cloud);
+    box_filter.filter(*cloud_filtered);
+
+    mlsMap.mergePointCloud(*cloud_filtered, cloud2MLS);
     return true;
 }
 
@@ -376,25 +379,26 @@ void PathPlannerNode::plan(){
 
 void PathPlannerNode::declareParameters(){
 
-    declare_parameter("read_cloud_from_ply", false);
-    declare_parameter("read_pose_from_topic", false);
+    auto param_desc = rcl_interfaces::msg::ParameterDescriptor{};
+    param_desc.read_only = true;
 
-    declare_parameter("map_ply_path", "default_value");
-
-    declare_parameter("robot_frame", "robot");
-    declare_parameter("world_frame", "map");
-
-    declare_parameter("grid_resolution", 0.3);
-    declare_parameter("mls_gap_size", 0.1);
-
-    declare_parameter("grid_max_x", 50);
-    declare_parameter("grid_min_x", -50);
-    declare_parameter("grid_max_y", 50);
-    declare_parameter("grid_min_y", -50);
+    declare_parameter("read_cloud_from_ply", false, param_desc);
+    declare_parameter("read_pose_from_topic", false, param_desc);
+    declare_parameter("map_ply_path", "default_value", param_desc);
+    declare_parameter("robot_frame", "robot", param_desc);
+    declare_parameter("world_frame", "map", param_desc);
+    declare_parameter("grid_resolution", 0.3, param_desc);
+    declare_parameter("mls_gap_size", 0.1, param_desc);
+    declare_parameter("dist_max_x", 50, param_desc);
+    declare_parameter("dist_min_x", -50, param_desc);
+    declare_parameter("dist_max_y", 50, param_desc);
+    declare_parameter("dist_min_y", -50, param_desc);
+    declare_parameter("dist_max_z", 50, param_desc);
+    declare_parameter("dist_min_z", -50, param_desc);
+    declare_parameter("initialPatchRadius", 3.0, param_desc);
 
     declare_parameter("dumpOnError", false);
     declare_parameter("dumpOnSuccess", false);
-    declare_parameter("initialPatchRadius", 3.0);
 
     declare_parameter("maxMotionCurveLength", 100.0);
     declare_parameter("minTurningRadius", 1.0);
@@ -407,7 +411,7 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("multiplierPointTurn", 3.0);
     declare_parameter("rotationSpeed", 1.0);
     declare_parameter("searchProgressSteps", 0.1);
-    declare_parameter("searchRadius", 0.0);
+    declare_parameter("searchRadius", 1.0);
     declare_parameter("translationSpeed", 1.0);
     declare_parameter("spline_sampling_resolution", 0.05);
     declare_parameter("remove_goal_offset", false);
@@ -415,24 +419,24 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("epsilonSteps", 2);
     declare_parameter("initialEpsilon", 64);
     declare_parameter("numThreads", 8);
-    declare_parameter("planningTime", 50000000); // microseconds
+    declare_parameter("planningTime", 5000000); // microseconds
 
     declare_parameter("cellSkipFactor", 0.1);
-    declare_parameter("destinationCircleRadius", 10);
+    declare_parameter("destinationCircleRadius", 6);
     declare_parameter("generateBackwardMotions", true);
     declare_parameter("generateForwardMotions", true);
     declare_parameter("generateLateralMotions", false);
     declare_parameter("generatePointTurnMotions", true);
-    declare_parameter("numAngles", 42);
-    declare_parameter("numEndAngles", 21);
+    declare_parameter("numAngles", 16);
+    declare_parameter("numEndAngles", 8);
     declare_parameter("splineOrder", 4);
 
     declare_parameter("allowForwardDownhill", true);
-    declare_parameter("costFunctionDist", 0.0);
-    declare_parameter("distToGround", 0.0);
     declare_parameter("enableInclineLimitting", true);
     declare_parameter("inclineLimittingLimit", 0.1);
     declare_parameter("inclineLimittingMinSlope", 0.2);
+    declare_parameter("costFunctionDist", 0.0);
+    declare_parameter("distToGround", 0.0);
     declare_parameter("initialPatchVariance", 0.0001);
     declare_parameter("maxSlope", 0.45);
     declare_parameter("maxStepHeight", 0.2);
@@ -529,8 +533,8 @@ bool PathPlannerNode::publishMLSMap(){
     maps::grid::Vector2ui num_cell = mlsMap.getNumCells();
     typedef maps::grid::MLSMap<maps::grid::MLSConfig::SLOPE>::CellType Cell;
 
-    double grid_min_x = get_parameter("grid_min_x").as_int();
-    double grid_min_y = get_parameter("grid_min_y").as_int();
+    double dist_min_x = get_parameter("dist_min_x").as_int();
+    double dist_min_y = get_parameter("dist_min_y").as_int();
 
 
     for (size_t x = 0; x < num_cell.x(); x++)
@@ -571,8 +575,8 @@ bool PathPlannerNode::publishMLSMap(){
                     patch_msg.b = plane.normal()(1);
                     patch_msg.c = plane.normal()(2);
                     patch_msg.d = -plane.offset();                       
-                    patch_msg.position.x = pos.x() + grid_min_x;
-                    patch_msg.position.y = pos.y() + grid_min_y;
+                    patch_msg.position.x = pos.x() + dist_min_x;
+                    patch_msg.position.y = pos.y() + dist_min_y;
                     patch_msg.position.z = p.getCenter().z();
                     map_msg.patches.push_back(patch_msg);
                 }
@@ -603,8 +607,8 @@ void PathPlannerNode::publishTravMap(){
     msg.resolution = get_parameter("grid_resolution").as_double();
     msg.header.frame_id = get_parameter("world_frame").as_string();
 
-    double grid_min_x = get_parameter("grid_min_x").as_int();
-    double grid_min_y = get_parameter("grid_min_y").as_int();
+    double dist_min_x = get_parameter("dist_min_x").as_int();
+    double dist_min_y = get_parameter("dist_min_y").as_int();
 
     for(const maps::grid::LevelList<traversability_generator3d::TravGenNode *> &l : trav_map_3d)
     {
@@ -616,8 +620,8 @@ void PathPlannerNode::publishTravMap(){
             patch_msg.b = n->getUserData().plane.normal()(1);
             patch_msg.c = n->getUserData().plane.normal()(2);
             patch_msg.d = -n->getUserData().plane.offset();
-            patch_msg.position.x = position.x() + grid_min_x;
-            patch_msg.position.y = position.y() + grid_min_y;
+            patch_msg.position.x = position.x() + dist_min_x;
+            patch_msg.position.y = position.y() + dist_min_y;
             patch_msg.position.z = position.z();
 
             switch((n->getType())){

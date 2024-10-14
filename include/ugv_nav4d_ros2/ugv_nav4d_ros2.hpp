@@ -26,6 +26,7 @@
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include <pcl/filters/crop_box.h>
 
 #include <ugv_nav4d/Planner.hpp>
 #include <maps/grid/MLSMap.hpp>
@@ -46,7 +47,6 @@ private:
 
     void process_goal_request(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
     void read_start_pose(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
-    void printPlannerConfig();
     bool loadMls(const std::string& path);
     bool generateMls();
     void plan();
@@ -102,7 +102,11 @@ private:
 
     std::vector<rclcpp::Parameter> parameters_to_update;
     rclcpp::TimerBase::SharedPtr timer;
-    
+    pcl::CropBox<pcl::PointXYZ> box_filter;
+
+    Eigen::Vector4f min_point;  // grid_min_x, grid_min_y, 100, 1
+    Eigen::Vector4f max_point;  // grid_max_x, grid_max_y, 100, 1
+
 };
 
 } // namespace ugv_nav4d_ros2 

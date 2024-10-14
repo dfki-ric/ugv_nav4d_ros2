@@ -7,10 +7,12 @@ ugv_nav4d_ros2:
     robot_frame: husky/base_link
     world_frame: map
     grid_resolution: 0.5
-    grid_max_x: 100
-    grid_min_x: -100
-    grid_max_y: 100
-    grid_min_y: -100
+    dist_max_x: 1000
+    dist_min_x: -1000
+    dist_max_y: 1000
+    dist_min_y: -1000
+    dist_max_z: 1000
+    dist_min_z: -1000
     dumpOnError: false
     dumpOnSuccess: false
     initialPatchRadius: 3.0
@@ -34,7 +36,7 @@ ugv_nav4d_ros2:
     epsilonSteps: 2
     initialEpsilon: 64
     numThreads: 8
-    planningTime: 500000000
+    planningTime: 10000000
     #Motion Primitive Parameters:
     cellSkipFactor: 0.1
     destinationCircleRadius: 6
