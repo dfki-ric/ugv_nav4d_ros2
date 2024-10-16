@@ -149,7 +149,20 @@ void PathPlannerNode::cloud_callback(const sensor_msgs::msg::PointCloud2::Shared
             RCLCPP_INFO(this->get_logger(), "Planner state: Got Map");
             planner->updateMap(mlsMap);
             if (!initialPatchAdded){
-                planner->setInitialPatch(start_pose_rbs.getTransform(), get_parameter("initialPatchRadius").as_double());
+                Eigen::Affine3d body2MLS;
+                body2MLS.translation() << start_pose.pose.position.x, start_pose.pose.position.y, start_pose.pose.position.z;
+                Eigen::Quaterniond quat(start_pose.pose.orientation.w, 
+                                        start_pose.pose.orientation.x, 
+                                        start_pose.pose.orientation.y, 
+                                        start_pose.pose.orientation.z);
+                body2MLS.linear() = quat.toRotationMatrix(); 
+
+                Eigen::Affine3d ground2Body(Eigen::Affine3d::Identity());
+                ground2Body.translation() = Eigen::Vector3d(0, 0, -get_parameter("distToGround").as_double());
+
+                Eigen::Affine3d ground2Mls(body2MLS * ground2Body);
+
+                planner->setInitialPatch(ground2Mls, get_parameter("initialPatchRadius").as_double());
                 initialPatchAdded = true;
                 RCLCPP_INFO(this->get_logger(), "Initial patch added.");
             }
