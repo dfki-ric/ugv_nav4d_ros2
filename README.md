@@ -29,3 +29,10 @@ This repository provides a ROS 2 wrapper for the [ugv_nav4d](https://github.com/
 | `read_cloud_from_ply`   | Boolean | `false`             | Whether to read the point cloud from a PLY file. If `false`, the cloud is expected from a pointcloud topic. |
 | `read_pose_from_topic`  | Boolean | `true`              | Whether to read the current pose from a topic. If `false`, the pose is read using TF2 with `robot_frame` and `world_frame`. |
 | `map_ply_path`          | String  | `'path to ply file'` | Path to the PLY file containing the pointcloud map, used when `read_cloud_from_ply` is `true`. |
+| `mls_gap_size`          | Double  | `'0.1'` | The gap size used to decide on whether stacked MLS patches can be merged into one patch |
+| `dist_max_x`          | Double  | `'50'` | Maximum length of MLS along x-axis (in meters).  |
+| `dist_max_y`          | Double  | `'50'` | Maximum length of MLS along y-axis (in meters). |
+| `dist_max_z`          | Double  | `'50'` | Maximum length of MLS along z-axis (in meters). |
+| `dist_min_x`          | Double  | `'-50'` | Mininum length of MLS along x-axis (in meters). |
+| `dist_min_y`          | Double  | `'-50'` | Mininum length of MLS along y-axis (in meters). |
+| `dist_min_z`          | Double  | `'-50'` | Mininum length of MLS along z-axis (in meters). |
