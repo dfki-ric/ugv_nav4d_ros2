@@ -2,7 +2,9 @@ ugv_nav4d_ros2:
   ros__parameters:
     read_cloud_from_ply: false
     read_pose_from_topic: true
-    map_ply_path: 'path to ply file'
+    load_mls_from_file: false
+    mls_file_type: "bin" #Options: bin, ply
+    mls_file_path: '/path/to/my_map.bin'
     mls_gap_size: 0.1
     robot_frame: husky/base_link
     world_frame: map

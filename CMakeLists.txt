@@ -45,6 +45,7 @@ rosidl_generate_interfaces("ugv_nav4d_ros2_msgs"
   "msg/TravMap.msg"
   "msg/MLSPatch.msg"
   "msg/MLSMap.msg"
+  "action/SaveMLSMap.action"
   DEPENDENCIES geometry_msgs std_msgs
   LIBRARY_NAME ${PROJECT_NAME}
 )

@@ -4,6 +4,7 @@
 #include <Eigen/Dense>
 
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp_action/rclcpp_action.hpp>
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
 
 #include <std_srvs/srv/trigger.hpp>
@@ -16,6 +17,8 @@
 
 #include "ugv_nav4d_ros2/msg/mls_map.hpp"
 #include "ugv_nav4d_ros2/msg/mls_patch.hpp"
+#include <ugv_nav4d_ros2/action/save_mls_map.hpp>
+
 
 #include "ugv_nav4d_ros2/msg/trav_map.hpp"
 #include "ugv_nav4d_ros2/msg/trav_patch.hpp"
@@ -38,6 +41,7 @@ class PathPlannerNode: public rclcpp::Node
 {
 public:
     PathPlannerNode();
+    using SaveMLSMap = ugv_nav4d_ros2::action::SaveMLSMap;
 
 private:
     bool read_pose_from_tf();
@@ -48,7 +52,7 @@ private:
     void process_goal_request(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
     void read_start_pose(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
     bool loadPlyAsMLS(const std::string& path);
-    bool generateMls();
+    bool generateMLS();
     bool saveMLSMapAsBin(const std::string& filename);
     bool loadMLSMapFromBin(const std::string& filename);
     void plan();
@@ -59,6 +63,15 @@ private:
     bool publishMLSMap();
     void parameterUpdateTimerCallback();
 
+    //action server
+    rclcpp_action::GoalResponse handle_save_map_goal(
+        const rclcpp_action::GoalUUID & uuid,
+        std::shared_ptr<const SaveMLSMap::Goal> goal);
+    rclcpp_action::CancelResponse handle_save_map_cancel(const std::shared_ptr<rclcpp_action::ServerGoalHandle<SaveMLSMap>> goal_handle);
+    void handle_save_map_accepted(const std::shared_ptr<rclcpp_action::ServerGoalHandle<SaveMLSMap>> goal_handle);
+    rclcpp_action::Server<SaveMLSMap>::SharedPtr save_mls_map_action_server;
+   
+    //parameters
     rcl_interfaces::msg::SetParametersResult parametersCallback(const std::vector<rclcpp::Parameter> &parameters);
 
     //subscriptions
