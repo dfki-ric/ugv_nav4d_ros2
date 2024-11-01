@@ -1,9 +1,13 @@
 #include "ugv_nav4d_ros2.hpp"
+#include "util_functions.hpp"
 
 #include <pcl/io/ply_io.h>
 #include <pcl/common/common.h>
 #include <pcl/common/transforms.h>
 #include <pcl/filters/filter.h> // For removeNaNFromPointCloud
+
+#include <boost/archive/binary_oarchive.hpp>
+#include <boost/archive/binary_iarchive.hpp>
 
 #include <fstream>
 
@@ -62,7 +66,7 @@ PathPlannerNode::PathPlannerNode()
     box_filter.setMax(max_point);  // Set maximum bound
 
     if (get_parameter("map_ply_path").as_string() != "default_value" && get_parameter("read_cloud_from_ply").as_bool() == true){
-        if (loadMls(get_parameter("map_ply_path").as_string())){
+        if (loadPlyAsMLS(get_parameter("map_ply_path").as_string())){
             gotMap = true;
         }
     }
@@ -236,7 +240,7 @@ void PathPlannerNode::read_start_pose(const geometry_msgs::msg::PoseStamped::Sha
     start_pose.pose.orientation.z = msg->pose.orientation.z;
 }
 
-bool PathPlannerNode::loadMls(const std::string& path){
+bool PathPlannerNode::loadPlyAsMLS(const std::string& path){
     std::ifstream fileIn(path);       
     if(path.find(".ply") != std::string::npos)
     {
@@ -311,6 +315,45 @@ bool PathPlannerNode::generateMls(){
     box_filter.filter(*cloud_filtered);
 
     mlsMap.mergePointCloud(*cloud_filtered, cloud2MLS);
+    return true;
+}
+
+// Function to save the MLS map as a binary file
+bool PathPlannerNode::saveMLSMapAsBin(const std::string& filename = "") {
+    std::string fileToUse;
+
+    // Check if filename is provided, if not generate one
+    if (filename.empty()) {
+        fileToUse = generateTimestampedFilename(".bin");
+    } else {
+        fileToUse = filename;
+    }
+
+    // Open a binary file for output
+    std::ofstream binFile(fileToUse, std::ios::binary);
+    if (!binFile) {
+        std::cerr << "Error opening file for writing: " << fileToUse << std::endl;
+        return false;
+    }
+
+    // Create a binary archive
+    boost::archive::binary_oarchive archive(binFile);
+    archive << mlsMap;
+
+    RCLCPP_INFO_STREAM(this->get_logger(), "MLS Map saved to " << fileToUse);
+    return true;
+}
+
+bool PathPlannerNode::loadMLSMapFromBin(const std::string& filename){
+
+    if (filename.empty()) {
+        RCLCPP_WARN_STREAM(this->get_logger(), "Failed to load MLS Map from empty file: " << filename);
+        return false;
+    }
+    std::stringstream stream;
+    boost::archive::binary_iarchive *ia = new boost::archive::binary_iarchive(stream);
+    (*ia) >> mlsMap;   
+    RCLCPP_INFO_STREAM(this->get_logger(), "Loaded MLS Map from " << filename); 
     return true;
 }
 

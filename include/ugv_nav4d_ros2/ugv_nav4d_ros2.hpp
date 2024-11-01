@@ -47,8 +47,10 @@ private:
 
     void process_goal_request(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
     void read_start_pose(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
-    bool loadMls(const std::string& path);
+    bool loadPlyAsMLS(const std::string& path);
     bool generateMls();
+    bool saveMLSMapAsBin(const std::string& filename);
+    bool loadMLSMapFromBin(const std::string& filename);
     void plan();
     void declareParameters();
     void updateParameters();
