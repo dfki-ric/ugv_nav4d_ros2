@@ -1,6 +1,5 @@
 ugv_nav4d_ros2:
   ros__parameters:
-    read_cloud_from_ply: false
     read_pose_from_topic: true
     load_mls_from_file: false
     mls_file_type: "bin" #Options: bin, ply

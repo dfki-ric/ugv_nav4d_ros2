@@ -504,7 +504,6 @@ void PathPlannerNode::declareParameters(){
     auto param_desc = rcl_interfaces::msg::ParameterDescriptor{};
     param_desc.read_only = true;
 
-    declare_parameter("read_cloud_from_ply", false, param_desc);
     declare_parameter("read_pose_from_topic", false, param_desc);
     declare_parameter("load_mls_from_file", false, param_desc);
     declare_parameter("mls_file_type", "ply", param_desc);
