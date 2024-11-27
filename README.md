@@ -26,13 +26,17 @@ This repository provides a ROS 2 wrapper for the [ugv_nav4d](https://github.com/
 
 | Parameter              | Type    | Default Value       | Description                                                                 |
 |------------------------|---------|---------------------|-----------------------------------------------------------------------------|
-| `read_cloud_from_ply`   | Boolean | `false`             | Whether to read the point cloud from a PLY file. If `false`, the cloud is expected from a pointcloud topic. |
-| `read_pose_from_topic`  | Boolean | `true`              | Whether to read the current pose from a topic. If `false`, the pose is read using TF2 with `robot_frame` and `world_frame`. |
-| `map_ply_path`          | String  | `'path to ply file'` | Path to the PLY file containing the pointcloud map, used when `read_cloud_from_ply` is `true`. |
-| `mls_gap_size`          | Double  | `'0.1'` | The gap size used to decide on whether stacked MLS patches can be merged into one patch |
-| `dist_max_x`          | Double  | `'50'` | Maximum length of MLS along x-axis (in meters).  |
-| `dist_max_y`          | Double  | `'50'` | Maximum length of MLS along y-axis (in meters). |
-| `dist_max_z`          | Double  | `'50'` | Maximum length of MLS along z-axis (in meters). |
-| `dist_min_x`          | Double  | `'-50'` | Mininum length of MLS along x-axis (in meters). |
-| `dist_min_y`          | Double  | `'-50'` | Mininum length of MLS along y-axis (in meters). |
-| `dist_min_z`          | Double  | `'-50'` | Mininum length of MLS along z-axis (in meters). |
+| `read_pose_from_topic`  | Boolean | `true`              | If `false`, the pose is read using TF2 with `robot_frame` and `world_frame`. |
+| `load_mls_from_file`   | Boolean | `false`             | If `false`, then a slam corrected pointcloud is expected on a topic. |
+| `mls_file_type`          | String  | `ply` | Options: `bin` or `ply`. |
+| `mls_file_path`          | String  | `default_value` | Full path to the MLS file. |
+| `mls_gap_size`          | Double  | `0.1` | The gap size used to decide on whether stacked MLS patches can be merged into one patch |
+| `robot_frame`          | String  | `robot` | Frame name of the robot in TF2. Use when `read_pose_from_topic` is `false` |
+| `world_frame`          | String  | `world` | Frame name of the world in TF2. Use when `read_pose_from_topic` is `false` |
+| `grid_resolution`          | Double  | `0.3` | Grid resolution of the MLS and Traversability3d Map  |
+| `dist_max_x`          | Double  | `50` | Maximum length of MLS along x-axis (in meters)  |
+| `dist_max_y`          | Double  | `50` | Maximum length of MLS along y-axis (in meters) |
+| `dist_max_z`          | Double  | `50` | Maximum length of MLS along z-axis (in meters) |
+| `dist_min_x`          | Double  | `-50` | Mininum length of MLS along x-axis (in meters) |
+| `dist_min_y`          | Double  | `-50` | Mininum length of MLS along y-axis (in meters) |
+| `dist_min_z`          | Double  | `-50` | Mininum length of MLS along z-axis (in meters) |
