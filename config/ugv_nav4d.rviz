@@ -207,7 +207,7 @@ Visualization Manager:
         Value: /ugv_nav4d_ros2/goal_pose
       Value: true
     - Class: ugv_nav4d_ros2::ugv_nav4d_ros2_mls_map_plugin::MLSMapDisplay
-      Enabled: false
+      Enabled: true
       Name: MLSMapDisplay
       Topic:
         Depth: 5
@@ -216,7 +216,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /ugv_nav4d_ros2/mls_map
-      Value: false
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -270,9 +270,9 @@ Visualization Manager:
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -1.4931279420852661
-        Y: -12.903923988342285
-        Z: -1.7316962480545044
+        X: 1.195846438407898
+        Y: -10.164877891540527
+        Z: -3.8526082038879395
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false

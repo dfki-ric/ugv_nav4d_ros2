@@ -735,13 +735,15 @@ void PathPlannerNode::publishTravMap(){
         for(const traversability_generator3d::TravGenNode *n : l)
         {
             ugv_nav4d_ros2::msg::TravPatch patch_msg;
-            const Eigen::Vector3d& position = n->getVec3(trav_map_3d.getResolution().x());
+
+            Eigen::Vector3d position;
+            trav_map_3d.fromGrid(n->getIndex(), position, n->getHeight(), false);
             patch_msg.a = n->getUserData().plane.normal()(0);
             patch_msg.b = n->getUserData().plane.normal()(1);
             patch_msg.c = n->getUserData().plane.normal()(2);
             patch_msg.d = -n->getUserData().plane.offset();
-            patch_msg.position.x = position.x() + dist_min_x;
-            patch_msg.position.y = position.y() + dist_min_y;
+            patch_msg.position.x = position.x();
+            patch_msg.position.y = position.y();
             patch_msg.position.z = position.z();
 
             switch((n->getType())){
