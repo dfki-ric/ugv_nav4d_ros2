@@ -1,6 +1,6 @@
 ugv_nav4d_ros2:
   ros__parameters:
-    read_pose_from_topic: true
+    read_pose_from_topic: false
     load_mls_from_file: false
     mls_file_type: "bin" #Options: bin, ply
     mls_file_path: '/path/to/my_map.bin'
@@ -37,14 +37,14 @@ ugv_nav4d_ros2:
     epsilonSteps: 2
     initialEpsilon: 64
     numThreads: 8
-    planningTime: 10000000
+    planningTime: 14000000
     #Motion Primitive Parameters:
     cellSkipFactor: 0.1
     destinationCircleRadius: 6
     generateBackwardMotions: true
     generateForwardMotions: true
-    generateLateralMotions: false
-    generatePointTurnMotions: false
+    generateLateralMotions: true
+    generatePointTurnMotions: true
     numAngles: 16
     numEndAngles: 8
     splineOrder: 4
