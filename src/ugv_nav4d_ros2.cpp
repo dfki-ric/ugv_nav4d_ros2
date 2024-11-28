@@ -1,9 +1,13 @@
 #include "ugv_nav4d_ros2.hpp"
+#include "util_functions.hpp"
 
 #include <pcl/io/ply_io.h>
 #include <pcl/common/common.h>
 #include <pcl/common/transforms.h>
 #include <pcl/filters/filter.h> // For removeNaNFromPointCloud
+
+#include <boost/archive/binary_oarchive.hpp>
+#include <boost/archive/binary_iarchive.hpp>
 
 #include <fstream>
 
@@ -24,6 +28,16 @@ PathPlannerNode::PathPlannerNode()
     inPlanningPhase = false;
     gotMap = false;
     
+    // Create the action server
+    save_mls_map_action_server = rclcpp_action::create_server<SaveMLSMap>(
+        this,
+        "/ugv_nav4d_ros2/save_mls_map",
+        std::bind(&PathPlannerNode::handle_save_map_goal, this, std::placeholders::_1, std::placeholders::_2),
+        std::bind(&PathPlannerNode::handle_save_map_cancel, this, std::placeholders::_1),
+        std::bind(&PathPlannerNode::handle_save_map_accepted, this, std::placeholders::_1)
+    );
+
+
     map_publish_service = this->create_service<std_srvs::srv::Trigger>(
             "/ugv_nav4d_ros2/map_publish", std::bind(&PathPlannerNode::map_publish_callback, this, std::placeholders::_1, std::placeholders::_2));
 
@@ -32,10 +46,6 @@ PathPlannerNode::PathPlannerNode()
 
     sub_start_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/start_pose", 1, 
             bind(&PathPlannerNode::read_start_pose, this, std::placeholders::_1));
-
-    cloud_subscription = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-      "/ugv_nav4d_ros2/pointcloud", 10,
-      std::bind(&PathPlannerNode::cloud_callback, this, std::placeholders::_1));
 
     callback_handle = this->add_on_set_parameters_callback(
         std::bind(&PathPlannerNode::parametersCallback, this, std::placeholders::_1));
@@ -61,12 +71,28 @@ PathPlannerNode::PathPlannerNode()
     box_filter.setMin(min_point);  // Set minimum bound
     box_filter.setMax(max_point);  // Set maximum bound
 
-    if (get_parameter("map_ply_path").as_string() != "default_value" && get_parameter("read_cloud_from_ply").as_bool() == true){
-        if (loadMls(get_parameter("map_ply_path").as_string())){
-            gotMap = true;
+    if (get_parameter("load_mls_from_file").as_bool() == true){
+        const std::string mls_file_path = get_parameter("mls_file_path").as_string();
+        const std::string mls_file_type = get_parameter("mls_file_type").as_string();
+        if (mls_file_type == "ply"){        
+            if (loadPlyAsMLS(mls_file_path)){
+                gotMap = true;
+            }
+        }
+        else if (mls_file_type == "bin"){  
+            if(loadMLSMapFromBin(mls_file_path)){
+                gotMap = true;
+            }
+        }
+        else{
+            throw std::runtime_error("Invalid MLS File Type: "+ mls_file_type);
         }
     }
     else{
+        cloud_subscription = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+            "/ugv_nav4d_ros2/pointcloud", 10,
+            std::bind(&PathPlannerNode::cloud_callback, this, std::placeholders::_1));
+
         const double mls_res = get_parameter("grid_resolution").as_double();
         const double dist_max_x = get_parameter("dist_max_x").as_int();
         const double dist_max_y = get_parameter("dist_max_y").as_int();
@@ -142,7 +168,7 @@ void PathPlannerNode::map_publish_callback(const std::shared_ptr<std_srvs::srv::
 void PathPlannerNode::cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
 {
     latest_pointcloud = msg;
-    gotMap = generateMls();
+    gotMap = generateMLS();
 
     if (gotMap){
         if (!inPlanningPhase){
@@ -236,7 +262,7 @@ void PathPlannerNode::read_start_pose(const geometry_msgs::msg::PoseStamped::Sha
     start_pose.pose.orientation.z = msg->pose.orientation.z;
 }
 
-bool PathPlannerNode::loadMls(const std::string& path){
+bool PathPlannerNode::loadPlyAsMLS(const std::string& path){
     std::ifstream fileIn(path);       
     if(path.find(".ply") != std::string::npos)
     {
@@ -275,7 +301,7 @@ bool PathPlannerNode::loadMls(const std::string& path){
     return false;
 }
 
-bool PathPlannerNode::generateMls(){
+bool PathPlannerNode::generateMLS(){
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
     pcl::fromROSMsg(*latest_pointcloud, *cloud);
 
@@ -312,6 +338,89 @@ bool PathPlannerNode::generateMls(){
 
     mlsMap.mergePointCloud(*cloud_filtered, cloud2MLS);
     return true;
+}
+
+// Function to save the MLS map as a binary file
+bool PathPlannerNode::saveMLSMapAsBin(const std::string& filename = "") {
+    std::string fileToUse;
+
+    // Check if filename is provided, if not generate one
+    if (filename.empty()) {
+        fileToUse = generateTimestampedFilename(".bin");
+    } else {
+        fileToUse = filename;
+    }
+
+    // Open a binary file for output
+    std::ofstream binFile(fileToUse, std::ios::binary);
+    if (!binFile) {
+        std::cerr << "Error opening file for writing: " << fileToUse << std::endl;
+        return false;
+    }
+
+    // Create a binary archive
+    boost::archive::binary_oarchive archive(binFile);
+    archive << mlsMap;
+
+    RCLCPP_INFO_STREAM(this->get_logger(), "MLS Map saved to " << fileToUse);
+    return true;
+}
+
+bool PathPlannerNode::loadMLSMapFromBin(const std::string& filename){
+    if (filename.empty()) {
+        RCLCPP_WARN_STREAM(this->get_logger(), "Failed to load MLS Map from empty file: " << filename);
+        return false;
+    }
+
+    // Open the binary file in input mode
+    std::ifstream file(filename, std::ios::binary);
+    if (!file.is_open()) {
+        RCLCPP_WARN_STREAM(this->get_logger(), "Failed to open file: " << filename);
+        return false;
+    }
+
+    try {
+        // Load the file contents into the stream and deserialize
+        boost::archive::binary_iarchive ia(file);
+        ia >> mlsMap;  // Deserialize into mlsMap
+
+        RCLCPP_INFO_STREAM(this->get_logger(), "Loaded MLS Map from " << filename);
+        return true;
+    } catch (const std::exception &e) {
+        RCLCPP_ERROR_STREAM(this->get_logger(), "Error loading MLS Map: " << e.what());
+        return false;
+    }
+}
+
+rclcpp_action::GoalResponse PathPlannerNode::handle_save_map_goal(
+    const rclcpp_action::GoalUUID & uuid,
+    std::shared_ptr<const SaveMLSMap::Goal> goal)
+{
+    RCLCPP_INFO(this->get_logger(), "Received save map request");
+    (void)uuid;  // Suppress unused variable warning
+    return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;  // Accept the goal
+}
+
+rclcpp_action::CancelResponse PathPlannerNode::handle_save_map_cancel(const std::shared_ptr<rclcpp_action::ServerGoalHandle<SaveMLSMap>> goal_handle)
+{
+    RCLCPP_INFO(this->get_logger(), "Canceling save map request");
+    return rclcpp_action::CancelResponse::ACCEPT;  // Accept the cancel request
+}
+
+void PathPlannerNode::handle_save_map_accepted(const std::shared_ptr<rclcpp_action::ServerGoalHandle<SaveMLSMap>> goal_handle)
+{
+    std::thread{
+        [this, goal_handle]() {
+            const auto filename = goal_handle->get_goal()->filename; // Get the filename from the goal
+
+            saveMLSMapAsBin(filename); // Call save function with the filename
+
+            // Mark the goal as succeeded
+            const auto result = std::make_shared<SaveMLSMap::Result>();
+            result->success = true;  // Set the success flag
+            goal_handle->succeed(result);
+        }
+    }.detach();
 }
 
 void PathPlannerNode::plan(){
@@ -395,9 +504,10 @@ void PathPlannerNode::declareParameters(){
     auto param_desc = rcl_interfaces::msg::ParameterDescriptor{};
     param_desc.read_only = true;
 
-    declare_parameter("read_cloud_from_ply", false, param_desc);
     declare_parameter("read_pose_from_topic", false, param_desc);
-    declare_parameter("map_ply_path", "default_value", param_desc);
+    declare_parameter("load_mls_from_file", false, param_desc);
+    declare_parameter("mls_file_type", "ply", param_desc);
+    declare_parameter("mls_file_path", "default_value", param_desc);
     declare_parameter("robot_frame", "robot", param_desc);
     declare_parameter("world_frame", "map", param_desc);
     declare_parameter("grid_resolution", 0.3, param_desc);
