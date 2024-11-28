@@ -21,7 +21,25 @@ This repository provides a ROS2 wrapper for the [ugv_nav4d](https://github.com/d
    ```
    ros2 launch ugv_nav4d_ros2 ugv_nav4d.launch.py
    ```
-   Hint: Adjust the arguments pointcloud_topic and goal_topic. The pointcloud_topic expects a pointcloud map generated and corrected based on a SLAM algorithm. Alternatively, one could also use a PLY file to generate a MLS. See example files [here](https://zenodo.org/records/13771864). Most of the parameters in the [params.yaml](config/params.yaml) are explained in the original documentation of ugv_nav4d. Please find some new parameters created just for this wrapper explained below.
+   Hint: Adjust the arguments pointcloud_topic and goal_topic. The pointcloud_topic expects a pointcloud map generated and corrected based on a SLAM algorithm. Alternatively, one could also use a PLY file to generate a MLS. See example files [here](https://zenodo.org/records/13771864). Most of the parameters in the [params.yaml](config/params.yaml) are explained in the original documentation of ugv_nav4d. 
+
+### Services / Actions
+
+Services:
+
+Publish the MLS Map
+```
+ros2 service call /ugv_nav4d_ros2/map_publish std_srvs/srv/Trigger
+```
+
+Actions:
+
+Save MLS Map as a file
+```
+ros2 action send_goal /ugv_nav4d_ros2/save_mls_map ugv_nav4d_ros2/action/SaveMLSMap filename:\ \'\'\
+```
+
+### Parameters
 
 | Parameter              | Type    | Default Value       | Description                                                                 |
 |------------------------|---------|---------------------|-----------------------------------------------------------------------------|
