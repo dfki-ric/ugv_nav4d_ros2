@@ -20,7 +20,7 @@ ugv_nav4d_ros2:
     #Mobility Parameters
     maxMotionCurveLength: 100.0
     minTurningRadius: 0.8
-    multiplierBackward: 2.0
+    multiplierBackward: 3.0
     multiplierBackwardTurn: 3.0
     multiplierForward: 1.0
     multiplierForwardTurn: 2.0

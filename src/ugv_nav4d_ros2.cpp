@@ -479,13 +479,10 @@ void PathPlannerNode::plan(){
                 std::tie(point,tangent) = trajectory.posSpline.getPointAndTangent(param);
                 //const base::Orientation orientation(std::atan2(tangent.y(), tangent.x()));
 
-                //point needs to be offset to the middle of the grid,
-                //as all path computation also starts in the middle
-                //if not we would get a wrong diff
-                point += base::Vector3d(traversabilityConfig.gridResolution /2.0, traversabilityConfig.gridResolution /2.0,0);
+                //TODO
+                //Add different models of motion: Forward, backward, pointturn, lateral.
 
                 // Fill current path point to a temporary variable.
-                //TODO: Set the z path to the patch height to get a 3D Trajectory
                 geometry_msgs::msg::PoseStamped tempPoint;
                 tempPoint.pose.position.x= point.x();
                 tempPoint.pose.position.y= point.y();
