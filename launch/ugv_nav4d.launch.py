@@ -8,13 +8,21 @@ import os
 
 def generate_launch_description():
 
-    config = os.path.join(
+    default_param_file = os.path.join(
         get_package_share_directory('ugv_nav4d_ros2'),
         'config',
         'params.yaml'
         )
 
     declared_arguments = []
+
+    declared_arguments.append(
+	DeclareLaunchArgument(
+            'main_param_file',
+            default_value=default_param_file,
+            description='Full path to main parameter file to load')	
+    )
+    
     declared_arguments.append(
         DeclareLaunchArgument(
             'pointcloud_topic',
@@ -22,6 +30,7 @@ def generate_launch_description():
             description='Topic name of the pointcloud used to generate MLS map'
         )
     )
+    
     declared_arguments.append(
         DeclareLaunchArgument(
             'goal_topic',
@@ -29,6 +38,7 @@ def generate_launch_description():
             description='Topic name of the goal pose'
         )
     )
+    
     declared_arguments.append(
         Node(
         package="ugv_nav4d_ros2",
@@ -39,7 +49,7 @@ def generate_launch_description():
                 ("/ugv_nav4d_ros2/pointcloud", LaunchConfiguration("pointcloud_topic")),
                 ("/ugv_nav4d_ros2/goal_pose", LaunchConfiguration("goal_topic")),
             ],
-        parameters=[config],
+        parameters=[LaunchConfiguration("main_param_file")],
         )
     )
 
