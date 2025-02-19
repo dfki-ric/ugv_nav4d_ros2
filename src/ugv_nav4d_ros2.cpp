@@ -461,13 +461,14 @@ void PathPlannerNode::plan(){
     }
 
     nav_msgs::msg::Path path_message;
+    auto now = this->get_clock()->now();
 
     //Publish path if a solution is found
     if (res == ugv_nav4d::Planner::FOUND_SOLUTION){
         for (auto& trajectory : trajectory3D){
 
             //sample spline:
-            const double stepDist = 0.01;
+            const double stepDist = get_parameter("spline_resolution_distance").as_double();
             std::vector<double> parameters;
             //NOTE we dont need the points, but there is no sample() api that returns parameters only
             const std::vector<base::geometry::Spline3::vector_t> points = trajectory.posSpline.sample(stepDist, &parameters);
@@ -477,16 +478,21 @@ void PathPlannerNode::plan(){
                 const double param = parameters[i];
                 base::Vector3d point, tangent;
                 std::tie(point,tangent) = trajectory.posSpline.getPointAndTangent(param);
-                //const base::Orientation orientation(std::atan2(tangent.y(), tangent.x()));
-
-                //TODO
-                //Add different models of motion: Forward, backward, pointturn, lateral.
+                Eigen::Quaterniond yaw(Eigen::AngleAxisd(std::atan2(tangent.y(), tangent.x()), Eigen::Vector3d::UnitZ()));
 
                 // Fill current path point to a temporary variable.
                 geometry_msgs::msg::PoseStamped tempPoint;
                 tempPoint.pose.position.x= point.x();
                 tempPoint.pose.position.y= point.y();
                 tempPoint.pose.position.z= point.z();
+                
+                tempPoint.pose.orientation.x= yaw.x();
+                tempPoint.pose.orientation.y= yaw.y();
+                tempPoint.pose.orientation.z= yaw.z();
+                tempPoint.pose.orientation.w= yaw.w();
+
+                tempPoint.header.stamp = now;
+
                 // Add points to path.
                 path_message.header.frame_id = get_parameter("world_frame").as_string();
                 path_message.poses.push_back(tempPoint);
@@ -501,6 +507,7 @@ void PathPlannerNode::declareParameters(){
     auto param_desc = rcl_interfaces::msg::ParameterDescriptor{};
     param_desc.read_only = true;
 
+    declare_parameter("spline_resolution_distance", 0.1, param_desc);
     declare_parameter("read_pose_from_topic", false, param_desc);
     declare_parameter("load_mls_from_file", false, param_desc);
     declare_parameter("mls_file_type", "ply", param_desc);

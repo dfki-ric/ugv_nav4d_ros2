@@ -1,5 +1,6 @@
 ugv_nav4d_ros2:
   ros__parameters:
+    spline_resolution_distance: 0.1
     read_pose_from_topic: false
     load_mls_from_file: false
     mls_file_type: "bin" #Options: bin, ply

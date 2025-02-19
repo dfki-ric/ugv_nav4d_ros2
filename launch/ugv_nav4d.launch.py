@@ -1,5 +1,5 @@
 from launch import LaunchDescription
-from launch_ros.actions import Node
+from launch_ros.actions import Node, SetParameter
 from launch.substitutions import LaunchConfiguration
 from ament_index_python.packages import get_package_share_directory
 from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
@@ -15,6 +15,10 @@ def generate_launch_description():
         )
 
     declared_arguments = []
+
+    declared_arguments.append(
+        SetParameter(name='use_sim_time', value=True)
+    )
 
     declared_arguments.append(
 	DeclareLaunchArgument(
@@ -38,7 +42,15 @@ def generate_launch_description():
             description='Topic name of the goal pose'
         )
     )
-    
+
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            'pose_samples_topic',
+            default_value='/ugv_nav4d_ros2/start_pose',
+            description='Topic name of the goal pose'
+        )
+    )    
+
     declared_arguments.append(
         Node(
         package="ugv_nav4d_ros2",
@@ -48,6 +60,7 @@ def generate_launch_description():
         remappings=[
                 ("/ugv_nav4d_ros2/pointcloud", LaunchConfiguration("pointcloud_topic")),
                 ("/ugv_nav4d_ros2/goal_pose", LaunchConfiguration("goal_topic")),
+                ("/ugv_nav4d_ros2/start_pose", LaunchConfiguration("pose_samples_topic")),
             ],
         parameters=[LaunchConfiguration("main_param_file")],
         )
