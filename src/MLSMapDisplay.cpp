@@ -7,6 +7,9 @@
 #include <geometry_msgs/msg/point.hpp>
 #include <OgreSceneManager.h>
 
+#include <Eigen/Dense>
+#include <maps/tools/SurfaceIntersection.hpp>
+
 namespace ugv_nav4d_ros2 {
 
 namespace ugv_nav4d_ros2_mls_map_plugin {
@@ -39,8 +42,6 @@ void MLSMapDisplay::processMessage(ugv_nav4d_ros2::msg::MLSMap::ConstSharedPtr m
   }
   manual_objects_.clear();
 
-  std::cout << "Patches are " << msg->patches.size() << std::endl;
-
   // Variables to keep track of height range
   float min_height = std::numeric_limits<float>::max();
   float max_height = std::numeric_limits<float>::min();
@@ -57,70 +58,61 @@ void MLSMapDisplay::processMessage(ugv_nav4d_ros2::msg::MLSMap::ConstSharedPtr m
 
 
   for (const auto& patch : msg->patches) {
-    // Convert the plane parameters to a visual representation
     Ogre::Vector3 position(patch.position.x, patch.position.y, patch.position.z);
-
-    // Compute the normal vector of the plane (a, b, c) and a point on the plane
     Ogre::Vector3 normal(patch.a, patch.b, patch.c);
     normal.normalise();
 
-    // Compute the orientation from the normal
     Ogre::Vector3 default_normal(0, 0, 1);
     Ogre::Quaternion orientation = default_normal.getRotationTo(normal);
 
-
-    // Normalize the height of the patch between 0 and 1
     float height_normalized = (patch.position.z - min_height) / (max_height - min_height);
 
     // Map the normalized height to a color gradient (e.g., blue at low heights, red at high heights)
     Ogre::ColourValue color;
-    color.r = height_normalized;   // Red increases with height
-    color.g = 1.0f;                // Green remains constant (or can be adjusted if needed)
+    color.r = height_normalized;      // Red increases with height
+    color.g = 1.0f;                   // Green remains constant
     color.b = 1.0f - height_normalized; // Blue decreases with height
-    color.a = 1.0f;                // Fully opaque
+    color.a = 1.0f;                   // Fully opaque
 
-    // Create a plane visual for each patch
-    auto plane = scene_manager_->createManualObject();
-    manual_objects_.push_back(plane);
-    plane->begin("BaseWhiteNoLighting", Ogre::RenderOperation::OT_TRIANGLE_LIST);
+    // Create a manual object for visualization
+    auto object = scene_manager_->createManualObject();
+    manual_objects_.push_back(object);
+    object->begin("BaseWhiteNoLighting", Ogre::RenderOperation::OT_TRIANGLE_LIST);
+    float size = msg->resolution / 2;
 
-    // Define the vertices of the plane based on the patch parameters
-    // Example: A simple square plane, adjust according to your plane parameters
-    float size = msg->resolution/2;
+    const Eigen::AlignedBox<float, 3> box(Eigen::Vector3f(-size, -size, patch.minz), Eigen::Vector3f(size, size, patch.maxz));
+    std::vector< Eigen::Vector3f, Eigen::aligned_allocator<Eigen::Vector3f> > intersections;
+    Eigen::Vector3f normal_eigen{normal.x, normal.y, normal.z};
+    float d = patch.d;
+    Eigen::Hyperplane<float, 3> plane = Eigen::Hyperplane<float, 3>(normal_eigen, -d);
+    maps::tools::SurfaceIntersection::computeIntersections(plane, box, intersections);
 
-    Ogre::Vector3 corners[4] = {
-      position + orientation * Ogre::Vector3(-size, -size, 0),
-      position + orientation * Ogre::Vector3(size, -size, 0),
-      position + orientation * Ogre::Vector3(size, size, 0),
-      position + orientation * Ogre::Vector3(-size, size, 0)
-    };
+    if (!intersections.empty()) {
 
-    plane->position(corners[0]);
-    plane->colour(color);
-    plane->position(corners[1]);
-    plane->colour(color);
-    plane->position(corners[2]);
-    plane->colour(color);
-    plane->position(corners[3]);
-    plane->colour(color);
+      std::cout << "Found Intersections: " << intersections.size() << std::endl;
 
-    plane->index(0);
-    plane->index(1);
-    plane->index(2);
-    plane->index(2);
-    plane->index(3);
-    plane->index(0);
-    
-    // Back face (reverse order of vertices)
-    plane->index(0);
-    plane->index(3);
-    plane->index(2);
-    plane->index(2);
-    plane->index(1);
-    plane->index(0);
+      // --- Draw Intersections ---
+      for (const auto& point : intersections) {
+          object->position(patch.position.x + point.x(), 
+                           patch.position.y + point.y(), 
+                           point.z());
 
-    plane->end();
-    scene_node_->attachObject(plane);
+          object->colour(color);
+      }
+
+      for (size_t i = 1; i < intersections.size()-1; ++i) {
+          object->index(0);
+          object->index(i);
+          object->index(i+1);
+
+          object->index(i+1);
+          object->index(i);
+          object->index(0);
+
+      }
+    }
+    object->end();
+    scene_node_->attachObject(object);
   }
 }
 

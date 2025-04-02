@@ -656,7 +656,7 @@ bool PathPlannerNode::publishMLSMap(){
     map_msg.resolution = get_parameter("grid_resolution").as_double();
     map_msg.header.frame_id = get_parameter("world_frame").as_string();
 
-    int minMeasurements = 1;
+    int minMeasurements = 3;
     maps::grid::Vector2ui num_cell = mlsMap.getNumCells();
     typedef maps::grid::MLSMap<maps::grid::MLSConfig::SLOPE>::CellType Cell;
 
@@ -673,11 +673,10 @@ bool PathPlannerNode::publishMLSMap(){
             {
                 const maps::grid::SurfacePatch<maps::grid::MLSConfig::SLOPE>& p = *it;  
                 if(p.getNumberOfMeasurements() < minMeasurements){
-                    //TODO: What does this do?
-                    RCLCPP_WARN(this->get_logger(),"Too few measurements!");
+                    RCLCPP_WARN_STREAM(this->get_logger(),"Too few measurements!");
                     continue;
                 }
-
+ 
                 float minZ, maxZ;
                 p.getRange(minZ, maxZ);
                 minZ -= 5e-4f;
@@ -686,32 +685,40 @@ bool PathPlannerNode::publishMLSMap(){
                 if(normal.z() < 0)
                     normal *= -1.0;
 
+                ugv_nav4d_ros2::msg::MLSPatch patch_msg;
+                maps::grid::Vector2d pos(0.00, 0.00);
+
+                // Calculate the position of the cell center.
+                pos = (maps::grid::Index(x, y).cast<double>() + maps::grid::Vector2d(0.5, 0.5)).array() * mlsMap.getResolution().array();
+                patch_msg.position.x = pos.x() + dist_min_x;
+                patch_msg.position.y = pos.y() + dist_min_y;
+                patch_msg.position.z = p.getCenter().z();
+
                 if(normal.allFinite())
                 {
+                    patch_msg.type = "plane";
                     Eigen::Hyperplane<float, 3> plane = Eigen::Hyperplane<float, 3>(normal, p.getCenter());
-                    ugv_nav4d_ros2::msg::MLSPatch patch_msg;
-
-                    patch_msg.color.r = 0;
-                    patch_msg.color.g = 1;
-                    patch_msg.color.b = 0;
-                    patch_msg.color.a = 1;
-                    maps::grid::Vector2d pos(0.00, 0.00);
-                    // Calculate the position of the cell center.
-                    pos = (maps::grid::Index(x, y).cast<double>() + maps::grid::Vector2d(0.5, 0.5)).array() * mlsMap.getResolution().array();
+    
                     patch_msg.a = plane.normal()(0);
                     patch_msg.b = plane.normal()(1);
                     patch_msg.c = plane.normal()(2);
-                    patch_msg.d = -plane.offset();                       
-                    patch_msg.position.x = pos.x() + dist_min_x;
-                    patch_msg.position.y = pos.y() + dist_min_y;
-                    patch_msg.position.z = p.getCenter().z();
+                    patch_msg.d = -plane.offset();          
+                    patch_msg.height = (maxZ - minZ) + 1e-3f;
+                    patch_msg.minz = minZ;          
+                    patch_msg.maxz = maxZ;          
+             
                     map_msg.patches.push_back(patch_msg);
                 }
                 else
                 {
-                    //TODO
-                    //float height = (maxZ - minZ) + 1e-3f;
-                    //geode.drawBox(maxZ, height, osg::Vec3(0.f,0.f,1.f));
+                    patch_msg.type = "box";
+                    patch_msg.depth = 0.5;
+                    patch_msg.height = (maxZ - minZ) + 1e-3f;
+                    patch_msg.a = 0;
+                    patch_msg.b = 0;
+                    patch_msg.c = 1;
+                    patch_msg.d = 0; 
+                    map_msg.patches.push_back(patch_msg);
                 }
             }
         }
