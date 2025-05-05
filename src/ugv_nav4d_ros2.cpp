@@ -245,7 +245,7 @@ void PathPlannerNode::process_goal_request(const geometry_msgs::msg::PoseStamped
                                                    msg->pose.orientation.x,
                                                    msg->pose.orientation.y,
                                                    msg->pose.orientation.z);
-    if (!inPlanningPhase){
+    if (!inPlanningPhase && gotMap){
         plan();
     }
 }
