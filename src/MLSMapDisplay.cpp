@@ -88,9 +88,6 @@ void MLSMapDisplay::processMessage(ugv_nav4d_ros2::msg::MLSMap::ConstSharedPtr m
     maps::tools::SurfaceIntersection::computeIntersections(plane, box, intersections);
 
     if (!intersections.empty()) {
-
-      std::cout << "Found Intersections: " << intersections.size() << std::endl;
-
       // --- Draw Intersections ---
       for (const auto& point : intersections) {
           object->position(patch.position.x + point.x(), 

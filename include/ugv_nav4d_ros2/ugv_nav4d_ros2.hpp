@@ -17,7 +17,8 @@
 
 #include "ugv_nav4d_ros2/msg/mls_map.hpp"
 #include "ugv_nav4d_ros2/msg/mls_patch.hpp"
-#include <ugv_nav4d_ros2/action/save_mls_map.hpp>
+#include "ugv_nav4d_ros2/action/save_mls_map.hpp"
+#include "ugv_nav4d_ros2/msg/labeled_path_array.hpp"
 
 
 #include "ugv_nav4d_ros2/msg/trav_map.hpp"
@@ -87,6 +88,7 @@ private:
 
     //publishers
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_publisher;
+    rclcpp::Publisher<ugv_nav4d_ros2::msg::LabeledPathArray>::SharedPtr labeled_path_publisher;
     rclcpp::Publisher<ugv_nav4d_ros2::msg::TravMap>::SharedPtr trav_map_publisher;
     rclcpp::Publisher<ugv_nav4d_ros2::msg::MLSMap>::SharedPtr mls_map_publisher;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_map_publisher;
@@ -112,15 +114,17 @@ private:
     bool initialPatchAdded;
     bool inPlanningPhase;
     bool gotMap;
+    double mls_min_x;
+    double mls_min_y;
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
 
     std::vector<rclcpp::Parameter> parameters_to_update;
     rclcpp::TimerBase::SharedPtr timer;
     pcl::CropBox<pcl::PointXYZ> box_filter;
-
-    Eigen::Vector4f min_point;  // grid_min_x, grid_min_y, 100, 1
-    Eigen::Vector4f max_point;  // grid_max_x, grid_max_y, 100, 1
+    
+    bool extend_trajectory_;
+    double extension_distance_;
 
 };
 

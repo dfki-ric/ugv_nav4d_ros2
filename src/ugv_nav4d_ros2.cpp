@@ -56,9 +56,13 @@ PathPlannerNode::PathPlannerNode()
     );
 
     path_publisher = this->create_publisher<nav_msgs::msg::Path>("/ugv_nav4d_ros2/path", 10);
+    labeled_path_publisher = this->create_publisher<ugv_nav4d_ros2::msg::LabeledPathArray>("/ugv_nav4d_ros2/labeled_paths", 10);
     trav_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::TravMap>("/ugv_nav4d_ros2/trav_map", 10);
     mls_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::MLSMap>("/ugv_nav4d_ros2/mls_map", 10);
     cloud_map_publisher = this->create_publisher<sensor_msgs::msg::PointCloud2>("/ugv_nav4d_ros2/cloud_map", 10);
+
+    Eigen::Vector4f min_point;
+    Eigen::Vector4f max_point;
 
     min_point.x() = get_parameter("dist_min_x").as_int();
     min_point.y() = get_parameter("dist_min_y").as_int(); 
@@ -70,10 +74,17 @@ PathPlannerNode::PathPlannerNode()
 
     box_filter.setMin(min_point);  // Set minimum bound
     box_filter.setMax(max_point);  // Set maximum bound
+    
+    mls_min_x = get_parameter("dist_min_x").as_int();
+    mls_min_y = get_parameter("dist_min_y").as_int();
+
+    extend_trajectory_ = get_parameter("extend_trajectory").as_bool();    
+    extension_distance_ = get_parameter("extension_distance").as_double();   
 
     if (get_parameter("load_mls_from_file").as_bool() == true){
         const std::string mls_file_path = get_parameter("mls_file_path").as_string();
         const std::string mls_file_type = get_parameter("mls_file_type").as_string();
+
         if (mls_file_type == "ply"){        
             if (loadPlyAsMLS(mls_file_path)){
                 gotMap = true;
@@ -105,7 +116,7 @@ PathPlannerNode::PathPlannerNode()
         cfg.gapSize = get_parameter("mls_gap_size").as_double();
         const maps::grid::Vector2ui numCells(grid_size_x, grid_size_y);
         mlsMap = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
-        mlsMap.translate(Eigen::Vector3d(dist_min_x, dist_min_y, 0));
+        mlsMap.translate(Eigen::Vector3d(mls_min_x, mls_min_y, 0));
     }
     configurePlanner();
 }
@@ -278,6 +289,9 @@ bool PathPlannerNode::loadPlyAsMLS(const std::string& path){
             pclTf.translation() << -min.x, -min.y, -min.z;
             pcl::transformPointCloud (*cloud, *cloud, pclTf);
 
+            mls_min_x = 0;
+            mls_min_y = 0;
+
             std::vector<int> indices;
             pcl::removeNaNFromPointCloud(*cloud, *cloud, indices);
 
@@ -434,6 +448,7 @@ void PathPlannerNode::plan(){
 
     RCLCPP_INFO_STREAM(this->get_logger(), "Planner state: Planning");
     inPlanningPhase = true;
+    RCLCPP_INFO_STREAM(this->get_logger(), "Start is  " << start_pose_rbs.position.transpose());
     ugv_nav4d::Planner::PLANNING_RESULT res = planner->plan(time, start_pose_rbs, goal_pose_rbs, trajectory2D, trajectory3D, dumpOnError, dumpOnSuccess);
     inPlanningPhase = false;
     publishTravMap();
@@ -460,45 +475,143 @@ void PathPlannerNode::plan(){
             break;
     }
 
+    ugv_nav4d_ros2::msg::LabeledPathArray labeled_path_message;
     nav_msgs::msg::Path path_message;
     auto now = this->get_clock()->now();
 
     //Publish path if a solution is found
-    if (res == ugv_nav4d::Planner::FOUND_SOLUTION){
-        for (auto& trajectory : trajectory3D){
+    if (res == ugv_nav4d::Planner::FOUND_SOLUTION) {
+        for (size_t seg_idx = 0; seg_idx < trajectory3D.size(); ++seg_idx) {
+            auto& trajectory = trajectory3D[seg_idx];
 
-            //sample spline:
+            nav_msgs::msg::Path path_segment;
+            std::string label;
+
+            if (trajectory.driveMode == trajectory_follower::DriveMode::ModeAckermann && trajectory.speed > 0) {
+                label = "Forward";
+            }
+            else if (trajectory.driveMode == trajectory_follower::DriveMode::ModeAckermann && trajectory.speed < 0) {
+                label = "Backward";
+            }
+            else if (trajectory.driveMode == trajectory_follower::DriveMode::ModeTurnOnTheSpot) {
+                label = "PointTurn";
+            }
+            else if (trajectory.driveMode == trajectory_follower::DriveMode::ModeSideways) {
+                label = "Lateral";
+            }
+            else {
+                throw std::runtime_error("Invalid DriveMode: " + std::to_string(trajectory.driveMode));
+            }
+
+            // Sample spline
             const double stepDist = get_parameter("spline_resolution_distance").as_double();
             std::vector<double> parameters;
-            //NOTE we dont need the points, but there is no sample() api that returns parameters only
             const std::vector<base::geometry::Spline3::vector_t> points = trajectory.posSpline.sample(stepDist, &parameters);
             assert(parameters.size() == points.size());
-            for(size_t i = 0; i < parameters.size(); ++i)
-            {
+            for (size_t i = 0; i < parameters.size(); ++i) {
                 const double param = parameters[i];
                 base::Vector3d point, tangent;
-                std::tie(point,tangent) = trajectory.posSpline.getPointAndTangent(param);
-                Eigen::Quaterniond yaw(Eigen::AngleAxisd(std::atan2(tangent.y(), tangent.x()), Eigen::Vector3d::UnitZ()));
+                std::tie(point, tangent) = trajectory.posSpline.getPointAndTangent(param);
 
-                // Fill current path point to a temporary variable.
+                double yaw_angle = std::atan2(tangent.y(), tangent.x());
+                if (trajectory.speed < 0) {
+                    yaw_angle = std::atan2(-tangent.y(), -tangent.x());
+                }
+                Eigen::Quaterniond yaw(Eigen::AngleAxisd(yaw_angle, Eigen::Vector3d::UnitZ()));
+
                 geometry_msgs::msg::PoseStamped tempPoint;
-                tempPoint.pose.position.x= point.x();
-                tempPoint.pose.position.y= point.y();
-                tempPoint.pose.position.z= point.z();
-                
-                tempPoint.pose.orientation.x= yaw.x();
-                tempPoint.pose.orientation.y= yaw.y();
-                tempPoint.pose.orientation.z= yaw.z();
-                tempPoint.pose.orientation.w= yaw.w();
+                tempPoint.pose.position.x = point.x();
+                tempPoint.pose.position.y = point.y();
+                tempPoint.pose.position.z = point.z();
+
+                tempPoint.pose.orientation.x = yaw.x();
+                tempPoint.pose.orientation.y = yaw.y();
+                tempPoint.pose.orientation.z = yaw.z();
+                tempPoint.pose.orientation.w = yaw.w();
 
                 tempPoint.header.stamp = now;
 
-                // Add points to path.
                 path_message.header.frame_id = get_parameter("world_frame").as_string();
                 path_message.poses.push_back(tempPoint);
+
+                path_segment.header.frame_id = get_parameter("world_frame").as_string();
+                path_segment.poses.push_back(tempPoint);
             }
+
+            if (extend_trajectory_){
+                // Add extension points ONLY when direction switches or at last segment
+                bool add_extension_point = false;
+                if (seg_idx + 1 < trajectory3D.size()) {
+                    const auto& next_traj = trajectory3D[seg_idx + 1];
+                    bool curr_fwd = trajectory.speed > 0;
+                    bool curr_bwd = trajectory.speed < 0;
+                    bool next_fwd = next_traj.speed > 0;
+                    bool next_bwd = next_traj.speed < 0;
+
+                    if ((curr_fwd && next_bwd) || (curr_bwd && next_fwd)) {
+                        add_extension_point = true;
+                    }
+                }
+                else if (seg_idx + 1 == trajectory3D.size()) {
+                    add_extension_point = true;
+                }
+
+                if (add_extension_point && !parameters.empty() && trajectory.driveMode != trajectory_follower::DriveMode::ModeTurnOnTheSpot) {
+                    double last_param = parameters.back();
+                    base::Vector3d end_point, end_tangent;
+                    std::tie(end_point, end_tangent) = trajectory.posSpline.getPointAndTangent(last_param);
+
+                    Eigen::Vector3d direction = end_tangent.normalized();
+
+                    base::Vector3d ext_point_half = end_point + direction * (extension_distance_ * 0.5);
+                    base::Vector3d ext_point_full = end_point + direction * extension_distance_;
+
+                    // 1st extension: half distance
+                    geometry_msgs::msg::PoseStamped ext_pose_half;
+                    ext_pose_half.header.stamp = now;
+                    ext_pose_half.pose.position.x = ext_point_half.x();
+                    ext_pose_half.pose.position.y = ext_point_half.y();
+                    ext_pose_half.pose.position.z = ext_point_half.z();
+
+                    // 2nd extension: full distance
+                    geometry_msgs::msg::PoseStamped ext_pose_full;
+                    ext_pose_full.header.stamp = now;
+                    ext_pose_full.pose.position.x = ext_point_full.x();
+                    ext_pose_full.pose.position.y = ext_point_full.y();
+                    ext_pose_full.pose.position.z = ext_point_full.z();
+
+
+                    if (trajectory.speed < 0) {
+                        direction = -direction;
+                    }
+
+                    double yaw_angle_half = std::atan2(direction.y(), direction.x());
+                    Eigen::Quaterniond yaw_half(Eigen::AngleAxisd(yaw_angle_half, Eigen::Vector3d::UnitZ()));
+
+                    ext_pose_half.pose.orientation.x = yaw_half.x();
+                    ext_pose_half.pose.orientation.y = yaw_half.y();
+                    ext_pose_half.pose.orientation.z = yaw_half.z();
+                    ext_pose_half.pose.orientation.w = yaw_half.w();
+
+                    ext_pose_full.pose.orientation.x = yaw_half.x();
+                    ext_pose_full.pose.orientation.y = yaw_half.y();
+                    ext_pose_full.pose.orientation.z = yaw_half.z();
+                    ext_pose_full.pose.orientation.w = yaw_half.w();
+
+                    path_message.poses.push_back(ext_pose_half);
+                    path_segment.poses.push_back(ext_pose_half);
+
+                    path_message.poses.push_back(ext_pose_full);
+                    path_segment.poses.push_back(ext_pose_full);
+                }
+            }
+
+            labeled_path_message.paths.push_back(path_segment);
+            labeled_path_message.labels.push_back(label);
         }
+
         path_publisher->publish(path_message);
+        labeled_path_publisher->publish(labeled_path_message);
     }
 }
 
@@ -573,6 +686,9 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("robotSizeY", 0.80);
     //declare_parameter("slopeMetric", :NONE);
     declare_parameter("slopeMetricScale", 1.0);    
+
+    declare_parameter("extend_trajectory", false);    
+    declare_parameter("extension_distance", 0.0);    
 }
 
 void PathPlannerNode::updateParameters(){
@@ -634,8 +750,27 @@ void PathPlannerNode::configurePlanner(){
             planner->updateMap(mlsMap);
             RCLCPP_INFO_STREAM(this->get_logger(), "Loaded map.");  
 
+            RCLCPP_INFO_STREAM(this->get_logger(), "Unable to update parameter due to planner is in state: Planning");
+
+
+            if (!read_pose_from_tf()){
+                RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to read start pose of the robot. Planner configuration failed!");
+                return;
+            }
+
+            start_pose_rbs.position = Eigen::Vector3d(start_pose.pose.position.x,
+                                                    start_pose.pose.position.y,
+                                                    start_pose.pose.position.z);
+
+            start_pose_rbs.orientation = Eigen::Quaterniond(start_pose.pose.orientation.w,
+                                                            start_pose.pose.orientation.x,
+                                                            start_pose.pose.orientation.y,
+                                                            start_pose.pose.orientation.z);
+
             planner->setInitialPatch(start_pose_rbs.getTransform(), get_parameter("initialPatchRadius").as_double());
             initialPatchAdded = true;
+            std::cout << "Initial patch added at position: " << start_pose_rbs.position.transpose() << std::endl;
+
             RCLCPP_INFO(this->get_logger(), "Initial patch added.");
             RCLCPP_INFO(this->get_logger(), "Planner state: Ready");
         }
@@ -659,10 +794,6 @@ bool PathPlannerNode::publishMLSMap(){
     int minMeasurements = 3;
     maps::grid::Vector2ui num_cell = mlsMap.getNumCells();
     typedef maps::grid::MLSMap<maps::grid::MLSConfig::SLOPE>::CellType Cell;
-
-    double dist_min_x = get_parameter("dist_min_x").as_int();
-    double dist_min_y = get_parameter("dist_min_y").as_int();
-
 
     for (size_t x = 0; x < num_cell.x(); x++)
     {
@@ -690,8 +821,8 @@ bool PathPlannerNode::publishMLSMap(){
 
                 // Calculate the position of the cell center.
                 pos = (maps::grid::Index(x, y).cast<double>() + maps::grid::Vector2d(0.5, 0.5)).array() * mlsMap.getResolution().array();
-                patch_msg.position.x = pos.x() + dist_min_x;
-                patch_msg.position.y = pos.y() + dist_min_y;
+                patch_msg.position.x = pos.x() + mls_min_x;
+                patch_msg.position.y = pos.y() + mls_min_y;
                 patch_msg.position.z = p.getCenter().z();
 
                 if(normal.allFinite())
