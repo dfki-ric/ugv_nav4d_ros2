@@ -55,8 +55,7 @@ PathPlannerNode::PathPlannerNode()
         std::bind(&PathPlannerNode::parameterUpdateTimerCallback, this)  // Callback function
     );
 
-    path_publisher = this->create_publisher<nav_msgs::msg::Path>("/ugv_nav4d_ros2/path", 10);
-    labeled_path_publisher = this->create_publisher<ugv_nav4d_ros2::msg::LabeledPathArray>("/ugv_nav4d_ros2/labeled_paths", 10);
+    labeled_path_publisher = this->create_publisher<ugv_nav4d_ros2::msg::LabeledPathArray>("/ugv_nav4d_ros2/labeled_path_segments", 10);
     trav_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::TravMap>("/ugv_nav4d_ros2/trav_map", 10);
     mls_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::MLSMap>("/ugv_nav4d_ros2/mls_map", 10);
     cloud_map_publisher = this->create_publisher<sensor_msgs::msg::PointCloud2>("/ugv_nav4d_ros2/cloud_map", 10);
@@ -476,16 +475,15 @@ void PathPlannerNode::plan(){
     }
 
     ugv_nav4d_ros2::msg::LabeledPathArray labeled_path_message;
-    nav_msgs::msg::Path path_message;
     auto now = this->get_clock()->now();
+
+    nav_msgs::msg::Path path_segment;
+    std::string label;
 
     //Publish path if a solution is found
     if (res == ugv_nav4d::Planner::FOUND_SOLUTION) {
         for (size_t seg_idx = 0; seg_idx < trajectory3D.size(); ++seg_idx) {
             auto& trajectory = trajectory3D[seg_idx];
-
-            nav_msgs::msg::Path path_segment;
-            std::string label;
 
             if (trajectory.driveMode == trajectory_follower::DriveMode::ModeAckermann && trajectory.speed > 0) {
                 label = "Forward";
@@ -510,13 +508,25 @@ void PathPlannerNode::plan(){
             assert(parameters.size() == points.size());
             for (size_t i = 0; i < parameters.size(); ++i) {
                 const double param = parameters[i];
-                base::Vector3d point, tangent;
-                std::tie(point, tangent) = trajectory.posSpline.getPointAndTangent(param);
 
-                double yaw_angle = std::atan2(tangent.y(), tangent.x());
-                if (trajectory.speed < 0) {
-                    yaw_angle = std::atan2(-tangent.y(), -tangent.x());
+                double yaw_angle = 0;
+                base::Vector3d point, tangent;
+
+                if (trajectory.driveMode == trajectory_follower::DriveMode::ModeTurnOnTheSpot){
+                    //start position and goal position are same in case of pointturns
+                    point = trajectory.posSpline.getPoint(param);
+                    yaw_angle = trajectory.goalPose.orientation;
                 }
+                else{
+                    std::tie(point, tangent) = trajectory.posSpline.getPointAndTangent(param);
+                    if (trajectory.speed < 0) {
+                        yaw_angle = std::atan2(-tangent.y(), -tangent.x());
+                    }
+                    else{
+                        yaw_angle = std::atan2(tangent.y(), tangent.x());
+                    }
+                }
+
                 Eigen::Quaterniond yaw(Eigen::AngleAxisd(yaw_angle, Eigen::Vector3d::UnitZ()));
 
                 geometry_msgs::msg::PoseStamped tempPoint;
@@ -531,14 +541,11 @@ void PathPlannerNode::plan(){
 
                 tempPoint.header.stamp = now;
 
-                path_message.header.frame_id = get_parameter("world_frame").as_string();
-                path_message.poses.push_back(tempPoint);
-
                 path_segment.header.frame_id = get_parameter("world_frame").as_string();
                 path_segment.poses.push_back(tempPoint);
             }
 
-            if (extend_trajectory_){
+            if (extend_trajectory_ && trajectory.driveMode != trajectory_follower::DriveMode::ModeTurnOnTheSpot){
                 // Add extension points ONLY when direction switches or at last segment
                 bool add_extension_point = false;
                 if (seg_idx + 1 < trajectory3D.size()) {
@@ -556,7 +563,7 @@ void PathPlannerNode::plan(){
                     add_extension_point = true;
                 }
 
-                if (add_extension_point && !parameters.empty() && trajectory.driveMode != trajectory_follower::DriveMode::ModeTurnOnTheSpot) {
+                if (add_extension_point && !parameters.empty()) {
                     double last_param = parameters.back();
                     base::Vector3d end_point, end_tangent;
                     std::tie(end_point, end_tangent) = trajectory.posSpline.getPointAndTangent(last_param);
@@ -598,19 +605,30 @@ void PathPlannerNode::plan(){
                     ext_pose_full.pose.orientation.z = yaw_half.z();
                     ext_pose_full.pose.orientation.w = yaw_half.w();
 
-                    path_message.poses.push_back(ext_pose_half);
                     path_segment.poses.push_back(ext_pose_half);
-
-                    path_message.poses.push_back(ext_pose_full);
                     path_segment.poses.push_back(ext_pose_full);
                 }
             }
 
-            labeled_path_message.paths.push_back(path_segment);
-            labeled_path_message.labels.push_back(label);
-        }
+            if (seg_idx + 1 < trajectory3D.size()) {
+                const auto& next_traj = trajectory3D[seg_idx + 1];
+                bool curr_fwd = trajectory.speed > 0;
+                bool curr_bwd = trajectory.speed < 0;
+                bool next_fwd = next_traj.speed > 0;
+                bool next_bwd = next_traj.speed < 0;
 
-        path_publisher->publish(path_message);
+                if ((curr_fwd && next_bwd) || (curr_bwd && next_fwd)) {
+                    //Reset path segment upon direction change
+                    labeled_path_message.paths.push_back(path_segment);
+                    labeled_path_message.labels.push_back(label);
+                    path_segment = nav_msgs::msg::Path();
+                }
+            }
+            else{
+                    labeled_path_message.paths.push_back(path_segment);
+                    labeled_path_message.labels.push_back(label);
+            }
+        }
         labeled_path_publisher->publish(labeled_path_message);
     }
 }
