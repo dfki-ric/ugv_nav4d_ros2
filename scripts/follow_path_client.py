@@ -12,9 +12,12 @@ class FollowPathClient(Node):
 
         self.subscription = self.create_subscription(
             LabeledPathArray,
-            '/ugv_nav4d_ros2/labeled_paths',
+            '/ugv_nav4d_ros2/labeled_path_segments',
             self.labeled_path_callback,
             10
+        )
+        self.combined_path_pub = self.create_publisher(
+            Path, '/follow_path_client/combined_path', 10
         )
 
         self._action_client = ActionClient(self, FollowPath, '/follow_path')
@@ -31,6 +34,17 @@ class FollowPathClient(Node):
 
         self.get_logger().info(f'Received {len(msg.paths)} labeled paths.')
 
+        # Combine all paths into one
+        combined_path = Path()
+        if msg.paths:
+            combined_path.header = msg.paths[0].header  # Take header from the first path
+            for path in msg.paths:
+                combined_path.poses.extend(path.poses)
+            self.combined_path_pub.publish(combined_path)
+            self.get_logger().info(f'Published combined path with {len(combined_path.poses)} poses.')
+        else:
+            self.get_logger().warn('No paths to combine in LabeledPathArray.')
+
         for path, label in zip(msg.paths, msg.labels):
             if not path.poses:
                 self.get_logger().warn(f'Skipping empty path labeled "{label}".')
@@ -38,9 +52,9 @@ class FollowPathClient(Node):
             self.path_queue.append((path, label))
 
         if not self.goal_in_progress:
-            self._send_next_path()
+            self.send_next_path()
 
-    def _send_next_path(self):
+    def send_next_path(self):
         if not self.path_queue:
             self.get_logger().info('All paths executed.')
             self.goal_in_progress = False
@@ -57,26 +71,35 @@ class FollowPathClient(Node):
         self.goal_in_progress = True
         self._action_client.wait_for_server()
         future = self._action_client.send_goal_async(goal_msg)
-        future.add_done_callback(self._goal_response_callback)
+        future.add_done_callback(self.goal_response_callback)
 
-    def _goal_response_callback(self, future):
+    def clear(self):
+        self.get_logger().error('Cleared internal state of FollowPath client.')
+        self.path_queue.clear()
+        self.goal_in_progress = False
+       
+    def goal_response_callback(self, future):
         goal_handle = future.result()
         if not goal_handle.accepted:
             self.get_logger().error('FollowPath goal was rejected.')
             self.goal_in_progress = False
-            self._send_next_path()
+            self.clear()
             return
 
         self.get_logger().info('FollowPath goal accepted.')
         result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(self._get_result_callback)
+        result_future.add_done_callback(self.get_result_callback)
 
-    def _get_result_callback(self, future):
-        result = future.result().result
-        self.get_logger().info(f'FollowPath result received: success = {result}')
-        self.goal_in_progress = False
-        self._send_next_path()
+    def get_result_callback(self, future):
+        result_msg = future.result().result
+        error_code = result_msg.error_code
 
+        if error_code == 0:
+            self.get_logger().info('Goal was successful!')
+            self.send_next_path()
+        else:
+            self.get_logger().warn(f'Goal failed with error_code: {error_code}')
+            self.clear()
 
 def main(args=None):
     rclpy.init(args=args)
