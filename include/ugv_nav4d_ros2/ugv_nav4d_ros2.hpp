@@ -76,7 +76,7 @@ private:
     rcl_interfaces::msg::SetParametersResult parametersCallback(const std::vector<rclcpp::Parameter> &parameters);
 
     //subscriptions
-    OnSetParametersCallbackHandle::SharedPtr callback_handle;
+    OnSetParametersCallbackHandle::SharedPtr parameter_callback_handle;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_goal_pose;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_start_pose;
 
@@ -90,7 +90,6 @@ private:
     rclcpp::Publisher<ugv_nav4d_ros2::msg::LabeledPathArray>::SharedPtr labeled_path_publisher;
     rclcpp::Publisher<ugv_nav4d_ros2::msg::TravMap>::SharedPtr trav_map_publisher;
     rclcpp::Publisher<ugv_nav4d_ros2::msg::MLSMap>::SharedPtr mls_map_publisher;
-    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_map_publisher;
 
     //services
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_publish_service; 
@@ -113,6 +112,7 @@ private:
     bool initialPatchAdded;
     bool inPlanningPhase;
     bool gotMap;
+    bool isConfigured;
     double mls_min_x;
     double mls_min_y;
 

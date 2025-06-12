@@ -27,6 +27,7 @@ PathPlannerNode::PathPlannerNode()
     initialPatchAdded = false;
     inPlanningPhase = false;
     gotMap = false;
+    isConfigured = false;
     
     // Create the action server
     save_mls_map_action_server = rclcpp_action::create_server<SaveMLSMap>(
@@ -37,7 +38,6 @@ PathPlannerNode::PathPlannerNode()
         std::bind(&PathPlannerNode::handle_save_map_accepted, this, std::placeholders::_1)
     );
 
-
     map_publish_service = this->create_service<std_srvs::srv::Trigger>(
             "/ugv_nav4d_ros2/map_publish", std::bind(&PathPlannerNode::map_publish_callback, this, std::placeholders::_1, std::placeholders::_2));
 
@@ -47,7 +47,7 @@ PathPlannerNode::PathPlannerNode()
     sub_start_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/start_pose", 1, 
             bind(&PathPlannerNode::read_start_pose, this, std::placeholders::_1));
 
-    callback_handle = this->add_on_set_parameters_callback(
+    parameter_callback_handle = this->add_on_set_parameters_callback(
         std::bind(&PathPlannerNode::parametersCallback, this, std::placeholders::_1));
 
     timer = this->create_wall_timer(
@@ -58,7 +58,6 @@ PathPlannerNode::PathPlannerNode()
     labeled_path_publisher = this->create_publisher<ugv_nav4d_ros2::msg::LabeledPathArray>("/ugv_nav4d_ros2/labeled_path_segments", 10);
     trav_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::TravMap>("/ugv_nav4d_ros2/trav_map", 10);
     mls_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::MLSMap>("/ugv_nav4d_ros2/mls_map", 10);
-    cloud_map_publisher = this->create_publisher<sensor_msgs::msg::PointCloud2>("/ugv_nav4d_ros2/cloud_map", 10);
 
     Eigen::Vector4f min_point;
     Eigen::Vector4f max_point;
@@ -117,7 +116,6 @@ PathPlannerNode::PathPlannerNode()
         mlsMap = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
         mlsMap.translate(Eigen::Vector3d(mls_min_x, mls_min_y, 0));
     }
-    configurePlanner();
 }
 
 void PathPlannerNode::parameterUpdateTimerCallback(){
@@ -229,10 +227,15 @@ bool PathPlannerNode::read_pose_from_tf(){
 
 void PathPlannerNode::process_goal_request(const geometry_msgs::msg::PoseStamped::SharedPtr msg){
 
+    if (!isConfigured){
+        configurePlanner();
+        isConfigured = true;
+    }
+
     if (!get_parameter("read_pose_from_topic").as_bool())
     {
         if (!read_pose_from_tf()){
-            RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to read start pose of the robot!");
+            RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to read start pose of the robot from TF!");
             return;
         }
 
@@ -282,14 +285,9 @@ bool PathPlannerNode::loadPlyAsMLS(const std::string& path){
         {
             pcl::PointXYZ min, max; 
             pcl::getMinMax3D (*cloud, min, max); 
-        
-            //transform point cloud to zero (instead we could also use MlsMap::translate later but that seems to be broken?)
-            Eigen::Affine3f pclTf = Eigen::Affine3f::Identity();
-            pclTf.translation() << -min.x, -min.y, -min.z;
-            pcl::transformPointCloud (*cloud, *cloud, pclTf);
 
-            mls_min_x = 0;
-            mls_min_y = 0;
+            mls_min_x = min.x;
+            mls_min_y = min.y;
 
             std::vector<int> indices;
             pcl::removeNaNFromPointCloud(*cloud, *cloud, indices);
@@ -306,6 +304,7 @@ bool PathPlannerNode::loadPlyAsMLS(const std::string& path){
             cfg.gapSize = get_parameter("mls_gap_size").as_double();
             const maps::grid::Vector2ui numCells(size_x / mls_res + 1, size_y / mls_res + 1);
             mlsMap = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
+            mlsMap.translate(Eigen::Vector3d(min.x, min.y, 0));
             mlsMap.mergePointCloud(*cloud_filtered, base::Transform3d::Identity());
         }
         return true;
@@ -473,35 +472,45 @@ void PathPlannerNode::plan(){
             RCLCPP_INFO_STREAM(this->get_logger(), "NO_MAP");
             break;
     }
-
+    
     ugv_nav4d_ros2::msg::LabeledPathArray labeled_path_message;
     auto now = this->get_clock()->now();
 
     nav_msgs::msg::Path path_segment;
+    std::string label_last;
     std::string label;
+    bool first_segment = true;
 
-    //Publish path if a solution is found
     if (res == ugv_nav4d::Planner::FOUND_SOLUTION) {
         for (size_t seg_idx = 0; seg_idx < trajectory3D.size(); ++seg_idx) {
             auto& trajectory = trajectory3D[seg_idx];
 
+            // Assign label based on current segment
             if (trajectory.driveMode == trajectory_follower::DriveMode::ModeAckermann && trajectory.speed > 0) {
                 label = "Forward";
-            }
-            else if (trajectory.driveMode == trajectory_follower::DriveMode::ModeAckermann && trajectory.speed < 0) {
+            } else if (trajectory.driveMode == trajectory_follower::DriveMode::ModeAckermann && trajectory.speed < 0) {
                 label = "Backward";
-            }
-            else if (trajectory.driveMode == trajectory_follower::DriveMode::ModeTurnOnTheSpot) {
+            } else if (trajectory.driveMode == trajectory_follower::DriveMode::ModeTurnOnTheSpot) {
                 label = "PointTurn";
-            }
-            else if (trajectory.driveMode == trajectory_follower::DriveMode::ModeSideways) {
+            } else if (trajectory.driveMode == trajectory_follower::DriveMode::ModeSideways) {
                 label = "Lateral";
-            }
-            else {
+            } else {
                 throw std::runtime_error("Invalid DriveMode: " + std::to_string(trajectory.driveMode));
             }
 
-            // Sample spline
+            // If this is a new segment (first or label changed), start a new path_segment
+            if (first_segment || label != label_last) {
+                if (!first_segment && !path_segment.poses.empty()) {
+                    labeled_path_message.paths.push_back(path_segment);
+                    labeled_path_message.labels.push_back(label_last);
+                }
+                path_segment = nav_msgs::msg::Path();
+                path_segment.header.frame_id = get_parameter("world_frame").as_string();
+                label_last = label;
+                first_segment = false;
+            }
+
+            // Sample spline and add poses to current segment
             const double stepDist = get_parameter("spline_resolution_distance").as_double();
             std::vector<double> parameters;
             const std::vector<base::geometry::Spline3::vector_t> points = trajectory.posSpline.sample(stepDist, &parameters);
@@ -512,17 +521,14 @@ void PathPlannerNode::plan(){
                 double yaw_angle = 0;
                 base::Vector3d point, tangent;
 
-                if (trajectory.driveMode == trajectory_follower::DriveMode::ModeTurnOnTheSpot){
-                    //start position and goal position are same in case of pointturns
+                if (trajectory.driveMode == trajectory_follower::DriveMode::ModeTurnOnTheSpot) {
                     point = trajectory.posSpline.getPoint(param);
                     yaw_angle = trajectory.goalPose.orientation;
-                }
-                else{
+                } else {
                     std::tie(point, tangent) = trajectory.posSpline.getPointAndTangent(param);
                     if (trajectory.speed < 0) {
                         yaw_angle = std::atan2(-tangent.y(), -tangent.x());
-                    }
-                    else{
+                    } else {
                         yaw_angle = std::atan2(tangent.y(), tangent.x());
                     }
                 }
@@ -533,20 +539,18 @@ void PathPlannerNode::plan(){
                 tempPoint.pose.position.x = point.x();
                 tempPoint.pose.position.y = point.y();
                 tempPoint.pose.position.z = point.z();
-
                 tempPoint.pose.orientation.x = yaw.x();
                 tempPoint.pose.orientation.y = yaw.y();
                 tempPoint.pose.orientation.z = yaw.z();
                 tempPoint.pose.orientation.w = yaw.w();
-
                 tempPoint.header.stamp = now;
+                tempPoint.header.frame_id = get_parameter("world_frame").as_string();
 
-                path_segment.header.frame_id = get_parameter("world_frame").as_string();
                 path_segment.poses.push_back(tempPoint);
             }
 
-            if (extend_trajectory_ && trajectory.driveMode != trajectory_follower::DriveMode::ModeTurnOnTheSpot){
-                // Add extension points ONLY when direction switches or at last segment
+            // Extension logic (unchanged)
+            if (extend_trajectory_ && trajectory.driveMode != trajectory_follower::DriveMode::ModeTurnOnTheSpot) {
                 bool add_extension_point = false;
                 if (seg_idx + 1 < trajectory3D.size()) {
                     const auto& next_traj = trajectory3D[seg_idx + 1];
@@ -558,8 +562,7 @@ void PathPlannerNode::plan(){
                     if ((curr_fwd && next_bwd) || (curr_bwd && next_fwd)) {
                         add_extension_point = true;
                     }
-                }
-                else if (seg_idx + 1 == trajectory3D.size()) {
+                } else if (seg_idx + 1 == trajectory3D.size()) {
                     add_extension_point = true;
                 }
 
@@ -573,20 +576,19 @@ void PathPlannerNode::plan(){
                     base::Vector3d ext_point_half = end_point + direction * (extension_distance_ * 0.5);
                     base::Vector3d ext_point_full = end_point + direction * extension_distance_;
 
-                    // 1st extension: half distance
                     geometry_msgs::msg::PoseStamped ext_pose_half;
                     ext_pose_half.header.stamp = now;
+                    ext_pose_half.header.frame_id = get_parameter("world_frame").as_string();
                     ext_pose_half.pose.position.x = ext_point_half.x();
                     ext_pose_half.pose.position.y = ext_point_half.y();
                     ext_pose_half.pose.position.z = ext_point_half.z();
 
-                    // 2nd extension: full distance
                     geometry_msgs::msg::PoseStamped ext_pose_full;
                     ext_pose_full.header.stamp = now;
+                    ext_pose_full.header.frame_id = get_parameter("world_frame").as_string();
                     ext_pose_full.pose.position.x = ext_point_full.x();
                     ext_pose_full.pose.position.y = ext_point_full.y();
                     ext_pose_full.pose.position.z = ext_point_full.z();
-
 
                     if (trajectory.speed < 0) {
                         direction = -direction;
@@ -609,28 +611,17 @@ void PathPlannerNode::plan(){
                     path_segment.poses.push_back(ext_pose_full);
                 }
             }
-
-            if (seg_idx + 1 < trajectory3D.size()) {
-                const auto& next_traj = trajectory3D[seg_idx + 1];
-                bool curr_fwd = trajectory.speed > 0;
-                bool curr_bwd = trajectory.speed < 0;
-                bool next_fwd = next_traj.speed > 0;
-                bool next_bwd = next_traj.speed < 0;
-
-                if ((curr_fwd && next_bwd) || (curr_bwd && next_fwd)) {
-                    //Reset path segment upon direction change
-                    labeled_path_message.paths.push_back(path_segment);
-                    labeled_path_message.labels.push_back(label);
-                    path_segment = nav_msgs::msg::Path();
-                }
-            }
-            else{
-                    labeled_path_message.paths.push_back(path_segment);
-                    labeled_path_message.labels.push_back(label);
-            }
         }
+
+        // Final push for the last segment
+        if (!path_segment.poses.empty()) {
+            labeled_path_message.paths.push_back(path_segment);
+            labeled_path_message.labels.push_back(label_last);
+        }
+
         labeled_path_publisher->publish(labeled_path_message);
     }
+
 }
 
 void PathPlannerNode::declareParameters(){
@@ -768,12 +759,13 @@ void PathPlannerNode::configurePlanner(){
             planner->updateMap(mlsMap);
             RCLCPP_INFO_STREAM(this->get_logger(), "Loaded map.");  
 
-            RCLCPP_INFO_STREAM(this->get_logger(), "Unable to update parameter due to planner is in state: Planning");
+            if (!get_parameter("read_pose_from_topic").as_bool())
+            {
+                if (!read_pose_from_tf()){
+                    RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to read start pose of the robot from TF!");
+                    return;
+                }
 
-
-            if (!read_pose_from_tf()){
-                RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to read start pose of the robot. Planner configuration failed!");
-                return;
             }
 
             start_pose_rbs.position = Eigen::Vector3d(start_pose.pose.position.x,
@@ -797,7 +789,7 @@ void PathPlannerNode::configurePlanner(){
         }
     }
     else{
-        RCLCPP_INFO_STREAM(this->get_logger(), "Unable to update parameter due to planner is in state: Planning");
+        RCLCPP_INFO_STREAM(this->get_logger(), "Unable to configure planner due to planner is in state: Planning");
     }
 }
 
