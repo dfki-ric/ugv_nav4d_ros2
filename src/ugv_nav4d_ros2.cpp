@@ -504,6 +504,7 @@ void PathPlannerNode::plan(){
                     labeled_path_message.paths.push_back(path_segment);
                     labeled_path_message.labels.push_back(label_last);
                 }
+
                 path_segment = nav_msgs::msg::Path();
                 path_segment.header.frame_id = get_parameter("world_frame").as_string();
                 label_last = label;
@@ -549,7 +550,7 @@ void PathPlannerNode::plan(){
                 path_segment.poses.push_back(tempPoint);
             }
 
-            // Extension logic (unchanged)
+            // Extension logic
             if (extend_trajectory_ && trajectory.driveMode != trajectory_follower::DriveMode::ModeTurnOnTheSpot) {
                 bool add_extension_point = false;
                 if (seg_idx + 1 < trajectory3D.size()) {
