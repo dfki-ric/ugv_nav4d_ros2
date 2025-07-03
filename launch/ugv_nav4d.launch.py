@@ -65,5 +65,15 @@ def generate_launch_description():
         parameters=[LaunchConfiguration("main_param_file")],
         )
     )
+    declared_arguments.append(
+        Node(
+        package="ugv_nav4d_ros2",
+        executable="visualize_path.py",
+        name="ugv_nav4d_path_visualization",
+        output="screen",
+        remappings=[],
+        parameters=[],
+        )
+    )
 
     return LaunchDescription(declared_arguments)
