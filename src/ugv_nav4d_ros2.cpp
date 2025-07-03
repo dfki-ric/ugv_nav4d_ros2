@@ -17,47 +17,13 @@ namespace ugv_nav4d_ros2 {
 
 PathPlannerNode::PathPlannerNode()
     : Node("ugv_nav4d_ros2")
+    , initialPatchAdded(false)
+    , inPlanningPhase(false)
+    , gotMap(false)
+    , isConfigured(false)
 {
     declareParameters();
-
-    // controller feedback (via TF)
-    tf_buffer = std::make_unique<tf2_ros::Buffer>(this->get_clock());
-    tf_listener = std::make_shared<tf2_ros::TransformListener>(*tf_buffer);
-
-    initialPatchAdded = false;
-    inPlanningPhase = false;
-    gotMap = false;
-    isConfigured = false;
-    
-    // Create the action server
-    save_mls_map_action_server = rclcpp_action::create_server<SaveMLSMap>(
-        this,
-        "/ugv_nav4d_ros2/save_mls_map",
-        std::bind(&PathPlannerNode::handle_save_map_goal, this, std::placeholders::_1, std::placeholders::_2),
-        std::bind(&PathPlannerNode::handle_save_map_cancel, this, std::placeholders::_1),
-        std::bind(&PathPlannerNode::handle_save_map_accepted, this, std::placeholders::_1)
-    );
-
-    map_publish_service = this->create_service<std_srvs::srv::Trigger>(
-            "/ugv_nav4d_ros2/map_publish", std::bind(&PathPlannerNode::map_publish_callback, this, std::placeholders::_1, std::placeholders::_2));
-
-    sub_goal_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/goal_pose", 1, 
-            bind(&PathPlannerNode::process_goal_request, this, std::placeholders::_1));
-
-    sub_start_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/start_pose", 1, 
-            bind(&PathPlannerNode::read_start_pose, this, std::placeholders::_1));
-
-    parameter_callback_handle = this->add_on_set_parameters_callback(
-        std::bind(&PathPlannerNode::parametersCallback, this, std::placeholders::_1));
-
-    timer = this->create_wall_timer(
-        std::chrono::milliseconds(1000),  // Timer period
-        std::bind(&PathPlannerNode::parameterUpdateTimerCallback, this)  // Callback function
-    );
-
-    labeled_path_publisher = this->create_publisher<ugv_nav4d_ros2::msg::LabeledPathArray>("/ugv_nav4d_ros2/labeled_path_segments", 10);
-    trav_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::TravMap>("/ugv_nav4d_ros2/trav_map", 10);
-    mls_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::MLSMap>("/ugv_nav4d_ros2/mls_map", 10);
+    configurePlanner();
 
     Eigen::Vector4f min_point;
     Eigen::Vector4f max_point;
@@ -79,7 +45,7 @@ PathPlannerNode::PathPlannerNode()
     extend_trajectory_ = get_parameter("extend_trajectory").as_bool();    
     extension_distance_ = get_parameter("extension_distance").as_double();   
 
-    if (get_parameter("load_mls_from_file").as_bool() == true){
+    if (get_parameter("load_mls_from_file").as_bool()){
         const std::string mls_file_path = get_parameter("mls_file_path").as_string();
         const std::string mls_file_type = get_parameter("mls_file_type").as_string();
 
@@ -98,10 +64,6 @@ PathPlannerNode::PathPlannerNode()
         }
     }
     else{
-        cloud_subscription = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-            "/ugv_nav4d_ros2/pointcloud", 10,
-            std::bind(&PathPlannerNode::cloud_callback, this, std::placeholders::_1));
-
         const double mls_res = get_parameter("grid_resolution").as_double();
         const double dist_max_x = get_parameter("dist_max_x").as_int();
         const double dist_max_y = get_parameter("dist_max_y").as_int();
@@ -109,12 +71,58 @@ PathPlannerNode::PathPlannerNode()
         const double dist_min_y = get_parameter("dist_min_y").as_int();
         const double grid_size_x = (dist_max_x - dist_min_x)/mls_res;
         const double grid_size_y = (dist_max_y - dist_min_y)/mls_res;
-        
+
         maps::grid::MLSConfig cfg;
         cfg.gapSize = get_parameter("mls_gap_size").as_double();
         const maps::grid::Vector2ui numCells(grid_size_x, grid_size_y);
         mlsMap = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
         mlsMap.translate(Eigen::Vector3d(mls_min_x, mls_min_y, 0));
+    }
+
+    labeled_path_publisher = this->create_publisher<ugv_nav4d_ros2::msg::LabeledPathArray>("/ugv_nav4d_ros2/labeled_path_segments", 10);
+    trav_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::TravMap>("/ugv_nav4d_ros2/trav_map", 10);
+    mls_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::MLSMap>("/ugv_nav4d_ros2/mls_map", 10);
+
+    setupSubscriptions();
+}
+
+void PathPlannerNode::setupSubscriptions()
+{
+    // controller feedback (via TF)
+    tf_buffer = std::make_unique<tf2_ros::Buffer>(this->get_clock());
+    tf_listener = std::make_shared<tf2_ros::TransformListener>(*tf_buffer);
+
+    // Create the action server
+    save_mls_map_action_server = rclcpp_action::create_server<SaveMLSMap>(
+        this,
+        "/ugv_nav4d_ros2/save_mls_map",
+        std::bind(&PathPlannerNode::handle_save_map_goal, this, std::placeholders::_1, std::placeholders::_2),
+        std::bind(&PathPlannerNode::handle_save_map_cancel, this, std::placeholders::_1),
+        std::bind(&PathPlannerNode::handle_save_map_accepted, this, std::placeholders::_1)
+    );
+
+    // Map publisher trigger service
+    map_publish_service = this->create_service<std_srvs::srv::Trigger>(
+            "/ugv_nav4d_ros2/map_publish", std::bind(&PathPlannerNode::map_publish_callback, this, std::placeholders::_1, std::placeholders::_2));
+
+    sub_goal_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/goal_pose", 1, 
+            bind(&PathPlannerNode::process_goal_request, this, std::placeholders::_1));
+
+    sub_start_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/start_pose", 1, 
+            bind(&PathPlannerNode::read_start_pose, this, std::placeholders::_1));
+
+    parameter_callback_handle = this->add_on_set_parameters_callback(
+        std::bind(&PathPlannerNode::parametersCallback, this, std::placeholders::_1));
+
+    timer = this->create_wall_timer(
+        std::chrono::milliseconds(1000),  // Timer period
+        std::bind(&PathPlannerNode::parameterUpdateTimerCallback, this)  // Callback function
+    );
+
+    if (!get_parameter("load_mls_from_file").as_bool()){
+        cloud_subscription = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+                "/ugv_nav4d_ros2/pointcloud", 10,
+                std::bind(&PathPlannerNode::cloud_callback, this, std::placeholders::_1));
     }
 }
 
