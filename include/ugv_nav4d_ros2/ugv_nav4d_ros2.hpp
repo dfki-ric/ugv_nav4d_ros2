@@ -45,6 +45,7 @@ public:
     using SaveMLSMap = ugv_nav4d_ros2::action::SaveMLSMap;
 
 private:
+    void setupSubscriptions();
     bool read_pose_from_tf();
     void map_publish_callback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                     std::shared_ptr<std_srvs::srv::Trigger::Response> response);
