@@ -174,46 +174,50 @@ void PathPlannerNode::map_publish_callback(const std::shared_ptr<std_srvs::srv::
                     std::shared_ptr<std_srvs::srv::Trigger::Response> response)
 {
     RCLCPP_INFO(this->get_logger(), "Received service request to publish map.");
+
+    if (latest_pointcloud){
+        // Compute map from latest point cloud first
+        gotMap = generateMLS();
+
+        if (gotMap){
+            if (!inPlanningPhase){
+                RCLCPP_INFO(this->get_logger(), "Planner state: Got Map");
+                planner->updateMap(mlsMap);
+                if (!initialPatchAdded){
+                    Eigen::Affine3d body2MLS;
+                    body2MLS.translation() << start_pose.pose.position.x, start_pose.pose.position.y, start_pose.pose.position.z;
+                    Eigen::Quaterniond quat(start_pose.pose.orientation.w, 
+                                            start_pose.pose.orientation.x, 
+                                            start_pose.pose.orientation.y, 
+                                            start_pose.pose.orientation.z);
+                    body2MLS.linear() = quat.toRotationMatrix(); 
+
+                    Eigen::Affine3d ground2Body(Eigen::Affine3d::Identity());
+                    ground2Body.translation() = Eigen::Vector3d(0, 0, -get_parameter("distToGround").as_double());
+
+                    Eigen::Affine3d ground2Mls(body2MLS * ground2Body);
+
+                    planner->setInitialPatch(ground2Mls, get_parameter("initialPatchRadius").as_double());
+                    initialPatchAdded = true;
+                    RCLCPP_INFO(this->get_logger(), "Initial patch added.");
+                }
+                RCLCPP_INFO(this->get_logger(), "Planner state: Ready");
+            }
+            else{
+                RCLCPP_INFO(this->get_logger(), "Map not loaded because planner is in state: Planning");
+            }
+        }
+    }
+
     publishMLSMap();
     response->success = true;
     response->message = "Published MLS map.";
     RCLCPP_INFO(this->get_logger(), "Published MLS map.");
-
 }
 
 void PathPlannerNode::cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
 {
     latest_pointcloud = msg;
-    gotMap = generateMLS();
-
-    if (gotMap){
-        if (!inPlanningPhase){
-            RCLCPP_INFO(this->get_logger(), "Planner state: Got Map");
-            planner->updateMap(mlsMap);
-            if (!initialPatchAdded){
-                Eigen::Affine3d body2MLS;
-                body2MLS.translation() << start_pose.pose.position.x, start_pose.pose.position.y, start_pose.pose.position.z;
-                Eigen::Quaterniond quat(start_pose.pose.orientation.w, 
-                                        start_pose.pose.orientation.x, 
-                                        start_pose.pose.orientation.y, 
-                                        start_pose.pose.orientation.z);
-                body2MLS.linear() = quat.toRotationMatrix(); 
-
-                Eigen::Affine3d ground2Body(Eigen::Affine3d::Identity());
-                ground2Body.translation() = Eigen::Vector3d(0, 0, -get_parameter("distToGround").as_double());
-
-                Eigen::Affine3d ground2Mls(body2MLS * ground2Body);
-
-                planner->setInitialPatch(ground2Mls, get_parameter("initialPatchRadius").as_double());
-                initialPatchAdded = true;
-                RCLCPP_INFO(this->get_logger(), "Initial patch added.");
-            }
-            RCLCPP_INFO(this->get_logger(), "Planner state: Ready");
-        }
-        else{
-            RCLCPP_INFO(this->get_logger(), "Map not loaded because planner is in state: Planning");
-        }
-    }
 }
 
 bool PathPlannerNode::read_pose_from_tf(){
