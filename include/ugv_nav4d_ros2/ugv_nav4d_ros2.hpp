@@ -20,7 +20,6 @@
 #include "ugv_nav4d_ros2/action/save_mls_map.hpp"
 #include "ugv_nav4d_ros2/msg/labeled_path_array.hpp"
 
-
 #include "ugv_nav4d_ros2/msg/trav_map.hpp"
 #include "ugv_nav4d_ros2/msg/trav_patch.hpp"
 
@@ -33,6 +32,7 @@
 #include <pcl/filters/crop_box.h>
 
 #include <ugv_nav4d/Planner.hpp>
+#include <traversability_generator3d/TraversabilityGenerator3d.hpp>
 #include <maps/grid/MLSMap.hpp>
 
 
@@ -106,6 +106,8 @@ private:
     ugv_nav4d::PlannerConfig plannerConfig;
 
     std::unique_ptr<ugv_nav4d::Planner> planner;
+    std::shared_ptr<traversability_generator3d::TraversabilityGenerator3d> travGenerator;
+    std::shared_ptr<traversability_generator3d::TraversabilityGenerator3d::MLGrid> mMLSMap;
     base::samples::RigidBodyState start_pose_rbs;
     base::samples::RigidBodyState goal_pose_rbs;
 

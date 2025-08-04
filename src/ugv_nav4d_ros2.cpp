@@ -23,7 +23,6 @@ PathPlannerNode::PathPlannerNode()
     , isConfigured(false)
 {
     declareParameters();
-    configurePlanner();
 
     Eigen::Vector4f min_point;
     Eigen::Vector4f max_point;
@@ -185,29 +184,36 @@ void PathPlannerNode::cloud_callback(const sensor_msgs::msg::PointCloud2::Shared
 {
     latest_pointcloud = msg;
     gotMap = generateMLS();
+    mMLSMap = std::make_shared<traversability_generator3d::TraversabilityGenerator3d::MLGrid>(mlsMap);
+    travGenerator->setMLSGrid(mMLSMap);
 
     if (gotMap){
         if (!inPlanningPhase){
             RCLCPP_INFO(this->get_logger(), "Planner state: Got Map");
-            planner->updateMap(mlsMap);
+
+            Eigen::Affine3d body2MLS;
+            body2MLS.translation() << start_pose.pose.position.x, start_pose.pose.position.y, start_pose.pose.position.z;
+            Eigen::Quaterniond quat(start_pose.pose.orientation.w, 
+                                    start_pose.pose.orientation.x, 
+                                    start_pose.pose.orientation.y, 
+                                    start_pose.pose.orientation.z);
+            body2MLS.linear() = quat.toRotationMatrix(); 
+
+            Eigen::Affine3d ground2Body(Eigen::Affine3d::Identity());
+            ground2Body.translation() = Eigen::Vector3d(0, 0, -get_parameter("distToGround").as_double());
+
+            Eigen::Affine3d ground2Mls(body2MLS * ground2Body);
+
             if (!initialPatchAdded){
-                Eigen::Affine3d body2MLS;
-                body2MLS.translation() << start_pose.pose.position.x, start_pose.pose.position.y, start_pose.pose.position.z;
-                Eigen::Quaterniond quat(start_pose.pose.orientation.w, 
-                                        start_pose.pose.orientation.x, 
-                                        start_pose.pose.orientation.y, 
-                                        start_pose.pose.orientation.z);
-                body2MLS.linear() = quat.toRotationMatrix(); 
-
-                Eigen::Affine3d ground2Body(Eigen::Affine3d::Identity());
-                ground2Body.translation() = Eigen::Vector3d(0, 0, -get_parameter("distToGround").as_double());
-
-                Eigen::Affine3d ground2Mls(body2MLS * ground2Body);
-
-                planner->setInitialPatch(ground2Mls, get_parameter("initialPatchRadius").as_double());
+                travGenerator->setInitialPatch(ground2Mls, get_parameter("initialPatchRadius").as_double());
                 initialPatchAdded = true;
                 RCLCPP_INFO(this->get_logger(), "Initial patch added.");
             }
+
+            auto startPosition = ground2Mls.translation();
+            travGenerator->expandAll(startPosition);
+            auto travMap = travGenerator->getTraversabilityMap();
+            planner->updateMap(travMap);
             RCLCPP_INFO(this->get_logger(), "Planner state: Ready");
         }
         else{
@@ -235,11 +241,6 @@ bool PathPlannerNode::read_pose_from_tf(){
 
 void PathPlannerNode::process_goal_request(const geometry_msgs::msg::PoseStamped::SharedPtr msg){
 
-    if (!isConfigured){
-        configurePlanner();
-        isConfigured = true;
-    }
-
     if (!get_parameter("read_pose_from_topic").as_bool())
     {
         if (!read_pose_from_tf()){
@@ -247,6 +248,11 @@ void PathPlannerNode::process_goal_request(const geometry_msgs::msg::PoseStamped
             return;
         }
 
+    }
+
+    if (!isConfigured){
+        configurePlanner();
+        isConfigured = true;
     }
 
     start_pose_rbs.position = Eigen::Vector3d(start_pose.pose.position.x,
@@ -455,6 +461,7 @@ void PathPlannerNode::plan(){
     RCLCPP_INFO_STREAM(this->get_logger(), "Planner state: Planning");
     inPlanningPhase = true;
     RCLCPP_INFO_STREAM(this->get_logger(), "Start is  " << start_pose_rbs.position.transpose());
+    RCLCPP_INFO_STREAM(this->get_logger(), "Goal is  " << goal_pose_rbs.position.transpose());
     ugv_nav4d::Planner::PLANNING_RESULT res = planner->plan(time, start_pose_rbs, goal_pose_rbs, trajectory2D, trajectory3D, dumpOnError, dumpOnSuccess);
     inPlanningPhase = false;
     publishTravMap();
@@ -761,38 +768,44 @@ void PathPlannerNode::configurePlanner(){
         updateParameters();
 
         planner.reset(new ugv_nav4d::Planner(splinePrimitiveConfig, traversabilityConfig, mobility, plannerConfig));
+        travGenerator.reset(new traversability_generator3d::TraversabilityGenerator3d(traversabilityConfig));
+
         RCLCPP_INFO_STREAM(this->get_logger(), "Planner state: Reset");
       
         if (gotMap){
             RCLCPP_INFO_STREAM(this->get_logger(), "Loading map.");
-            planner->updateMap(mlsMap);
-            RCLCPP_INFO_STREAM(this->get_logger(), "Loaded map.");  
+            mMLSMap = std::make_shared<traversability_generator3d::TraversabilityGenerator3d::MLGrid>(mlsMap);
+            travGenerator->setMLSGrid(mMLSMap);
 
-            if (!get_parameter("read_pose_from_topic").as_bool())
-            {
-                if (!read_pose_from_tf()){
-                    RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to read start pose of the robot from TF!");
-                    return;
-                }
+            Eigen::Affine3d body2MLS;
+            body2MLS.translation() << start_pose.pose.position.x, start_pose.pose.position.y, start_pose.pose.position.z;
+            Eigen::Quaterniond quat(start_pose.pose.orientation.w, 
+                                    start_pose.pose.orientation.x, 
+                                    start_pose.pose.orientation.y, 
+                                    start_pose.pose.orientation.z);
+            body2MLS.linear() = quat.toRotationMatrix(); 
 
+            Eigen::Affine3d ground2Body(Eigen::Affine3d::Identity());
+            ground2Body.translation() = Eigen::Vector3d(0, 0, -get_parameter("distToGround").as_double());
+
+            Eigen::Affine3d ground2Mls(body2MLS * ground2Body);
+
+            if (!initialPatchAdded){
+                travGenerator->setInitialPatch(ground2Mls, get_parameter("initialPatchRadius").as_double());
+                initialPatchAdded = true;
+                RCLCPP_INFO(this->get_logger(), "Initial patch added.");
             }
 
-            start_pose_rbs.position = Eigen::Vector3d(start_pose.pose.position.x,
-                                                    start_pose.pose.position.y,
-                                                    start_pose.pose.position.z);
+            auto startPosition = ground2Mls.translation();
+            travGenerator->expandAll(startPosition);
 
-            start_pose_rbs.orientation = Eigen::Quaterniond(start_pose.pose.orientation.w,
-                                                            start_pose.pose.orientation.x,
-                                                            start_pose.pose.orientation.y,
-                                                            start_pose.pose.orientation.z);
+            auto travMap = travGenerator->getTraversabilityMap();
+            planner->updateMap(travMap);
 
-            planner->setInitialPatch(start_pose_rbs.getTransform(), get_parameter("initialPatchRadius").as_double());
-            initialPatchAdded = true;
-            std::cout << "Initial patch added at position: " << start_pose_rbs.position.transpose() << std::endl;
-
-            RCLCPP_INFO(this->get_logger(), "Initial patch added.");
             RCLCPP_INFO(this->get_logger(), "Planner state: Ready");
-        }
+            isConfigured = true;
+            return;
+        }   
         else{
             RCLCPP_INFO(this->get_logger(), "No map found. Planner state: No Map");
         }
@@ -800,6 +813,7 @@ void PathPlannerNode::configurePlanner(){
     else{
         RCLCPP_INFO_STREAM(this->get_logger(), "Unable to configure planner due to planner is in state: Planning");
     }
+    isConfigured = false;
 }
 
 bool PathPlannerNode::publishMLSMap(){
@@ -875,6 +889,7 @@ bool PathPlannerNode::publishMLSMap(){
     }
 
     if (map_msg.patches.size() == 0){
+        RCLCPP_WARN(this->get_logger(), "Empty MLS Map!");
         return false;
     }
 
@@ -883,7 +898,7 @@ bool PathPlannerNode::publishMLSMap(){
 }
 
 void PathPlannerNode::publishTravMap(){
-    const auto& trav_map_3d = planner->getTraversabilityMap(); 
+    const auto& trav_map_3d = travGenerator->getTraversabilityMap(); 
     ugv_nav4d_ros2::msg::TravMap msg;
     msg.width = 1;
     msg.height = 1;
