@@ -184,12 +184,27 @@ void PathPlannerNode::cloud_callback(const sensor_msgs::msg::PointCloud2::Shared
 {
     latest_pointcloud = msg;
     gotMap = generateMLS();
-    mMLSMap = std::make_shared<traversability_generator3d::TraversabilityGenerator3d::MLGrid>(mlsMap);
-    travGenerator->setMLSGrid(mMLSMap);
 
     if (gotMap){
         if (!inPlanningPhase){
+
+            if (!get_parameter("read_pose_from_topic").as_bool())
+            {
+                if (!read_pose_from_tf()){
+                    RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to read start pose of the robot from TF!");
+                    return;
+                }
+            }
+
+            if (!isConfigured){
+                configurePlanner();
+                isConfigured = true;
+            }
+
             RCLCPP_INFO(this->get_logger(), "Planner state: Got Map");
+
+            mMLSMap = std::make_shared<traversability_generator3d::TraversabilityGenerator3d::MLGrid>(mlsMap);
+            travGenerator->setMLSGrid(mMLSMap);
 
             Eigen::Affine3d body2MLS;
             body2MLS.translation() << start_pose.pose.position.x, start_pose.pose.position.y, start_pose.pose.position.z;
@@ -247,7 +262,6 @@ void PathPlannerNode::process_goal_request(const geometry_msgs::msg::PoseStamped
             RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to read start pose of the robot from TF!");
             return;
         }
-
     }
 
     if (!isConfigured){
@@ -925,39 +939,54 @@ void PathPlannerNode::publishTravMap(){
             patch_msg.position.y = position.y();
             patch_msg.position.z = position.z();
 
-            switch((n->getType())){
-                case maps::grid::TraversabilityNodeBase::TRAVERSABLE:
+            switch(n->getUserData().nodeType){
+                case traversability_generator3d::NodeType::TRAVERSABLE:
                     patch_msg.color.r = 0;
                     patch_msg.color.g = 1;
                     patch_msg.color.b = 0;
                     patch_msg.color.a = 1;
                     break;                    
-                case maps::grid::TraversabilityNodeBase::OBSTACLE:
+                case traversability_generator3d::NodeType::OBSTACLE:
                     patch_msg.color.r = 1;
                     patch_msg.color.g = 0;
                     patch_msg.color.b = 0;
                     patch_msg.color.a = 1;
                     break;    
-                case maps::grid::TraversabilityNodeBase::FRONTIER:
+                case traversability_generator3d::NodeType::FRONTIER:
                     patch_msg.color.r = 0;
                     patch_msg.color.g = 0;
                     patch_msg.color.b = 1;
                     patch_msg.color.a = 1;
                     break;   
-                case maps::grid::TraversabilityNodeBase::UNSET:
+                case traversability_generator3d::NodeType::UNSET:
                     patch_msg.color.r = 1;
                     patch_msg.color.g = 1;
                     patch_msg.color.b = 0;
                     patch_msg.color.a = 1;
                     break;   
-                case maps::grid::TraversabilityNodeBase::UNKNOWN:
+                case traversability_generator3d::NodeType::UNKNOWN:
                     patch_msg.color.r = 0.5;
                     patch_msg.color.g = 0;
                     patch_msg.color.b = 0.5;
                     patch_msg.color.a = 1;
-                    break;   
+                    break;
+
+                case traversability_generator3d::NodeType::INFLATED_OBSTACLE:
+                    patch_msg.color.r = 1.0;
+                    patch_msg.color.g = 0.5;
+                    patch_msg.color.b = 0.0;
+                    patch_msg.color.a = 1;
+                    break;
+
+                case traversability_generator3d::NodeType::INFLATED_FRONTIER:
+                    patch_msg.color.r = 0.5;
+                    patch_msg.color.g = 0.8;
+                    patch_msg.color.b = 1.0;
+                    patch_msg.color.a = 1;
+                    break;
             }
             msg.patches.push_back(patch_msg);
+
         }
     }
     trav_map_publisher->publish(msg);
