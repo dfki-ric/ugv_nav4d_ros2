@@ -127,6 +127,13 @@ install(FILES plugins_description.xml
         DESTINATION share/${PROJECT_NAME}
 )
 
+
+install(PROGRAMS
+  scripts/visualize_path.py
+  scripts/follow_path_client.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 install(DIRECTORY config launch
   DESTINATION share/${PROJECT_NAME}
 )
