@@ -42,30 +42,7 @@ class CombinedPathArrowPublisher(Node):
         delete_marker.action = Marker.DELETEALL
         delete_marker.header.frame_id = frame
         marker_array.markers.append(delete_marker)
-
-        # --- 2. Add static legend ---
-        legend_x = -10.0  # Adjust as needed for your frame!
-        legend_y = 10.0
-        y_gap = 0.8
-        for idx, (label, color) in enumerate(LABEL_COLORS.items()):
-            legend_marker = Marker()
-            legend_marker.header.frame_id = frame
-            legend_marker.header.stamp = self.get_clock().now().to_msg()
-            legend_marker.ns = "legend"
-            legend_marker.id = idx
-            legend_marker.type = Marker.TEXT_VIEW_FACING
-            legend_marker.action = Marker.ADD
-            legend_marker.pose.position.x = legend_x
-            legend_marker.pose.position.y = legend_y - idx * y_gap
-            legend_marker.pose.position.z = 0.0
-            legend_marker.pose.orientation.w = 1.0
-            legend_marker.scale.z = 0.8
-            legend_marker.color.r, legend_marker.color.g, legend_marker.color.b, legend_marker.color.a = color
-            legend_marker.text = label
-            legend_marker.lifetime.sec = 0
-            legend_marker.lifetime.nanosec = 0
-            marker_array.markers.append(legend_marker)
-
+        
         print("Received labels:", list(msg.labels))
 
         for seg_idx, (path, label) in enumerate(zip(msg.paths, msg.labels)):
