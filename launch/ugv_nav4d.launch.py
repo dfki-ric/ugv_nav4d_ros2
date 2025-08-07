@@ -17,9 +17,19 @@ def generate_launch_description():
     declared_arguments = []
 
     declared_arguments.append(
-        SetParameter(name='use_sim_time', value=True)
+	DeclareLaunchArgument(
+            'use_sim_time',
+            default_value='true',
+        )
     )
 
+    declared_arguments.append(
+        SetParameter(
+            name="use_sim_time",
+            value=LaunchConfiguration("use_sim_time"),
+        )
+    )
+    
     declared_arguments.append(
 	DeclareLaunchArgument(
             'main_param_file',
