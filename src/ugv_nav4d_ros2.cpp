@@ -17,10 +17,10 @@ namespace ugv_nav4d_ros2 {
 
 PathPlannerNode::PathPlannerNode()
     : Node("ugv_nav4d_ros2")
-    , initialPatchAdded(false)
-    , inPlanningPhase(false)
-    , gotMap(false)
-    , isConfigured(false)
+    , initial_patch_added(false)
+    , is_planning(false)
+    , got_map(false)
+    , is_configured(false)
 {
     declareParameters();
 
@@ -41,8 +41,8 @@ PathPlannerNode::PathPlannerNode()
     mls_min_x = get_parameter("dist_min_x").as_int();
     mls_min_y = get_parameter("dist_min_y").as_int();
 
-    extend_trajectory_ = get_parameter("extend_trajectory").as_bool();    
-    extension_distance_ = get_parameter("extension_distance").as_double();   
+    extend_trajectory = get_parameter("extend_trajectory").as_bool();    
+    extension_distance = get_parameter("extension_distance").as_double();   
 
     if (get_parameter("load_mls_from_file").as_bool()){
         const std::string mls_file_path = get_parameter("mls_file_path").as_string();
@@ -50,12 +50,12 @@ PathPlannerNode::PathPlannerNode()
 
         if (mls_file_type == "ply"){        
             if (loadPlyAsMLS(mls_file_path)){
-                gotMap = true;
+                got_map = true;
             }
         }
         else if (mls_file_type == "bin"){  
             if(loadMLSMapFromBin(mls_file_path)){
-                gotMap = true;
+                got_map = true;
             }
         }
         else{
@@ -74,8 +74,8 @@ PathPlannerNode::PathPlannerNode()
         maps::grid::MLSConfig cfg;
         cfg.gapSize = get_parameter("mls_gap_size").as_double();
         const maps::grid::Vector2ui numCells(grid_size_x, grid_size_y);
-        mlsMap = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
-        mlsMap.translate(Eigen::Vector3d(mls_min_x, mls_min_y, 0));
+        mls_map = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
+        mls_map.translate(Eigen::Vector3d(mls_min_x, mls_min_y, 0));
     }
 
     labeled_path_publisher = this->create_publisher<ugv_nav4d_ros2::msg::LabeledPathArray>("/ugv_nav4d_ros2/labeled_path_segments", 10);
@@ -102,13 +102,13 @@ void PathPlannerNode::setupSubscriptions()
 
     // Map publisher trigger service
     map_publish_service = this->create_service<std_srvs::srv::Trigger>(
-            "/ugv_nav4d_ros2/map_publish", std::bind(&PathPlannerNode::map_publish_callback, this, std::placeholders::_1, std::placeholders::_2));
+            "/ugv_nav4d_ros2/map_publish", std::bind(&PathPlannerNode::mapPublishCallback, this, std::placeholders::_1, std::placeholders::_2));
 
     sub_goal_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/goal_pose", 1, 
-            bind(&PathPlannerNode::process_goal_request, this, std::placeholders::_1));
+            bind(&PathPlannerNode::processGoalRequest, this, std::placeholders::_1));
 
     sub_start_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/start_pose", 1, 
-            bind(&PathPlannerNode::read_start_pose, this, std::placeholders::_1));
+            bind(&PathPlannerNode::readStartPose, this, std::placeholders::_1));
 
     parameter_callback_handle = this->add_on_set_parameters_callback(
         std::bind(&PathPlannerNode::parametersCallback, this, std::placeholders::_1));
@@ -121,7 +121,7 @@ void PathPlannerNode::setupSubscriptions()
     if (!get_parameter("load_mls_from_file").as_bool()){
         cloud_subscription = this->create_subscription<sensor_msgs::msg::PointCloud2>(
                 "/ugv_nav4d_ros2/pointcloud", 10,
-                std::bind(&PathPlannerNode::cloud_callback, this, std::placeholders::_1));
+                std::bind(&PathPlannerNode::cloudCallback, this, std::placeholders::_1));
     }
 }
 
@@ -169,7 +169,7 @@ rcl_interfaces::msg::SetParametersResult PathPlannerNode::parametersCallback(con
 }
 
 
-void PathPlannerNode::map_publish_callback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+void PathPlannerNode::mapPublishCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                     std::shared_ptr<std_srvs::srv::Trigger::Response> response)
 {
     RCLCPP_INFO(this->get_logger(), "Received service request to publish map.");
@@ -180,13 +180,13 @@ void PathPlannerNode::map_publish_callback(const std::shared_ptr<std_srvs::srv::
 
 }
 
-void PathPlannerNode::cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
+void PathPlannerNode::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
 {
     latest_pointcloud = msg;
-    gotMap = generateMLS();
+    got_map = generateMLS();
 
-    if (gotMap){
-        if (!inPlanningPhase){
+    if (got_map){
+        if (!is_planning){
 
             if (!get_parameter("read_pose_from_topic").as_bool())
             {
@@ -196,15 +196,15 @@ void PathPlannerNode::cloud_callback(const sensor_msgs::msg::PointCloud2::Shared
                 }
             }
 
-            if (!isConfigured){
+            if (!is_configured){
                 configurePlanner();
-                isConfigured = true;
+                is_configured = true;
             }
 
             RCLCPP_INFO(this->get_logger(), "Planner state: Got Map");
 
-            mMLSMap = std::make_shared<traversability_generator3d::TraversabilityGenerator3d::MLGrid>(mlsMap);
-            travGenerator->setMLSGrid(mMLSMap);
+            mls_map_ptr = std::make_shared<traversability_generator3d::TraversabilityGenerator3d::MLGrid>(mls_map);
+            traversability_generator_ptr->setMLSGrid(mls_map_ptr);
 
             Eigen::Affine3d body2MLS;
             body2MLS.translation() << start_pose.pose.position.x, start_pose.pose.position.y, start_pose.pose.position.z;
@@ -219,15 +219,15 @@ void PathPlannerNode::cloud_callback(const sensor_msgs::msg::PointCloud2::Shared
 
             Eigen::Affine3d ground2Mls(body2MLS * ground2Body);
 
-            if (!initialPatchAdded){
-                travGenerator->setInitialPatch(ground2Mls, get_parameter("initialPatchRadius").as_double());
-                initialPatchAdded = true;
+            if (!initial_patch_added){
+                traversability_generator_ptr->setInitialPatch(ground2Mls, get_parameter("initialPatchRadius").as_double());
+                initial_patch_added = true;
                 RCLCPP_INFO(this->get_logger(), "Initial patch added.");
             }
 
             auto startPosition = ground2Mls.translation();
-            travGenerator->expandAll(startPosition);
-            auto travMap = travGenerator->getTraversabilityMap();
+            traversability_generator_ptr->expandAll(startPosition);
+            auto travMap = traversability_generator_ptr->getTraversabilityMap();
             planner->updateMap(travMap);
             RCLCPP_INFO(this->get_logger(), "Planner state: Ready");
         }
@@ -254,7 +254,7 @@ bool PathPlannerNode::read_pose_from_tf(){
     return true;    
 }
 
-void PathPlannerNode::process_goal_request(const geometry_msgs::msg::PoseStamped::SharedPtr msg){
+void PathPlannerNode::processGoalRequest(const geometry_msgs::msg::PoseStamped::SharedPtr msg){
 
     if (!get_parameter("read_pose_from_topic").as_bool())
     {
@@ -264,9 +264,9 @@ void PathPlannerNode::process_goal_request(const geometry_msgs::msg::PoseStamped
         }
     }
 
-    if (!isConfigured){
+    if (!is_configured){
         configurePlanner();
-        isConfigured = true;
+        is_configured = true;
     }
 
     start_pose_rbs.position = Eigen::Vector3d(start_pose.pose.position.x,
@@ -286,12 +286,12 @@ void PathPlannerNode::process_goal_request(const geometry_msgs::msg::PoseStamped
                                                    msg->pose.orientation.x,
                                                    msg->pose.orientation.y,
                                                    msg->pose.orientation.z);
-    if (!inPlanningPhase && gotMap){
+    if (!is_planning && got_map){
         plan();
     }
 }
 
-void PathPlannerNode::read_start_pose(const geometry_msgs::msg::PoseStamped::SharedPtr msg){
+void PathPlannerNode::readStartPose(const geometry_msgs::msg::PoseStamped::SharedPtr msg){
 
     start_pose.pose.position.x = msg->pose.position.x;
     start_pose.pose.position.y = msg->pose.position.y;
@@ -331,9 +331,9 @@ bool PathPlannerNode::loadPlyAsMLS(const std::string& path){
             maps::grid::MLSConfig cfg;
             cfg.gapSize = get_parameter("mls_gap_size").as_double();
             const maps::grid::Vector2ui numCells(size_x / mls_res + 1, size_y / mls_res + 1);
-            mlsMap = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
-            mlsMap.translate(Eigen::Vector3d(min.x, min.y, 0));
-            mlsMap.mergePointCloud(*cloud_filtered, base::Transform3d::Identity());
+            mls_map = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
+            mls_map.translate(Eigen::Vector3d(min.x, min.y, 0));
+            mls_map.mergePointCloud(*cloud_filtered, base::Transform3d::Identity());
         }
         return true;
     }
@@ -376,7 +376,7 @@ bool PathPlannerNode::generateMLS(){
     box_filter.setInputCloud(cloud);
     box_filter.filter(*cloud_filtered);
 
-    mlsMap.mergePointCloud(*cloud_filtered, cloud2MLS);
+    mls_map.mergePointCloud(*cloud_filtered, cloud2MLS);
     return true;
 }
 
@@ -400,7 +400,7 @@ bool PathPlannerNode::saveMLSMapAsBin(const std::string& filename = "") {
 
     // Create a binary archive
     boost::archive::binary_oarchive archive(binFile);
-    archive << mlsMap;
+    archive << mls_map;
 
     RCLCPP_INFO_STREAM(this->get_logger(), "MLS Map saved to " << fileToUse);
     return true;
@@ -422,7 +422,7 @@ bool PathPlannerNode::loadMLSMapFromBin(const std::string& filename){
     try {
         // Load the file contents into the stream and deserialize
         boost::archive::binary_iarchive ia(file);
-        ia >> mlsMap;  // Deserialize into mlsMap
+        ia >> mls_map;  // Deserialize into mls_map
 
         RCLCPP_INFO_STREAM(this->get_logger(), "Loaded MLS Map from " << filename);
         return true;
@@ -473,11 +473,11 @@ void PathPlannerNode::plan(){
     bool dumpOnSuccess = get_parameter("dumpOnSuccess").as_bool();
 
     RCLCPP_INFO_STREAM(this->get_logger(), "Planner state: Planning");
-    inPlanningPhase = true;
+    is_planning = true;
     RCLCPP_INFO_STREAM(this->get_logger(), "Start is  " << start_pose_rbs.position.transpose());
     RCLCPP_INFO_STREAM(this->get_logger(), "Goal is  " << goal_pose_rbs.position.transpose());
     ugv_nav4d::Planner::PLANNING_RESULT res = planner->plan(time, start_pose_rbs, goal_pose_rbs, trajectory2D, trajectory3D, dumpOnError, dumpOnSuccess);
-    inPlanningPhase = false;
+    is_planning = false;
     publishTravMap();
 
     switch(res)
@@ -580,7 +580,7 @@ void PathPlannerNode::plan(){
             }
 
             // Extension logic
-            if (extend_trajectory_ && trajectory.driveMode != trajectory_follower::DriveMode::ModeTurnOnTheSpot) {
+            if (extend_trajectory && trajectory.driveMode != trajectory_follower::DriveMode::ModeTurnOnTheSpot) {
                 bool add_extension_point = false;
                 if (seg_idx + 1 < trajectory3D.size()) {
                     const auto& next_traj = trajectory3D[seg_idx + 1];
@@ -603,8 +603,8 @@ void PathPlannerNode::plan(){
 
                     Eigen::Vector3d direction = end_tangent.normalized();
 
-                    base::Vector3d ext_point_half = end_point + direction * (extension_distance_ * 0.5);
-                    base::Vector3d ext_point_full = end_point + direction * extension_distance_;
+                    base::Vector3d ext_point_half = end_point + direction * (extension_distance * 0.5);
+                    base::Vector3d ext_point_full = end_point + direction * extension_distance;
 
                     geometry_msgs::msg::PoseStamped ext_pose_half;
                     ext_pose_half.header.stamp = now;
@@ -732,64 +732,64 @@ void PathPlannerNode::declareParameters(){
 
 void PathPlannerNode::updateParameters(){
 
-    splinePrimitiveConfig.gridSize                 = get_parameter("grid_resolution").as_double();
-    splinePrimitiveConfig.numAngles                = get_parameter("numAngles").as_int();
-    splinePrimitiveConfig.numEndAngles             = get_parameter("numEndAngles").as_int();
-    splinePrimitiveConfig.destinationCircleRadius  = get_parameter("destinationCircleRadius").as_int();
-    splinePrimitiveConfig.cellSkipFactor           = get_parameter("cellSkipFactor").as_double();
-    splinePrimitiveConfig.generateForwardMotions   = get_parameter("generateForwardMotions").as_bool();
-    splinePrimitiveConfig.generatePointTurnMotions = get_parameter("generatePointTurnMotions").as_bool();
-    splinePrimitiveConfig.generateLateralMotions   = get_parameter("generateLateralMotions").as_bool();
-    splinePrimitiveConfig.generateBackwardMotions  = get_parameter("generateBackwardMotions").as_bool();
-    splinePrimitiveConfig.splineOrder              = get_parameter("splineOrder").as_int();
+    spline_primitive_config.gridSize                 = get_parameter("grid_resolution").as_double();
+    spline_primitive_config.numAngles                = get_parameter("numAngles").as_int();
+    spline_primitive_config.numEndAngles             = get_parameter("numEndAngles").as_int();
+    spline_primitive_config.destinationCircleRadius  = get_parameter("destinationCircleRadius").as_int();
+    spline_primitive_config.cellSkipFactor           = get_parameter("cellSkipFactor").as_double();
+    spline_primitive_config.generateForwardMotions   = get_parameter("generateForwardMotions").as_bool();
+    spline_primitive_config.generatePointTurnMotions = get_parameter("generatePointTurnMotions").as_bool();
+    spline_primitive_config.generateLateralMotions   = get_parameter("generateLateralMotions").as_bool();
+    spline_primitive_config.generateBackwardMotions  = get_parameter("generateBackwardMotions").as_bool();
+    spline_primitive_config.splineOrder              = get_parameter("splineOrder").as_int();
     
-    mobility.translationSpeed                      = get_parameter("translationSpeed").as_double();
-    mobility.rotationSpeed                         = get_parameter("rotationSpeed").as_double();
-    mobility.minTurningRadius                      = get_parameter("minTurningRadius").as_double();
-    mobility.searchRadius                          = get_parameter("searchRadius").as_double();
-    mobility.multiplierForward                     = get_parameter("multiplierForward").as_double();
-    mobility.multiplierBackward                    = get_parameter("multiplierBackward").as_double();
-    mobility.multiplierLateral                     = get_parameter("multiplierLateral").as_double();
-    mobility.multiplierBackwardTurn                = get_parameter("multiplierBackwardTurn").as_double();
-    mobility.multiplierForwardTurn                 = get_parameter("multiplierForwardTurn").as_double();
-    mobility.multiplierPointTurn                   = get_parameter("multiplierPointTurn").as_double();
-    mobility.spline_sampling_resolution            = get_parameter("spline_sampling_resolution").as_double();
-    mobility.remove_goal_offset                    = get_parameter("remove_goal_offset").as_bool();
+    mobility_config.translationSpeed                      = get_parameter("translationSpeed").as_double();
+    mobility_config.rotationSpeed                         = get_parameter("rotationSpeed").as_double();
+    mobility_config.minTurningRadius                      = get_parameter("minTurningRadius").as_double();
+    mobility_config.searchRadius                          = get_parameter("searchRadius").as_double();
+    mobility_config.multiplierForward                     = get_parameter("multiplierForward").as_double();
+    mobility_config.multiplierBackward                    = get_parameter("multiplierBackward").as_double();
+    mobility_config.multiplierLateral                     = get_parameter("multiplierLateral").as_double();
+    mobility_config.multiplierBackwardTurn                = get_parameter("multiplierBackwardTurn").as_double();
+    mobility_config.multiplierForwardTurn                 = get_parameter("multiplierForwardTurn").as_double();
+    mobility_config.multiplierPointTurn                   = get_parameter("multiplierPointTurn").as_double();
+    mobility_config.spline_sampling_resolution            = get_parameter("spline_sampling_resolution").as_double();
+    mobility_config.remove_goal_offset                    = get_parameter("remove_goal_offset").as_bool();
 
-    traversabilityConfig.gridResolution            = get_parameter("grid_resolution").as_double();
-    traversabilityConfig.maxSlope                  = get_parameter("maxSlope").as_double();
-    traversabilityConfig.maxStepHeight             = get_parameter("maxStepHeight").as_double();
-    traversabilityConfig.robotSizeX                = get_parameter("robotSizeX").as_double();
-    traversabilityConfig.robotSizeY                = get_parameter("robotSizeY").as_double();
-    traversabilityConfig.robotHeight               = get_parameter("robotHeight").as_double();
-    traversabilityConfig.slopeMetricScale          = get_parameter("slopeMetricScale").as_double();
+    traversability_config.gridResolution            = get_parameter("grid_resolution").as_double();
+    traversability_config.maxSlope                  = get_parameter("maxSlope").as_double();
+    traversability_config.maxStepHeight             = get_parameter("maxStepHeight").as_double();
+    traversability_config.robotSizeX                = get_parameter("robotSizeX").as_double();
+    traversability_config.robotSizeY                = get_parameter("robotSizeY").as_double();
+    traversability_config.robotHeight               = get_parameter("robotHeight").as_double();
+    traversability_config.slopeMetricScale          = get_parameter("slopeMetricScale").as_double();
     //TODO: How can an enum be used in the parameter config? (Probably Int to Enum cast works)
-    traversabilityConfig.slopeMetric = traversability_generator3d::SlopeMetric::NONE;
-    traversabilityConfig.inclineLimittingMinSlope  = get_parameter("inclineLimittingMinSlope").as_double(); 
-    traversabilityConfig.inclineLimittingLimit     = get_parameter("inclineLimittingLimit").as_double();
-    traversabilityConfig.costFunctionDist          = get_parameter("costFunctionDist").as_double();
-    traversabilityConfig.distToGround              = get_parameter("distToGround").as_double();
-    traversabilityConfig.minTraversablePercentage  = get_parameter("minTraversablePercentage").as_double();
-    traversabilityConfig.allowForwardDownhill      = get_parameter("allowForwardDownhill").as_bool();
+    traversability_config.slopeMetric = traversability_generator3d::SlopeMetric::NONE;
+    traversability_config.inclineLimittingMinSlope  = get_parameter("inclineLimittingMinSlope").as_double(); 
+    traversability_config.inclineLimittingLimit     = get_parameter("inclineLimittingLimit").as_double();
+    traversability_config.costFunctionDist          = get_parameter("costFunctionDist").as_double();
+    traversability_config.distToGround              = get_parameter("distToGround").as_double();
+    traversability_config.minTraversablePercentage  = get_parameter("minTraversablePercentage").as_double();
+    traversability_config.allowForwardDownhill      = get_parameter("allowForwardDownhill").as_bool();
 
-    plannerConfig.epsilonSteps                     = get_parameter("epsilonSteps").as_int();
-    plannerConfig.initialEpsilon                   = get_parameter("initialEpsilon").as_int();
-    plannerConfig.numThreads                       = get_parameter("numThreads").as_int(); 
+    planner_config.epsilonSteps                     = get_parameter("epsilonSteps").as_int();
+    planner_config.initialEpsilon                   = get_parameter("initialEpsilon").as_int();
+    planner_config.numThreads                       = get_parameter("numThreads").as_int(); 
 }
 
 void PathPlannerNode::configurePlanner(){
-    if (!inPlanningPhase){
+    if (!is_planning){
         updateParameters();
 
-        planner.reset(new ugv_nav4d::Planner(splinePrimitiveConfig, traversabilityConfig, mobility, plannerConfig));
-        travGenerator.reset(new traversability_generator3d::TraversabilityGenerator3d(traversabilityConfig));
+        planner.reset(new ugv_nav4d::Planner(spline_primitive_config, traversability_config, mobility_config, planner_config));
+        traversability_generator_ptr.reset(new traversability_generator3d::TraversabilityGenerator3d(traversability_config));
 
         RCLCPP_INFO_STREAM(this->get_logger(), "Planner state: Reset");
       
-        if (gotMap){
+        if (got_map){
             RCLCPP_INFO_STREAM(this->get_logger(), "Loading map.");
-            mMLSMap = std::make_shared<traversability_generator3d::TraversabilityGenerator3d::MLGrid>(mlsMap);
-            travGenerator->setMLSGrid(mMLSMap);
+            mls_map_ptr = std::make_shared<traversability_generator3d::TraversabilityGenerator3d::MLGrid>(mls_map);
+            traversability_generator_ptr->setMLSGrid(mls_map_ptr);
 
             Eigen::Affine3d body2MLS;
             body2MLS.translation() << start_pose.pose.position.x, start_pose.pose.position.y, start_pose.pose.position.z;
@@ -804,20 +804,20 @@ void PathPlannerNode::configurePlanner(){
 
             Eigen::Affine3d ground2Mls(body2MLS * ground2Body);
 
-            if (!initialPatchAdded){
-                travGenerator->setInitialPatch(ground2Mls, get_parameter("initialPatchRadius").as_double());
-                initialPatchAdded = true;
+            if (!initial_patch_added){
+                traversability_generator_ptr->setInitialPatch(ground2Mls, get_parameter("initialPatchRadius").as_double());
+                initial_patch_added = true;
                 RCLCPP_INFO(this->get_logger(), "Initial patch added.");
             }
 
             auto startPosition = ground2Mls.translation();
-            travGenerator->expandAll(startPosition);
+            traversability_generator_ptr->expandAll(startPosition);
 
-            auto travMap = travGenerator->getTraversabilityMap();
+            auto travMap = traversability_generator_ptr->getTraversabilityMap();
             planner->updateMap(travMap);
 
             RCLCPP_INFO(this->get_logger(), "Planner state: Ready");
-            isConfigured = true;
+            is_configured = true;
             return;
         }   
         else{
@@ -827,7 +827,7 @@ void PathPlannerNode::configurePlanner(){
     else{
         RCLCPP_INFO_STREAM(this->get_logger(), "Unable to configure planner due to planner is in state: Planning");
     }
-    isConfigured = false;
+    is_configured = false;
 }
 
 bool PathPlannerNode::publishMLSMap(){
@@ -839,14 +839,14 @@ bool PathPlannerNode::publishMLSMap(){
     map_msg.header.frame_id = get_parameter("world_frame").as_string();
 
     int minMeasurements = 3;
-    maps::grid::Vector2ui num_cell = mlsMap.getNumCells();
+    maps::grid::Vector2ui num_cell = mls_map.getNumCells();
     typedef maps::grid::MLSMap<maps::grid::MLSConfig::SLOPE>::CellType Cell;
 
     for (size_t x = 0; x < num_cell.x(); x++)
     {
         for (size_t y = 0; y < num_cell.y(); y++)
         {
-            const Cell &list = mlsMap.at(x, y);
+            const Cell &list = mls_map.at(x, y);
             for (Cell::const_iterator it = list.begin(); it != list.end(); it++)
             {
                 const maps::grid::SurfacePatch<maps::grid::MLSConfig::SLOPE>& p = *it;  
@@ -867,7 +867,7 @@ bool PathPlannerNode::publishMLSMap(){
                 maps::grid::Vector2d pos(0.00, 0.00);
 
                 // Calculate the position of the cell center.
-                pos = (maps::grid::Index(x, y).cast<double>() + maps::grid::Vector2d(0.5, 0.5)).array() * mlsMap.getResolution().array();
+                pos = (maps::grid::Index(x, y).cast<double>() + maps::grid::Vector2d(0.5, 0.5)).array() * mls_map.getResolution().array();
                 patch_msg.position.x = pos.x() + mls_min_x;
                 patch_msg.position.y = pos.y() + mls_min_y;
                 patch_msg.position.z = p.getCenter().z();
@@ -912,7 +912,7 @@ bool PathPlannerNode::publishMLSMap(){
 }
 
 void PathPlannerNode::publishTravMap(){
-    const auto& trav_map_3d = travGenerator->getTraversabilityMap(); 
+    const auto& trav_map_3d = traversability_generator_ptr->getTraversabilityMap(); 
     ugv_nav4d_ros2::msg::TravMap msg;
     msg.width = 1;
     msg.height = 1;

@@ -10,10 +10,8 @@
 #include <std_srvs/srv/trigger.hpp>
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
-#include <geometry_msgs/msg/point.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <nav_msgs/msg/path.hpp>
-#include <nav_msgs/msg/grid_cells.hpp>
 
 #include "ugv_nav4d_ros2/msg/mls_map.hpp"
 #include "ugv_nav4d_ros2/msg/mls_patch.hpp"
@@ -47,12 +45,12 @@ public:
 private:
     void setupSubscriptions();
     bool read_pose_from_tf();
-    void map_publish_callback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+    void mapPublishCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                     std::shared_ptr<std_srvs::srv::Trigger::Response> response);
-    void cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
+    void cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
 
-    void process_goal_request(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
-    void read_start_pose(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
+    void processGoalRequest(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
+    void readStartPose(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
     bool loadPlyAsMLS(const std::string& path);
     bool generateMLS();
     bool saveMLSMapAsBin(const std::string& filename);
@@ -100,22 +98,22 @@ private:
     std::unique_ptr<tf2_ros::Buffer> tf_buffer;
 
     //planner
-    sbpl_spline_primitives::SplinePrimitivesConfig splinePrimitiveConfig; 
-    ugv_nav4d::Mobility mobility;
-    traversability_generator3d::TraversabilityConfig traversabilityConfig;
-    ugv_nav4d::PlannerConfig plannerConfig;
+    sbpl_spline_primitives::SplinePrimitivesConfig spline_primitive_config; 
+    ugv_nav4d::Mobility mobility_config;
+    traversability_generator3d::TraversabilityConfig traversability_config;
+    ugv_nav4d::PlannerConfig planner_config;
 
     std::unique_ptr<ugv_nav4d::Planner> planner;
-    std::shared_ptr<traversability_generator3d::TraversabilityGenerator3d> travGenerator;
-    std::shared_ptr<traversability_generator3d::TraversabilityGenerator3d::MLGrid> mMLSMap;
+    std::shared_ptr<traversability_generator3d::TraversabilityGenerator3d> traversability_generator_ptr;
+    std::shared_ptr<traversability_generator3d::TraversabilityGenerator3d::MLGrid> mls_map_ptr;
     base::samples::RigidBodyState start_pose_rbs;
     base::samples::RigidBodyState goal_pose_rbs;
 
-    maps::grid::MLSMapSloped mlsMap;
-    bool initialPatchAdded;
-    bool inPlanningPhase;
-    bool gotMap;
-    bool isConfigured;
+    maps::grid::MLSMapSloped mls_map;
+    bool initial_patch_added;
+    bool is_planning;
+    bool got_map;
+    bool is_configured;
     double mls_min_x;
     double mls_min_y;
 
@@ -125,8 +123,8 @@ private:
     rclcpp::TimerBase::SharedPtr timer;
     pcl::CropBox<pcl::PointXYZ> box_filter;
     
-    bool extend_trajectory_;
-    double extension_distance_;
+    bool extend_trajectory;
+    double extension_distance;
 
 };
 
