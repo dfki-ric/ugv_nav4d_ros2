@@ -23,6 +23,7 @@ public:
 protected:
   virtual void onInitialize() override;
   virtual void reset() override;
+  virtual void onDisable() override;
 
 private:
   void processMessage(ugv_nav4d_ros2::msg::MLSMap::ConstSharedPtr msg) override;

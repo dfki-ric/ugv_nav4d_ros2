@@ -32,6 +32,19 @@ void MLSMapDisplay::onInitialize()
 void MLSMapDisplay::reset()
 {
   MFDClass::reset();
+  for (auto& object : manual_objects_) {
+      scene_manager_->destroyManualObject(object);
+  }
+  manual_objects_.clear();
+
+}
+
+void MLSMapDisplay::onDisable(){
+  MFDClass::onDisable();
+  for (auto& object : manual_objects_) {
+      scene_manager_->destroyManualObject(object);
+  }
+  manual_objects_.clear();  
 }
 
 void MLSMapDisplay::processMessage(ugv_nav4d_ros2::msg::MLSMap::ConstSharedPtr msg)

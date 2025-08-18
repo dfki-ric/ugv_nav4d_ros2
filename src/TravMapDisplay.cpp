@@ -29,6 +29,19 @@ void TravMapDisplay::onInitialize()
 void TravMapDisplay::reset()
 {
   MFDClass::reset();
+  for (auto& object : manual_objects_) {
+      scene_manager_->destroyManualObject(object);
+  }
+  manual_objects_.clear();
+
+}
+
+void TravMapDisplay::onDisable(){
+  MFDClass::onDisable();
+  for (auto& object : manual_objects_) {
+      scene_manager_->destroyManualObject(object);
+  }
+  manual_objects_.clear();  
 }
 
 void TravMapDisplay::processMessage(ugv_nav4d_ros2::msg::TravMap::ConstSharedPtr msg)
