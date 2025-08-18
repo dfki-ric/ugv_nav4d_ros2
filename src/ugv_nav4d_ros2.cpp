@@ -78,6 +78,7 @@ PathPlannerNode::PathPlannerNode()
         mls_map.translate(Eigen::Vector3d(mls_min_x, mls_min_y, 0));
     }
 
+    combined_path_publisher = this->create_publisher<nav_msgs::msg::Path>("/ugv_nav4d_ros2/path", 10);
     labeled_path_publisher = this->create_publisher<ugv_nav4d_ros2::msg::LabeledPathArray>("/ugv_nav4d_ros2/labeled_path_segments", 10);
     trav_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::TravMap>("/ugv_nav4d_ros2/trav_map", 10);
     mls_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::MLSMap>("/ugv_nav4d_ros2/mls_map", 10);
@@ -505,6 +506,9 @@ void PathPlannerNode::plan(){
     ugv_nav4d_ros2::msg::LabeledPathArray labeled_path_message;
     auto now = this->get_clock()->now();
 
+    nav_msgs::msg::Path path;
+    path.header.frame_id = get_parameter("world_frame").as_string();
+
     nav_msgs::msg::Path path_segment;
     std::string label_last;
     std::string label;
@@ -576,6 +580,7 @@ void PathPlannerNode::plan(){
                 tempPoint.header.stamp = now;
                 tempPoint.header.frame_id = get_parameter("world_frame").as_string();
 
+                path.poses.push_back(tempPoint);
                 path_segment.poses.push_back(tempPoint);
             }
 
@@ -637,6 +642,9 @@ void PathPlannerNode::plan(){
                     ext_pose_full.pose.orientation.z = yaw_half.z();
                     ext_pose_full.pose.orientation.w = yaw_half.w();
 
+                    path.poses.push_back(ext_pose_half);
+                    path.poses.push_back(ext_pose_full);
+
                     path_segment.poses.push_back(ext_pose_half);
                     path_segment.poses.push_back(ext_pose_full);
                 }
@@ -649,6 +657,7 @@ void PathPlannerNode::plan(){
             labeled_path_message.labels.push_back(label_last);
         }
 
+        combined_path_publisher->publish(path);
         labeled_path_publisher->publish(labeled_path_message);
     }
 

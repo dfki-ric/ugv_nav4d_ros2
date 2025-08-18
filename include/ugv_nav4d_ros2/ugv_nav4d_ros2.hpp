@@ -86,6 +86,7 @@ private:
     sensor_msgs::msg::PointCloud2::SharedPtr latest_pointcloud;
 
     //publishers
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr combined_path_publisher;
     rclcpp::Publisher<ugv_nav4d_ros2::msg::LabeledPathArray>::SharedPtr labeled_path_publisher;
     rclcpp::Publisher<ugv_nav4d_ros2::msg::TravMap>::SharedPtr trav_map_publisher;
     rclcpp::Publisher<ugv_nav4d_ros2::msg::MLSMap>::SharedPtr mls_map_publisher;
