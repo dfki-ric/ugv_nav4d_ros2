@@ -123,6 +123,11 @@ install(TARGETS ugv_nav4d_ros2_node
 	DESTINATION lib/${PROJECT_NAME}
 )
 
+install(FILES icons/classes/MultiLayeredSurfaceMap.png
+              icons/classes/TraversabilityMap.png
+        DESTINATION share/${PROJECT_NAME}/icons/classes
+)
+
 install(FILES plugins_description.xml
         DESTINATION share/${PROJECT_NAME}
 )

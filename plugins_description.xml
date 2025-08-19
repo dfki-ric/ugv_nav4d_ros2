@@ -1,5 +1,5 @@
 <library path="ugv_nav4d_ros2_trav_map_plugin">
-  <class name="Traversability Map"
+  <class name="TraversabilityMap"
          type="ugv_nav4d_ros2::ugv_nav4d_ros2_trav_map_plugin::TravMapDisplay"
          base_class_type="rviz_common::Display">
     <description>
@@ -9,7 +9,7 @@
 </library>
 
 <library path="ugv_nav4d_ros2_mls_map_plugin">
-  <class name="Multi-Level Surface Map"
+  <class name="MultiLayeredSurfaceMap"
          type="ugv_nav4d_ros2::ugv_nav4d_ros2_mls_map_plugin::MLSMapDisplay"
          base_class_type="rviz_common::Display">
     <description>
