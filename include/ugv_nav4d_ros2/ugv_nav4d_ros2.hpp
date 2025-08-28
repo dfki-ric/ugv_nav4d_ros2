@@ -61,6 +61,7 @@ private:
     void configurePlanner();
     void publishTravMap();
     bool publishMLSMap();
+    void publishMaps();
     void parameterUpdateTimerCallback();
 
     //action server

@@ -173,11 +173,11 @@ rcl_interfaces::msg::SetParametersResult PathPlannerNode::parametersCallback(con
 void PathPlannerNode::mapPublishCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                     std::shared_ptr<std_srvs::srv::Trigger::Response> response)
 {
-    RCLCPP_INFO(this->get_logger(), "Received service request to publish map.");
-    publishMLSMap();
+    RCLCPP_INFO(this->get_logger(), "Received service request to publish maps.");
+    publishMaps();
     response->success = true;
-    response->message = "Published MLS map.";
-    RCLCPP_INFO(this->get_logger(), "Published MLS map.");
+    response->message = "Published MLS and Traversability Map.";
+    RCLCPP_INFO(this->get_logger(), "Published MLS and Traversability Map.");
 
 }
 
@@ -199,11 +199,9 @@ void PathPlannerNode::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedP
 
             if (!is_configured){
                 configurePlanner();
-                is_configured = true;
             }
 
             RCLCPP_INFO(this->get_logger(), "Planner state: Got Map");
-
             mls_map_ptr = std::make_shared<traversability_generator3d::TraversabilityGenerator3d::MLGrid>(mls_map);
             traversability_generator_ptr->setMLSGrid(mls_map_ptr);
 
@@ -220,10 +218,12 @@ void PathPlannerNode::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedP
 
             Eigen::Affine3d ground2Mls(body2MLS * ground2Body);
 
-            if (!initial_patch_added){
+            const double& initial_patch_radius = get_parameter("initialPatchRadius").as_double();
+
+            if ((!initial_patch_added) && initial_patch_radius > 0.0){
                 traversability_generator_ptr->setInitialPatch(ground2Mls, get_parameter("initialPatchRadius").as_double());
                 initial_patch_added = true;
-                RCLCPP_INFO(this->get_logger(), "Initial patch added.");
+                RCLCPP_INFO(this->get_logger(), "Initial patch added to MLS.");
             }
 
             auto startPosition = ground2Mls.translation();
@@ -479,7 +479,6 @@ void PathPlannerNode::plan(){
     RCLCPP_INFO_STREAM(this->get_logger(), "Goal is  " << goal_pose_rbs.position.transpose());
     ugv_nav4d::Planner::PLANNING_RESULT res = planner->plan(time, start_pose_rbs, goal_pose_rbs, trajectory2D, trajectory3D, dumpOnError, dumpOnSuccess);
     is_planning = false;
-    publishTravMap();
 
     switch(res)
     {
@@ -787,56 +786,15 @@ void PathPlannerNode::updateParameters(){
 }
 
 void PathPlannerNode::configurePlanner(){
-    if (!is_planning){
-        updateParameters();
+    updateParameters();
+    planner.reset(new ugv_nav4d::Planner(spline_primitive_config, traversability_config, mobility_config, planner_config));
+    traversability_generator_ptr.reset(new traversability_generator3d::TraversabilityGenerator3d(traversability_config));
+    is_configured = true;
+}
 
-        planner.reset(new ugv_nav4d::Planner(spline_primitive_config, traversability_config, mobility_config, planner_config));
-        traversability_generator_ptr.reset(new traversability_generator3d::TraversabilityGenerator3d(traversability_config));
-
-        RCLCPP_INFO_STREAM(this->get_logger(), "Planner state: Reset");
-      
-        if (got_map){
-            RCLCPP_INFO_STREAM(this->get_logger(), "Loading map.");
-            mls_map_ptr = std::make_shared<traversability_generator3d::TraversabilityGenerator3d::MLGrid>(mls_map);
-            traversability_generator_ptr->setMLSGrid(mls_map_ptr);
-
-            Eigen::Affine3d body2MLS;
-            body2MLS.translation() << start_pose.pose.position.x, start_pose.pose.position.y, start_pose.pose.position.z;
-            Eigen::Quaterniond quat(start_pose.pose.orientation.w, 
-                                    start_pose.pose.orientation.x, 
-                                    start_pose.pose.orientation.y, 
-                                    start_pose.pose.orientation.z);
-            body2MLS.linear() = quat.toRotationMatrix(); 
-
-            Eigen::Affine3d ground2Body(Eigen::Affine3d::Identity());
-            ground2Body.translation() = Eigen::Vector3d(0, 0, -get_parameter("distToGround").as_double());
-
-            Eigen::Affine3d ground2Mls(body2MLS * ground2Body);
-
-            if (!initial_patch_added){
-                traversability_generator_ptr->setInitialPatch(ground2Mls, get_parameter("initialPatchRadius").as_double());
-                initial_patch_added = true;
-                RCLCPP_INFO(this->get_logger(), "Initial patch added.");
-            }
-
-            auto startPosition = ground2Mls.translation();
-            traversability_generator_ptr->expandAll(startPosition);
-
-            auto travMap = traversability_generator_ptr->getTraversabilityMap();
-            planner->updateMap(travMap);
-
-            RCLCPP_INFO(this->get_logger(), "Planner state: Ready");
-            is_configured = true;
-            return;
-        }   
-        else{
-            RCLCPP_INFO(this->get_logger(), "No map found. Planner state: No Map");
-        }
-    }
-    else{
-        RCLCPP_INFO_STREAM(this->get_logger(), "Unable to configure planner due to planner is in state: Planning");
-    }
-    is_configured = false;
+void PathPlannerNode::publishMaps(){
+    publishMLSMap();
+    publishTravMap();
 }
 
 bool PathPlannerNode::publishMLSMap(){
@@ -847,7 +805,7 @@ bool PathPlannerNode::publishMLSMap(){
     map_msg.resolution = get_parameter("grid_resolution").as_double();
     map_msg.header.frame_id = get_parameter("world_frame").as_string();
 
-    int minMeasurements = 3;
+    mls_map = *mls_map_ptr;
     maps::grid::Vector2ui num_cell = mls_map.getNumCells();
     typedef maps::grid::MLSMap<maps::grid::MLSConfig::SLOPE>::CellType Cell;
 
@@ -859,11 +817,6 @@ bool PathPlannerNode::publishMLSMap(){
             for (Cell::const_iterator it = list.begin(); it != list.end(); it++)
             {
                 const maps::grid::SurfacePatch<maps::grid::MLSConfig::SLOPE>& p = *it;  
-                if(p.getNumberOfMeasurements() < minMeasurements){
-                    RCLCPP_WARN_STREAM(this->get_logger(),"Too few measurements!");
-                    continue;
-                }
- 
                 float minZ, maxZ;
                 p.getRange(minZ, maxZ);
                 minZ -= 5e-4f;
