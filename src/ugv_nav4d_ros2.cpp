@@ -236,6 +236,9 @@ void PathPlannerNode::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedP
             RCLCPP_INFO(this->get_logger(), "Map not loaded because planner is in state: Planning");
         }
     }
+    else{
+        RCLCPP_WARN_STREAM(this->get_logger(), "Unabled to load map from incoming cloud!");
+    }
 }
 
 bool PathPlannerNode::read_pose_from_tf(){
@@ -256,6 +259,19 @@ bool PathPlannerNode::read_pose_from_tf(){
 }
 
 void PathPlannerNode::processGoalRequest(const geometry_msgs::msg::PoseStamped::SharedPtr msg){
+    if (!is_configured){
+        configurePlanner();
+    }
+
+    if (!got_map){
+        RCLCPP_WARN_STREAM(this->get_logger(), "Unabled to process goal request because planner is in state NO_MAP!");
+        return;
+    }
+
+    if (is_planning){
+        RCLCPP_WARN_STREAM(this->get_logger(), "Unabled to process goal request because planner is in state PLANNING!");
+        return;
+    }
 
     if (!get_parameter("read_pose_from_topic").as_bool())
     {
@@ -265,31 +281,13 @@ void PathPlannerNode::processGoalRequest(const geometry_msgs::msg::PoseStamped::
         }
     }
 
-    if (!is_configured){
-        configurePlanner();
-        is_configured = true;
-    }
+    start_pose_rbs.position = Eigen::Vector3d(start_pose.pose.position.x, start_pose.pose.position.y, start_pose.pose.position.z);
+    start_pose_rbs.orientation = Eigen::Quaterniond(start_pose.pose.orientation.w, start_pose.pose.orientation.x, start_pose.pose.orientation.y, start_pose.pose.orientation.z);
 
-    start_pose_rbs.position = Eigen::Vector3d(start_pose.pose.position.x,
-                                              start_pose.pose.position.y,
-                                              start_pose.pose.position.z);
-
-    start_pose_rbs.orientation = Eigen::Quaterniond(start_pose.pose.orientation.w,
-                                                    start_pose.pose.orientation.x,
-                                                    start_pose.pose.orientation.y,
-                                                    start_pose.pose.orientation.z);
-
-    goal_pose_rbs.position = Eigen::Vector3d(msg->pose.position.x,
-                                             msg->pose.position.y,
-                                             msg->pose.position.z);
-
-    goal_pose_rbs.orientation = Eigen::Quaterniond(msg->pose.orientation.w,
-                                                   msg->pose.orientation.x,
-                                                   msg->pose.orientation.y,
-                                                   msg->pose.orientation.z);
-    if (!is_planning && got_map){
-        plan();
-    }
+    goal_pose_rbs.position = Eigen::Vector3d(msg->pose.position.x, msg->pose.position.y, msg->pose.position.z);
+    goal_pose_rbs.orientation = Eigen::Quaterniond(msg->pose.orientation.w, msg->pose.orientation.x, msg->pose.orientation.y, msg->pose.orientation.z);
+    
+    plan();
 }
 
 void PathPlannerNode::readStartPose(const geometry_msgs::msg::PoseStamped::SharedPtr msg){
@@ -790,6 +788,37 @@ void PathPlannerNode::configurePlanner(){
     planner_ptr.reset(new ugv_nav4d::Planner(spline_primitive_config, traversability_config, mobility_config, planner_config));
     traversability_generator_ptr.reset(new traversability_generator3d::TraversabilityGenerator3d(traversability_config));
     is_configured = true;
+
+    if(got_map){//If map is already available then load the last known map.
+        if (!get_parameter("read_pose_from_topic").as_bool())
+        {
+            if (!read_pose_from_tf()){
+                RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to read start pose of the robot from TF!");
+                return;
+            }
+        }
+
+        RCLCPP_INFO(this->get_logger(), "Planner state: Loading last known map");
+        mls_map_ptr = std::make_shared<traversability_generator3d::TraversabilityGenerator3d::MLGrid>(mls_map);
+        traversability_generator_ptr->setMLSGrid(mls_map_ptr);
+
+        Eigen::Affine3d body2MLS;
+        body2MLS.translation() << start_pose.pose.position.x, start_pose.pose.position.y, start_pose.pose.position.z;
+        Eigen::Quaterniond quat(start_pose.pose.orientation.w, 
+                                start_pose.pose.orientation.x, 
+                                start_pose.pose.orientation.y, 
+                                start_pose.pose.orientation.z);
+        body2MLS.linear() = quat.toRotationMatrix(); 
+        Eigen::Affine3d body2Ground(Eigen::Affine3d::Identity());
+        body2Ground.translation() = Eigen::Vector3d(0, 0, -get_parameter("distToGround").as_double());
+        Eigen::Affine3d ground2Mls(body2MLS * body2Ground);
+
+        auto startPosition = ground2Mls.translation();
+        traversability_generator_ptr->expandAll(startPosition);
+        auto travMap = traversability_generator_ptr->getTraversabilityMap();
+        planner_ptr->updateMap(travMap);
+        RCLCPP_INFO(this->get_logger(), "Planner state: Ready");
+    }
 }
 
 void PathPlannerNode::publishMaps(){
