@@ -96,8 +96,8 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_publish_service; 
 
     //tf
-    std::shared_ptr<tf2_ros::TransformListener> tf_listener{nullptr};
-    std::unique_ptr<tf2_ros::Buffer> tf_buffer;
+    std::shared_ptr<tf2_ros::TransformListener> tf_listener_ptr;
+    std::unique_ptr<tf2_ros::Buffer> tf_buffer_ptr;
 
     //planner
     sbpl_spline_primitives::SplinePrimitivesConfig spline_primitive_config; 
@@ -105,7 +105,7 @@ private:
     traversability_generator3d::TraversabilityConfig traversability_config;
     ugv_nav4d::PlannerConfig planner_config;
 
-    std::unique_ptr<ugv_nav4d::Planner> planner;
+    std::unique_ptr<ugv_nav4d::Planner> planner_ptr;
     std::shared_ptr<traversability_generator3d::TraversabilityGenerator3d> traversability_generator_ptr;
     std::shared_ptr<traversability_generator3d::TraversabilityGenerator3d::MLGrid> mls_map_ptr;
     base::samples::RigidBodyState start_pose_rbs;
@@ -127,7 +127,6 @@ private:
     
     bool extend_trajectory;
     double extension_distance;
-
 };
 
 } // namespace ugv_nav4d_ros2 

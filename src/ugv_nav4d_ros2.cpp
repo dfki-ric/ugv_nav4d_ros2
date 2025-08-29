@@ -42,7 +42,7 @@ PathPlannerNode::PathPlannerNode()
     mls_min_y = get_parameter("dist_min_y").as_int();
 
     extend_trajectory = get_parameter("extend_trajectory").as_bool();    
-    extension_distance = get_parameter("extension_distance").as_double();   
+    extension_distance = get_parameter("extension_distance").as_double();
 
     if (get_parameter("load_mls_from_file").as_bool()){
         const std::string mls_file_path = get_parameter("mls_file_path").as_string();
@@ -89,8 +89,8 @@ PathPlannerNode::PathPlannerNode()
 void PathPlannerNode::setupSubscriptions()
 {
     // controller feedback (via TF)
-    tf_buffer = std::make_unique<tf2_ros::Buffer>(this->get_clock());
-    tf_listener = std::make_shared<tf2_ros::TransformListener>(*tf_buffer);
+    tf_buffer_ptr = std::make_unique<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_ptr = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_ptr);
 
     // Create the action server
     save_mls_map_action_server = rclcpp_action::create_server<SaveMLSMap>(
@@ -220,7 +220,7 @@ void PathPlannerNode::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedP
 
             const double& initial_patch_radius = get_parameter("initialPatchRadius").as_double();
 
-            if ((!initial_patch_added) && initial_patch_radius > 0.0){
+            if (!initial_patch_added && initial_patch_radius > 0.0){
                 traversability_generator_ptr->setInitialPatch(ground2Mls, get_parameter("initialPatchRadius").as_double());
                 initial_patch_added = true;
                 RCLCPP_INFO(this->get_logger(), "Initial patch added to MLS.");
@@ -229,7 +229,7 @@ void PathPlannerNode::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedP
             auto startPosition = ground2Mls.translation();
             traversability_generator_ptr->expandAll(startPosition);
             auto travMap = traversability_generator_ptr->getTraversabilityMap();
-            planner->updateMap(travMap);
+            planner_ptr->updateMap(travMap);
             RCLCPP_INFO(this->get_logger(), "Planner state: Ready");
         }
         else{
@@ -243,7 +243,7 @@ bool PathPlannerNode::read_pose_from_tf(){
     std::string world_frame = get_parameter("world_frame").as_string();
 
     try{
-        geometry_msgs::msg::TransformStamped t = tf_buffer->lookupTransform(world_frame, robot_frame, tf2::TimePointZero);
+        geometry_msgs::msg::TransformStamped t = tf_buffer_ptr->lookupTransform(world_frame, robot_frame, tf2::TimePointZero);
         start_pose.pose.orientation = t.transform.rotation;
         start_pose.pose.position.x =  t.transform.translation.x;
         start_pose.pose.position.y =  t.transform.translation.y;
@@ -351,7 +351,7 @@ bool PathPlannerNode::generateMLS(){
 
     if (latest_pointcloud->header.frame_id != world_frame){
         try{
-            geometry_msgs::msg::TransformStamped t = tf_buffer->lookupTransform(world_frame, latest_pointcloud->header.frame_id, tf2::TimePointZero);
+            geometry_msgs::msg::TransformStamped t = tf_buffer_ptr->lookupTransform(world_frame, latest_pointcloud->header.frame_id, tf2::TimePointZero);
             cloud2MLS.translation() << t.transform.translation.x, t.transform.translation.y, t.transform.translation.z;
             Eigen::Quaterniond quat(t.transform.rotation.w, 
                                     t.transform.rotation.x, 
@@ -477,7 +477,7 @@ void PathPlannerNode::plan(){
     is_planning = true;
     RCLCPP_INFO_STREAM(this->get_logger(), "Start is  " << start_pose_rbs.position.transpose());
     RCLCPP_INFO_STREAM(this->get_logger(), "Goal is  " << goal_pose_rbs.position.transpose());
-    ugv_nav4d::Planner::PLANNING_RESULT res = planner->plan(time, start_pose_rbs, goal_pose_rbs, trajectory2D, trajectory3D, dumpOnError, dumpOnSuccess);
+    ugv_nav4d::Planner::PLANNING_RESULT res = planner_ptr->plan(time, start_pose_rbs, goal_pose_rbs, trajectory2D, trajectory3D, dumpOnError, dumpOnSuccess);
     is_planning = false;
 
     switch(res)
@@ -787,7 +787,7 @@ void PathPlannerNode::updateParameters(){
 
 void PathPlannerNode::configurePlanner(){
     updateParameters();
-    planner.reset(new ugv_nav4d::Planner(spline_primitive_config, traversability_config, mobility_config, planner_config));
+    planner_ptr.reset(new ugv_nav4d::Planner(spline_primitive_config, traversability_config, mobility_config, planner_config));
     traversability_generator_ptr.reset(new traversability_generator3d::TraversabilityGenerator3d(traversability_config));
     is_configured = true;
 }
