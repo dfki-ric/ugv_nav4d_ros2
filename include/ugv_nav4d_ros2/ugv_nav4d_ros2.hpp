@@ -44,7 +44,7 @@ public:
 
 private:
     void setupSubscriptions();
-    bool read_pose_from_tf();
+    bool updatePoseFromTF();
     void mapPublishCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                     std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
@@ -65,11 +65,11 @@ private:
     void parameterUpdateTimerCallback();
 
     //action server
-    rclcpp_action::GoalResponse handle_save_map_goal(
+    rclcpp_action::GoalResponse actionSaveMap(
         const rclcpp_action::GoalUUID & uuid,
         std::shared_ptr<const SaveMLSMap::Goal> goal);
-    rclcpp_action::CancelResponse handle_save_map_cancel(const std::shared_ptr<rclcpp_action::ServerGoalHandle<SaveMLSMap>> goal_handle);
-    void handle_save_map_accepted(const std::shared_ptr<rclcpp_action::ServerGoalHandle<SaveMLSMap>> goal_handle);
+    rclcpp_action::CancelResponse actionCancelSaveMap(const std::shared_ptr<rclcpp_action::ServerGoalHandle<SaveMLSMap>> goal_handle);
+    void actionSaveMapAccepted(const std::shared_ptr<rclcpp_action::ServerGoalHandle<SaveMLSMap>> goal_handle);
     rclcpp_action::Server<SaveMLSMap>::SharedPtr save_mls_map_action_server;
    
     //parameters

@@ -51,11 +51,13 @@ PathPlannerNode::PathPlannerNode()
         if (mls_file_type == "ply"){        
             if (loadPlyAsMLS(mls_file_path)){
                 got_map = true;
+                RCLCPP_INFO_STREAM(this->get_logger(), "Loaded map from PLY.");
             }
         }
         else if (mls_file_type == "bin"){  
             if(loadMLSMapFromBin(mls_file_path)){
                 got_map = true;
+                RCLCPP_INFO_STREAM(this->get_logger(), "Loaded map from BIN.");
             }
         }
         else{
@@ -96,9 +98,9 @@ void PathPlannerNode::setupSubscriptions()
     save_mls_map_action_server = rclcpp_action::create_server<SaveMLSMap>(
         this,
         "/ugv_nav4d_ros2/save_mls_map",
-        std::bind(&PathPlannerNode::handle_save_map_goal, this, std::placeholders::_1, std::placeholders::_2),
-        std::bind(&PathPlannerNode::handle_save_map_cancel, this, std::placeholders::_1),
-        std::bind(&PathPlannerNode::handle_save_map_accepted, this, std::placeholders::_1)
+        std::bind(&PathPlannerNode::actionSaveMap, this, std::placeholders::_1, std::placeholders::_2),
+        std::bind(&PathPlannerNode::actionCancelSaveMap, this, std::placeholders::_1),
+        std::bind(&PathPlannerNode::actionSaveMapAccepted, this, std::placeholders::_1)
     );
 
     // Map publisher trigger service
@@ -169,16 +171,19 @@ rcl_interfaces::msg::SetParametersResult PathPlannerNode::parametersCallback(con
     return result;
 }
 
-
 void PathPlannerNode::mapPublishCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                     std::shared_ptr<std_srvs::srv::Trigger::Response> response)
 {
-    RCLCPP_INFO(this->get_logger(), "Received service request to publish maps.");
-    publishMaps();
-    response->success = true;
-    response->message = "Published MLS and Traversability Map.";
-    RCLCPP_INFO(this->get_logger(), "Published MLS and Traversability Map.");
-
+    if (got_map){
+        RCLCPP_INFO(this->get_logger(), "Received service request to publish maps.");
+        publishMaps();
+        response->success = true;
+        response->message = "Published MLS and Traversability Map.";
+        RCLCPP_INFO(this->get_logger(), "Published MLS and Traversability Map.");
+    }
+    else{
+        RCLCPP_WARN(this->get_logger(), "No map received so far. Failed to publish maps.");
+    }
 }
 
 void PathPlannerNode::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
@@ -187,18 +192,18 @@ void PathPlannerNode::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedP
     got_map = generateMLS();
 
     if (got_map){
-        if (!is_planning){
 
+        if (!is_configured){
+            configurePlanner();
+        }
+
+        if (!is_planning){
             if (!get_parameter("read_pose_from_topic").as_bool())
             {
-                if (!read_pose_from_tf()){
+                if (!updatePoseFromTF()){
                     RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to read start pose of the robot from TF!");
                     return;
                 }
-            }
-
-            if (!is_configured){
-                configurePlanner();
             }
 
             RCLCPP_INFO(this->get_logger(), "Planner state: Got Map");
@@ -241,7 +246,7 @@ void PathPlannerNode::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedP
     }
 }
 
-bool PathPlannerNode::read_pose_from_tf(){
+bool PathPlannerNode::updatePoseFromTF(){
     std::string robot_frame = get_parameter("robot_frame").as_string();
     std::string world_frame = get_parameter("world_frame").as_string();
 
@@ -275,7 +280,7 @@ void PathPlannerNode::processGoalRequest(const geometry_msgs::msg::PoseStamped::
 
     if (!get_parameter("read_pose_from_topic").as_bool())
     {
-        if (!read_pose_from_tf()){
+        if (!updatePoseFromTF()){
             RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to read start pose of the robot from TF!");
             return;
         }
@@ -333,6 +338,7 @@ bool PathPlannerNode::loadPlyAsMLS(const std::string& path){
             mls_map = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
             mls_map.translate(Eigen::Vector3d(min.x, min.y, 0));
             mls_map.mergePointCloud(*cloud_filtered, base::Transform3d::Identity());
+            mls_map_ptr = std::make_shared<traversability_generator3d::TraversabilityGenerator3d::MLGrid>(mls_map);
         }
         return true;
     }
@@ -400,6 +406,7 @@ bool PathPlannerNode::saveMLSMapAsBin(const std::string& filename = "") {
     // Create a binary archive
     boost::archive::binary_oarchive archive(binFile);
     archive << mls_map;
+    mls_map_ptr = std::make_shared<traversability_generator3d::TraversabilityGenerator3d::MLGrid>(mls_map);
 
     RCLCPP_INFO_STREAM(this->get_logger(), "MLS Map saved to " << fileToUse);
     return true;
@@ -431,7 +438,7 @@ bool PathPlannerNode::loadMLSMapFromBin(const std::string& filename){
     }
 }
 
-rclcpp_action::GoalResponse PathPlannerNode::handle_save_map_goal(
+rclcpp_action::GoalResponse PathPlannerNode::actionSaveMap(
     const rclcpp_action::GoalUUID & uuid,
     std::shared_ptr<const SaveMLSMap::Goal> goal)
 {
@@ -440,13 +447,13 @@ rclcpp_action::GoalResponse PathPlannerNode::handle_save_map_goal(
     return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;  // Accept the goal
 }
 
-rclcpp_action::CancelResponse PathPlannerNode::handle_save_map_cancel(const std::shared_ptr<rclcpp_action::ServerGoalHandle<SaveMLSMap>> goal_handle)
+rclcpp_action::CancelResponse PathPlannerNode::actionCancelSaveMap(const std::shared_ptr<rclcpp_action::ServerGoalHandle<SaveMLSMap>> goal_handle)
 {
     RCLCPP_INFO(this->get_logger(), "Canceling save map request");
     return rclcpp_action::CancelResponse::ACCEPT;  // Accept the cancel request
 }
 
-void PathPlannerNode::handle_save_map_accepted(const std::shared_ptr<rclcpp_action::ServerGoalHandle<SaveMLSMap>> goal_handle)
+void PathPlannerNode::actionSaveMapAccepted(const std::shared_ptr<rclcpp_action::ServerGoalHandle<SaveMLSMap>> goal_handle)
 {
     std::thread{
         [this, goal_handle]() {
@@ -665,7 +672,6 @@ void PathPlannerNode::declareParameters(){
     auto param_desc = rcl_interfaces::msg::ParameterDescriptor{};
     param_desc.read_only = true;
 
-    declare_parameter("spline_resolution_distance", 0.1, param_desc);
     declare_parameter("read_pose_from_topic", false, param_desc);
     declare_parameter("load_mls_from_file", false, param_desc);
     declare_parameter("mls_file_type", "ply", param_desc);
@@ -680,11 +686,11 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("dist_min_y", -50, param_desc);
     declare_parameter("dist_max_z", 50, param_desc);
     declare_parameter("dist_min_z", -50, param_desc);
-    declare_parameter("initialPatchRadius", 3.0, param_desc);
-
+    
     declare_parameter("dumpOnError", false);
     declare_parameter("dumpOnSuccess", false);
-
+    declare_parameter("initialPatchRadius", 3.0);
+    declare_parameter("spline_resolution_distance", 0.1);
     declare_parameter("maxMotionCurveLength", 100.0);
     declare_parameter("minTurningRadius", 1.0);
     declare_parameter("multiplierBackward", 3.0);
@@ -792,7 +798,7 @@ void PathPlannerNode::configurePlanner(){
     if(got_map){//If map is already available then load the last known map.
         if (!get_parameter("read_pose_from_topic").as_bool())
         {
-            if (!read_pose_from_tf()){
+            if (!updatePoseFromTF()){
                 RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to read start pose of the robot from TF!");
                 return;
             }
@@ -822,6 +828,10 @@ void PathPlannerNode::configurePlanner(){
 }
 
 void PathPlannerNode::publishMaps(){
+    if (!is_configured){
+        configurePlanner();
+    }
+
     publishMLSMap();
     publishTravMap();
 }
