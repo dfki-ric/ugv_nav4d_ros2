@@ -111,7 +111,6 @@ private:
     base::samples::RigidBodyState start_pose_rbs;
     base::samples::RigidBodyState goal_pose_rbs;
 
-    maps::grid::MLSMapSloped mls_map;
     bool initial_patch_added;
     bool is_planning;
     bool got_map;

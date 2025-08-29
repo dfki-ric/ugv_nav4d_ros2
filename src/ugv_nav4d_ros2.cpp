@@ -76,8 +76,8 @@ PathPlannerNode::PathPlannerNode()
         maps::grid::MLSConfig cfg;
         cfg.gapSize = get_parameter("mls_gap_size").as_double();
         const maps::grid::Vector2ui numCells(grid_size_x, grid_size_y);
-        mls_map = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
-        mls_map.translate(Eigen::Vector3d(mls_min_x, mls_min_y, 0));
+        mls_map_ptr = std::make_shared<maps::grid::MLSMapSloped>(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
+        mls_map_ptr->translate(Eigen::Vector3d(mls_min_x, mls_min_y, 0));
     }
 
     combined_path_publisher = this->create_publisher<nav_msgs::msg::Path>("/ugv_nav4d_ros2/path", 10);
@@ -207,7 +207,6 @@ void PathPlannerNode::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedP
             }
 
             RCLCPP_INFO(this->get_logger(), "Planner state: Got Map");
-            mls_map_ptr = std::make_shared<traversability_generator3d::TraversabilityGenerator3d::MLGrid>(mls_map);
             traversability_generator_ptr->setMLSGrid(mls_map_ptr);
 
             Eigen::Affine3d body2MLS;
@@ -318,6 +317,9 @@ bool PathPlannerNode::loadPlyAsMLS(const std::string& path){
             pcl::PointXYZ min, max; 
             pcl::getMinMax3D (*cloud, min, max); 
 
+            const double size_x = max.x - min.x;
+            const double size_y = max.y - min.y;
+
             mls_min_x = min.x;
             mls_min_y = min.y;
 
@@ -329,16 +331,14 @@ bool PathPlannerNode::loadPlyAsMLS(const std::string& path){
             box_filter.filter(*cloud_filtered);
     
             const double mls_res = get_parameter("grid_resolution").as_double();
-            const double size_x = max.x - min.x;
-            const double size_y = max.y - min.y;
             
             maps::grid::MLSConfig cfg;
             cfg.gapSize = get_parameter("mls_gap_size").as_double();
             const maps::grid::Vector2ui numCells(size_x / mls_res + 1, size_y / mls_res + 1);
-            mls_map = maps::grid::MLSMapSloped(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
-            mls_map.translate(Eigen::Vector3d(min.x, min.y, 0));
-            mls_map.mergePointCloud(*cloud_filtered, base::Transform3d::Identity());
-            mls_map_ptr = std::make_shared<traversability_generator3d::TraversabilityGenerator3d::MLGrid>(mls_map);
+
+            mls_map_ptr = std::make_shared<maps::grid::MLSMapSloped>(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
+            mls_map_ptr->translate(Eigen::Vector3d(mls_min_x, mls_min_y, 0));
+            mls_map_ptr->mergePointCloud(*cloud_filtered, base::Transform3d::Identity());
         }
         return true;
     }
@@ -381,7 +381,7 @@ bool PathPlannerNode::generateMLS(){
     box_filter.setInputCloud(cloud);
     box_filter.filter(*cloud_filtered);
 
-    mls_map.mergePointCloud(*cloud_filtered, cloud2MLS);
+    mls_map_ptr->mergePointCloud(*cloud_filtered, cloud2MLS);
     return true;
 }
 
@@ -405,8 +405,7 @@ bool PathPlannerNode::saveMLSMapAsBin(const std::string& filename = "") {
 
     // Create a binary archive
     boost::archive::binary_oarchive archive(binFile);
-    archive << mls_map;
-    mls_map_ptr = std::make_shared<traversability_generator3d::TraversabilityGenerator3d::MLGrid>(mls_map);
+    archive << *mls_map_ptr;
 
     RCLCPP_INFO_STREAM(this->get_logger(), "MLS Map saved to " << fileToUse);
     return true;
@@ -428,7 +427,8 @@ bool PathPlannerNode::loadMLSMapFromBin(const std::string& filename){
     try {
         // Load the file contents into the stream and deserialize
         boost::archive::binary_iarchive ia(file);
-        ia >> mls_map;  // Deserialize into mls_map
+        mls_map_ptr = std::make_shared<maps::grid::MLSMapSloped>();
+        ia >> *mls_map_ptr;  // Deserialize directly into the object pointed by the shared_ptr
 
         RCLCPP_INFO_STREAM(this->get_logger(), "Loaded MLS Map from " << filename);
         return true;
@@ -805,7 +805,6 @@ void PathPlannerNode::configurePlanner(){
         }
 
         RCLCPP_INFO(this->get_logger(), "Planner state: Loading last known map");
-        mls_map_ptr = std::make_shared<traversability_generator3d::TraversabilityGenerator3d::MLGrid>(mls_map);
         traversability_generator_ptr->setMLSGrid(mls_map_ptr);
 
         Eigen::Affine3d body2MLS;
@@ -844,15 +843,14 @@ bool PathPlannerNode::publishMLSMap(){
     map_msg.resolution = get_parameter("grid_resolution").as_double();
     map_msg.header.frame_id = get_parameter("world_frame").as_string();
 
-    mls_map = *mls_map_ptr;
-    maps::grid::Vector2ui num_cell = mls_map.getNumCells();
+    maps::grid::Vector2ui num_cell = mls_map_ptr->getNumCells();
     typedef maps::grid::MLSMap<maps::grid::MLSConfig::SLOPE>::CellType Cell;
 
     for (size_t x = 0; x < num_cell.x(); x++)
     {
         for (size_t y = 0; y < num_cell.y(); y++)
         {
-            const Cell &list = mls_map.at(x, y);
+            const Cell &list = mls_map_ptr->at(x, y);
             for (Cell::const_iterator it = list.begin(); it != list.end(); it++)
             {
                 const maps::grid::SurfacePatch<maps::grid::MLSConfig::SLOPE>& p = *it;  
@@ -868,7 +866,7 @@ bool PathPlannerNode::publishMLSMap(){
                 maps::grid::Vector2d pos(0.00, 0.00);
 
                 // Calculate the position of the cell center.
-                pos = (maps::grid::Index(x, y).cast<double>() + maps::grid::Vector2d(0.5, 0.5)).array() * mls_map.getResolution().array();
+                pos = (maps::grid::Index(x, y).cast<double>() + maps::grid::Vector2d(0.5, 0.5)).array() * mls_map_ptr->getResolution().array();
                 patch_msg.position.x = pos.x() + mls_min_x;
                 patch_msg.position.y = pos.y() + mls_min_y;
                 patch_msg.position.z = p.getCenter().z();
