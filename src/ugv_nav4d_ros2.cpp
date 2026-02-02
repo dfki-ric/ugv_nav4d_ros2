@@ -690,7 +690,6 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("dumpOnError", false);
     declare_parameter("dumpOnSuccess", false);
     declare_parameter("initialPatchRadius", 3.0);
-    declare_parameter("spline_resolution_distance", 0.1);
     declare_parameter("maxMotionCurveLength", 100.0);
     declare_parameter("minTurningRadius", 1.0);
     declare_parameter("multiplierBackward", 3.0);
@@ -704,7 +703,7 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("searchProgressSteps", 0.1);
     declare_parameter("searchRadius", 1.0);
     declare_parameter("translationSpeed", 1.0);
-    declare_parameter("spline_sampling_resolution", 0.05);
+    declare_parameter("spline_resolution_distance", 0.05);
     declare_parameter("remove_goal_offset", false);
 
     declare_parameter("epsilonSteps", 2);
@@ -765,7 +764,7 @@ void PathPlannerNode::updateParameters(){
     mobility_config.multiplierBackwardTurn                = get_parameter("multiplierBackwardTurn").as_double();
     mobility_config.multiplierForwardTurn                 = get_parameter("multiplierForwardTurn").as_double();
     mobility_config.multiplierPointTurn                   = get_parameter("multiplierPointTurn").as_double();
-    mobility_config.spline_sampling_resolution            = get_parameter("spline_sampling_resolution").as_double();
+    mobility_config.spline_sampling_resolution            = get_parameter("spline_resolution_distance").as_double();
     mobility_config.remove_goal_offset                    = get_parameter("remove_goal_offset").as_bool();
 
     traversability_config.gridResolution            = get_parameter("grid_resolution").as_double();
