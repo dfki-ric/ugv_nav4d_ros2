@@ -41,14 +41,52 @@ class FollowPathClient(Node):
         dz = pose1.pose.position.z - pose2.pose.position.z
         return math.sqrt(dx * dx + dy * dy + dz * dz)
 
-    def filter_close_poses(self, poses, threshold=0.01):
-        if not poses:
-            return []
+    def angle_diff(self, a, b):
+        d = a - b
+        return math.atan2(math.sin(d), math.cos(d))
+
+    def yaw_from_quaternion(self, q):
+        """
+        Extract yaw (rotation around Z) from a geometry_msgs quaternion.
+        """
+        # q has fields: x, y, z, w
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        return math.atan2(siny_cosp, cosy_cosp)
+
+    def filter_close_poses(self, poses, threshold=0.05):
+        if len(poses) < 3:
+            return poses
 
         filtered = [poses[0]]
+        last_dir = None
+        last_dyaw = None
+
         for pose in poses[1:]:
-            if self.pose_distance(filtered[-1], pose) > threshold:
-                filtered.append(pose)
+            prev = filtered[-1]
+
+            dx = pose.pose.position.x - prev.pose.position.x
+            dy = pose.pose.position.y - prev.pose.position.y
+            dist = math.hypot(dx, dy)
+
+            #print(dist)
+
+            if dist < threshold:
+                continue
+
+            curr_dir = (dx / dist, dy / dist)
+
+            if last_dir is not None:
+                # dot product between directions
+                dot = curr_dir[0] * last_dir[0] + curr_dir[1] * last_dir[1]
+
+                # direction flipped or sharp reversal → skip
+                if dot < 0.0:
+                    continue
+
+            filtered.append(pose)
+            last_dir = curr_dir
+
         return filtered
 
     def labeled_path_callback(self, msg: LabeledPathArray):
