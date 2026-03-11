@@ -59,9 +59,9 @@ private:
     void declareParameters();
     void updateParameters();
     void configurePlanner();
-    void publishTravMap();
+    bool publishTravMap();
     bool publishMLSMap();
-    void publishMaps();
+    bool publishMaps();
     void parameterUpdateTimerCallback();
 
     //action server

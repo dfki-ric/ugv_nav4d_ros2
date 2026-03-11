@@ -171,18 +171,31 @@ rcl_interfaces::msg::SetParametersResult PathPlannerNode::parametersCallback(con
     return result;
 }
 
-void PathPlannerNode::mapPublishCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
-                    std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+void PathPlannerNode::mapPublishCallback(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response)
 {
-    if (got_map){
-        RCLCPP_INFO(this->get_logger(), "Received service request to publish maps.");
-        publishMaps();
+    if (!got_map)
+    {
+        RCLCPP_WARN(this->get_logger(), "No map received so far. Failed to publish maps.");
+        response->success = false;
+        response->message = "No map received so far.";
+        return;
+    }
+
+    RCLCPP_INFO(this->get_logger(), "Received service request to publish maps.");
+
+    if (publishMaps())
+    {
         response->success = true;
         response->message = "Published MLS and Traversability Map.";
         RCLCPP_INFO(this->get_logger(), "Published MLS and Traversability Map.");
     }
-    else{
-        RCLCPP_WARN(this->get_logger(), "No map received so far. Failed to publish maps.");
+    else
+    {
+        response->success = false;
+        response->message = "Failed to publish maps.";
+        RCLCPP_ERROR(this->get_logger(), "Failed to publish maps.");
     }
 }
 
@@ -825,13 +838,12 @@ void PathPlannerNode::configurePlanner(){
     }
 }
 
-void PathPlannerNode::publishMaps(){
+bool PathPlannerNode::publishMaps(){
     if (!is_configured){
         configurePlanner();
     }
 
-    publishMLSMap();
-    publishTravMap();
+    return publishMLSMap() && publishTravMap();
 }
 
 bool PathPlannerNode::publishMLSMap(){
@@ -909,14 +921,14 @@ bool PathPlannerNode::publishMLSMap(){
     return true;
 }
 
-void PathPlannerNode::publishTravMap(){
+bool PathPlannerNode::publishTravMap(){
     const auto& trav_map_3d = traversability_generator_ptr->getTraversabilityMap(); 
-    ugv_nav4d_ros2::msg::TravMap msg;
-    msg.width = 1;
-    msg.height = 1;
-    msg.depth = 1;
-    msg.resolution = get_parameter("grid_resolution").as_double();
-    msg.header.frame_id = get_parameter("world_frame").as_string();
+    ugv_nav4d_ros2::msg::TravMap map_msg;
+    map_msg.width = 1;
+    map_msg.height = 1;
+    map_msg.depth = 1;
+    map_msg.resolution = get_parameter("grid_resolution").as_double();
+    map_msg.header.frame_id = get_parameter("world_frame").as_string();
 
     double dist_min_x = get_parameter("dist_min_x").as_int();
     double dist_min_y = get_parameter("dist_min_y").as_int();
@@ -983,10 +995,18 @@ void PathPlannerNode::publishTravMap(){
                     patch_msg.color.a = 1;
                     break;
             }
-            msg.patches.push_back(patch_msg);
+            map_msg.patches.push_back(patch_msg);
 
         }
     }
-    trav_map_publisher->publish(msg);
+
+
+    if (map_msg.patches.size() == 0){
+        RCLCPP_WARN(this->get_logger(), "Empty Traversability Map!");
+        return false;
+    }
+
+    trav_map_publisher->publish(map_msg);
+    return true;
 }
 }
