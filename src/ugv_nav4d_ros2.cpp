@@ -749,7 +749,7 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("robotSizeY", 0.80);
     //declare_parameter("slopeMetric", :NONE);
     declare_parameter("slopeMetricScale", 1.0);    
-    declare_parameter("inflationScalingFactor", 1.0);
+    declare_parameter("obstacleInflationMultiplier", 1.0);
     declare_parameter("extend_trajectory", false);    
     declare_parameter("extension_distance", 0.0);    
 }
@@ -795,7 +795,7 @@ void PathPlannerNode::updateParameters(){
     traversability_config.distToGround              = get_parameter("distToGround").as_double();
     traversability_config.minTraversablePercentage  = get_parameter("minTraversablePercentage").as_double();
     traversability_config.allowForwardDownhill      = get_parameter("allowForwardDownhill").as_bool();
-    traversability_config.inflationScalingFactor    = get_parameter("inflationScalingFactor").as_double();
+    traversability_config.obstacleInflationMultiplier = get_parameter("obstacleInflationMultiplier").as_double();
 
     planner_config.epsilonSteps                     = get_parameter("epsilonSteps").as_int();
     planner_config.initialEpsilon                   = get_parameter("initialEpsilon").as_int();
