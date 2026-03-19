@@ -9,6 +9,8 @@
 #include <ugv_nav4d_ros2/msg/mls_map.hpp>
 
 #include <OgreManualObject.h>
+
+#include <memory>
 #include <vector>
 
 namespace ugv_nav4d_ros2 {
@@ -17,6 +19,7 @@ namespace ugv_nav4d_ros2_mls_map_plugin {
 class MLSMapDisplay : public rviz_common::MessageFilterDisplay<ugv_nav4d_ros2::msg::MLSMap>
 {
   Q_OBJECT
+
 public:
   MLSMapDisplay();
   ~MLSMapDisplay() override;
@@ -33,27 +36,34 @@ private Q_SLOTS:
 
 private:
   // ---- Coloring configuration ----
-  enum class ColorMode {Height = 0, Thickness = 1, NormalZ = 2, Slope = 3};
-  enum class Colormap  {Turbo = 0, Jet = 1, Viridis = 2, Gray = 3, CyanYellow = 4};
+  enum class ColorMode { Height = 0, Thickness = 1, NormalZ = 2, Slope = 3 };
+  enum class Colormap  { Turbo = 0, Jet = 1, Viridis = 2, Gray = 3, CyanYellow = 4 };
 
-  // Property widgets shown in RViz
+  // ---- RViz Properties ----
   rviz_common::properties::EnumProperty*  color_mode_property_{nullptr};
   rviz_common::properties::EnumProperty*  colormap_property_{nullptr};
   rviz_common::properties::BoolProperty*  auto_range_property_{nullptr};
   rviz_common::properties::FloatProperty* min_value_property_{nullptr};
   rviz_common::properties::FloatProperty* max_value_property_{nullptr};
 
-  // Cached values derived from properties
+  // ---- Cached settings ----
   ColorMode color_mode_{ColorMode::Height};
   Colormap  colormap_{Colormap::Jet};
   bool      auto_range_{true};
   float     user_min_{0.0f};
   float     user_max_{1.0f};
 
-  // Rendering
-  std::vector<Ogre::ManualObject*> manual_objects_;
+  // ---- Rendering (optimized: single object) ----
+  Ogre::ManualObject* manual_object_{nullptr};
 
-  // Helpers
+  // ---- Data caching for fast recoloring ----
+  ugv_nav4d_ros2::msg::MLSMap::ConstSharedPtr last_msg_;
+  std::vector<float> cached_metrics_;
+
+  // ---- Internal rendering pipeline ----
+  void rebuildGeometry(const ugv_nav4d_ros2::msg::MLSMap& msg);
+
+  // ---- Helpers ----
   float metricForPatch(const ugv_nav4d_ros2::msg::MLSPatch& p) const;
   static float safeNormalize(float v, float vmin, float vmax);
   Ogre::ColourValue mapToColor(float t) const;
