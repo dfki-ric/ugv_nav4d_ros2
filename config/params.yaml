@@ -65,6 +65,7 @@ ugv_nav4d_ros2:
     robotSizeY: 0.8
     slopeMetric: :NONE
     slopeMetricScale: 1.0
+    obstacleInflationMultiplier: 0.3
     #Trajectory Extension:
     extend_trajectory: true
     extension_distance: 2.0 # in meters
