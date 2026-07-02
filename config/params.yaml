@@ -5,6 +5,8 @@ ugv_nav4d_ros2:
     mls_file_type: "bin" #Options: bin, ply
     mls_file_path: '/path/to/my_map.bin'
     mls_gap_size: 0.1
+    ply_downsample_leaf_size: 0.0 # voxel leaf size (m) for PLY downsampling; 0 = disabled
+    robot_frame: arter/base_link
     robot_frame: husky/base_link
     world_frame: map
     grid_resolution: 0.5

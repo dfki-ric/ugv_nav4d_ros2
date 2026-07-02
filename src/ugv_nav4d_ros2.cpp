@@ -5,6 +5,7 @@
 #include <pcl/common/common.h>
 #include <pcl/common/transforms.h>
 #include <pcl/filters/filter.h> // For removeNaNFromPointCloud
+#include <pcl/filters/voxel_grid.h> // For optional PLY downsampling
 
 #include <boost/archive/binary_oarchive.hpp>
 #include <boost/archive/binary_iarchive.hpp>
@@ -402,7 +403,23 @@ bool PathPlannerNode::loadPlyAsMLS(const std::string& path){
             pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
             box_filter.setInputCloud(cloud);
             box_filter.filter(*cloud_filtered);
-    
+
+            // Optional voxel-grid downsampling of the raw cloud (0 = disabled). Reduces load
+            // time/memory for dense PLYs; a leaf >= grid_resolution loses no map fidelity since
+            // the MLS already bins at grid_resolution.
+            const double leaf = get_parameter("ply_downsample_leaf_size").as_double();
+            if (leaf > 0.0){
+                const size_t before = cloud_filtered->size();
+                pcl::VoxelGrid<pcl::PointXYZ> voxel_grid;
+                voxel_grid.setInputCloud(cloud_filtered);
+                voxel_grid.setLeafSize(leaf, leaf, leaf);
+                pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_downsampled(new pcl::PointCloud<pcl::PointXYZ>);
+                voxel_grid.filter(*cloud_downsampled);
+                cloud_filtered = cloud_downsampled;
+                RCLCPP_INFO_STREAM(this->get_logger(), "Downsampled PLY cloud from " << before
+                                   << " to " << cloud_filtered->size() << " points (leaf " << leaf << " m).");
+            }
+
             const double mls_res = get_parameter("grid_resolution").as_double();
             
             maps::grid::MLSConfig cfg;
@@ -779,6 +796,7 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("robot_frame", "robot", param_desc);
     declare_parameter("world_frame", "map", param_desc);
     declare_parameter("mls_gap_size", 0.1, param_desc);
+    declare_parameter("ply_downsample_leaf_size", 0.0, param_desc); // 0 = no downsampling
     declare_parameter("dist_max_x", 50, param_desc);
     declare_parameter("dist_min_x", -50, param_desc);
     declare_parameter("dist_max_y", 50, param_desc);
