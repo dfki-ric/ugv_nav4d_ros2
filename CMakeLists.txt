@@ -7,6 +7,9 @@ set(ugv_nav4d_ros2_PATCH_VERSION 0)
 set(ugv_nav4d_ros2_VERSION
   ${ugv_nav4d_ros2_MAJOR_VERSION}.${ugv_nav4d_ros2_MINOR_VERSION}.${ugv_nav4d_ros2_PATCH_VERSION})
 
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
@@ -17,6 +20,18 @@ find_package(Boost REQUIRED COMPONENTS system filesystem serialization)
 find_package(rosidl_default_generators REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ugv_nav4d REQUIRED IMPORTED_TARGET ugv_nav4d)
+pkg_check_modules(ugv_nav4d_gui REQUIRED IMPORTED_TARGET ugv_nav4d_gui-qt5)
+
+# Strip conflicting C++ standard flags exported by the Rock dependencies
+foreach(pkg_target IN ITEMS PkgConfig::ugv_nav4d PkgConfig::ugv_nav4d_gui)
+  if (TARGET ${pkg_target})
+    get_target_property(pkg_opts ${pkg_target} INTERFACE_COMPILE_OPTIONS)
+    if (pkg_opts)
+      list(REMOVE_ITEM pkg_opts "-std=c++11" "-std=c++14" "-std=gnu++11" "-std=gnu++14")
+      set_target_properties(${pkg_target} PROPERTIES INTERFACE_COMPILE_OPTIONS "${pkg_opts}")
+    endif()
+  endif()
+endforeach()
 
 set(THIS_PACKAGE_INCLUDE_DEPENDS
   ament_cmake
@@ -104,6 +119,26 @@ target_link_libraries(ugv_nav4d_ros2_node PRIVATE
   ${PROJECT_NAME}
 )
 
+add_executable(ugv_nav4d_ros2_gui_node
+	src/ugv_nav4d_ros2_gui_node.cpp
+)
+
+target_link_libraries(ugv_nav4d_ros2_gui_node
+  ${PROJECT_NAME}
+  PkgConfig::ugv_nav4d_gui
+  Qt5::Core
+  Qt5::Widgets
+)
+
+ament_target_dependencies(ugv_nav4d_ros2_gui_node ${THIS_PACKAGE_INCLUDE_DEPENDS})
+
+set_target_properties(ugv_nav4d_ros2_gui_node PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON
+)
+
+target_compile_options(ugv_nav4d_ros2_gui_node PRIVATE -std=c++17)
+
 install(TARGETS ${PROJECT_NAME}
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -120,6 +155,10 @@ install(TARGETS ugv_nav4d_ros2_mls_map_plugin
   RUNTIME DESTINATION bin)
 
 install(TARGETS ugv_nav4d_ros2_node 
+	DESTINATION lib/${PROJECT_NAME}
+)
+
+install(TARGETS ugv_nav4d_ros2_gui_node 
 	DESTINATION lib/${PROJECT_NAME}
 )
 

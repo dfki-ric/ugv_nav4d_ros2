@@ -10,6 +10,7 @@
 #include <boost/archive/binary_iarchive.hpp>
 
 #include <fstream>
+#include <cmath>
 
 using namespace rclcpp;
 
@@ -41,44 +42,10 @@ PathPlannerNode::PathPlannerNode()
     mls_min_x = get_parameter("dist_min_x").as_int();
     mls_min_y = get_parameter("dist_min_y").as_int();
 
-    extend_trajectory = get_parameter("extend_trajectory").as_bool();    
+    extend_trajectory = get_parameter("extend_trajectory").as_bool();
     extension_distance = get_parameter("extension_distance").as_double();
 
-    if (get_parameter("load_mls_from_file").as_bool()){
-        const std::string mls_file_path = get_parameter("mls_file_path").as_string();
-        const std::string mls_file_type = get_parameter("mls_file_type").as_string();
-
-        if (mls_file_type == "ply"){        
-            if (loadPlyAsMLS(mls_file_path)){
-                got_map = true;
-                RCLCPP_INFO_STREAM(this->get_logger(), "Loaded map from PLY.");
-            }
-        }
-        else if (mls_file_type == "bin"){  
-            if(loadMLSMapFromBin(mls_file_path)){
-                got_map = true;
-                RCLCPP_INFO_STREAM(this->get_logger(), "Loaded map from BIN.");
-            }
-        }
-        else{
-            throw std::runtime_error("Invalid MLS File Type: "+ mls_file_type);
-        }
-    }
-    else{
-        const double mls_res = get_parameter("grid_resolution").as_double();
-        const double dist_max_x = get_parameter("dist_max_x").as_int();
-        const double dist_max_y = get_parameter("dist_max_y").as_int();
-        const double dist_min_x = get_parameter("dist_min_x").as_int();
-        const double dist_min_y = get_parameter("dist_min_y").as_int();
-        const double grid_size_x = (dist_max_x - dist_min_x)/mls_res;
-        const double grid_size_y = (dist_max_y - dist_min_y)/mls_res;
-
-        maps::grid::MLSConfig cfg;
-        cfg.gapSize = get_parameter("mls_gap_size").as_double();
-        const maps::grid::Vector2ui numCells(grid_size_x, grid_size_y);
-        mls_map_ptr = std::make_shared<maps::grid::MLSMapSloped>(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
-        mls_map_ptr->translate(Eigen::Vector3d(mls_min_x, mls_min_y, 0));
-    }
+    initializeMLSMap();
 
     combined_path_publisher = this->create_publisher<nav_msgs::msg::Path>("/ugv_nav4d_ros2/path", 10);
     labeled_path_publisher = this->create_publisher<ugv_nav4d_ros2::msg::LabeledPathArray>("/ugv_nav4d_ros2/labeled_path_segments", 10);
@@ -121,6 +88,12 @@ void PathPlannerNode::setupSubscriptions()
         std::bind(&PathPlannerNode::parameterUpdateTimerCallback, this)  // Callback function
     );
 
+    // Periodically push the robot start pose (TF / topic) so a GUI can track it continuously.
+    pose_update_timer = this->create_wall_timer(
+        std::chrono::milliseconds(100),
+        std::bind(&PathPlannerNode::poseUpdateTimerCallback, this)
+    );
+
     if (!get_parameter("load_mls_from_file").as_bool()){
         cloud_subscription = this->create_subscription<sensor_msgs::msg::PointCloud2>(
                 "/ugv_nav4d_ros2/pointcloud", 10,
@@ -129,12 +102,35 @@ void PathPlannerNode::setupSubscriptions()
 }
 
 void PathPlannerNode::parameterUpdateTimerCallback(){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    // parameters_to_update is only used as a "dirty" flag: the values were already applied
+    // by the framework when set. Re-setting them here would re-enter parametersCallback and
+    // mutate this vector mid-iteration, so we only reconfigure.
     if (!parameters_to_update.empty())
     {
-        this->set_parameters(parameters_to_update);
         parameters_to_update.clear();
+        RCLCPP_INFO(this->get_logger(), "Parameters changed; reconfiguring planner.");
         configurePlanner();
     }
+}
+
+void PathPlannerNode::poseUpdateTimerCallback(){
+    if (!pose_update_callback){
+        return;
+    }
+
+    base::Pose pose;
+    {
+        std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+        // In topic mode the pose is kept current by readStartPose(); otherwise refresh from TF.
+        if (!get_parameter("read_pose_from_topic").as_bool()){
+            if (!updatePoseFromTF()){
+                return; // no transform available yet; skip this tick (no log spam)
+            }
+        }
+        pose = getStartPose();
+    }
+    pose_update_callback(pose);
 }
 
 rcl_interfaces::msg::SetParametersResult PathPlannerNode::parametersCallback(const std::vector<rclcpp::Parameter> &parameters){
@@ -146,7 +142,6 @@ rcl_interfaces::msg::SetParametersResult PathPlannerNode::parametersCallback(con
     {
         if (this->has_parameter(param.get_name()))
         {
-            RCLCPP_INFO(this->get_logger(), "Parameter '%s' changed.", param.get_name().c_str());
             if (param.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER)
             {
                 parameters_to_update.push_back(rclcpp::Parameter(param.get_name(), param.as_int()));
@@ -159,12 +154,16 @@ rcl_interfaces::msg::SetParametersResult PathPlannerNode::parametersCallback(con
             {
                 parameters_to_update.push_back(rclcpp::Parameter(param.get_name(), param.as_double()));
             }
+            else if (param.get_type() == rclcpp::ParameterType::PARAMETER_BOOL)
+            {
+                parameters_to_update.push_back(rclcpp::Parameter(param.get_name(), param.as_bool()));
+            }
         }
         else
         {
-            RCLCPP_WARN(this->get_logger(), "Parameter '%s' is not declared in the node.", param.get_name().c_str());
-            result.successful = false;
-            result.reason = "Parameter not found.";
+            // Skip the unknown parameter but do not fail the whole batch, otherwise one bad
+            // name would cause every other (valid) change in the same set to be rejected.
+            RCLCPP_WARN(this->get_logger(), "Ignoring unknown parameter '%s'.", param.get_name().c_str());
         }
     }
 
@@ -201,6 +200,7 @@ void PathPlannerNode::mapPublishCallback(
 
 void PathPlannerNode::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
 {
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
     latest_pointcloud = msg;
     got_map = generateMLS();
 
@@ -248,6 +248,9 @@ void PathPlannerNode::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedP
             auto travMap = traversability_generator_ptr->getTraversabilityMap();
             planner_ptr->updateMap(travMap);
             RCLCPP_INFO(this->get_logger(), "Planner state: Ready");
+            if (map_update_callback) {
+                map_update_callback();
+            }
         }
         else{
             RCLCPP_INFO(this->get_logger(), "Map not loaded because planner is in state: Planning");
@@ -276,6 +279,7 @@ bool PathPlannerNode::updatePoseFromTF(){
 }
 
 void PathPlannerNode::processGoalRequest(const geometry_msgs::msg::PoseStamped::SharedPtr msg){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
     if (!is_configured){
         configurePlanner();
     }
@@ -319,8 +323,64 @@ void PathPlannerNode::readStartPose(const geometry_msgs::msg::PoseStamped::Share
     start_pose.pose.orientation.z = msg->pose.orientation.z;
 }
 
+void PathPlannerNode::initializeMLSMap(){
+    // (Re)create the MLS map from the current parameters. Called at startup and whenever
+    // grid_resolution changes. Recreating the map discards any previously accumulated data.
+    initial_patch_added = false;
+    current_grid_resolution = get_parameter("grid_resolution").as_double();
+
+    if (get_parameter("load_mls_from_file").as_bool()){
+        const std::string mls_file_path = get_parameter("mls_file_path").as_string();
+        const std::string mls_file_type = get_parameter("mls_file_type").as_string();
+
+        if (mls_file_type == "ply"){
+            if (loadPlyAsMLS(mls_file_path)){
+                got_map = true;
+                RCLCPP_INFO_STREAM(this->get_logger(), "Loaded map from PLY.");
+            }
+        }
+        else if (mls_file_type == "bin"){
+            // A .bin map has its resolution baked in; grid_resolution cannot change it.
+            if(loadMLSMapFromBin(mls_file_path)){
+                got_map = true;
+                RCLCPP_INFO_STREAM(this->get_logger(), "Loaded map from BIN.");
+                if (mls_map_ptr){
+                    const double loaded_res = mls_map_ptr->getResolution().x();
+                    if (std::abs(loaded_res - current_grid_resolution) > 1e-9){
+                        RCLCPP_WARN_STREAM(this->get_logger(), "grid_resolution ("
+                            << current_grid_resolution << ") ignored for .bin map; using the map's baked-in resolution ("
+                            << loaded_res << ").");
+                        // Track the actual resolution so we don't repeatedly try to recreate the map.
+                        current_grid_resolution = loaded_res;
+                    }
+                }
+            }
+        }
+        else{
+            throw std::runtime_error("Invalid MLS File Type: "+ mls_file_type);
+        }
+    }
+    else{
+        const double mls_res = current_grid_resolution;
+        const double dist_max_x = get_parameter("dist_max_x").as_int();
+        const double dist_max_y = get_parameter("dist_max_y").as_int();
+        const double dist_min_x = get_parameter("dist_min_x").as_int();
+        const double dist_min_y = get_parameter("dist_min_y").as_int();
+        const double grid_size_x = (dist_max_x - dist_min_x)/mls_res;
+        const double grid_size_y = (dist_max_y - dist_min_y)/mls_res;
+
+        maps::grid::MLSConfig cfg;
+        cfg.gapSize = get_parameter("mls_gap_size").as_double();
+        const maps::grid::Vector2ui numCells(grid_size_x, grid_size_y);
+        mls_map_ptr = std::make_shared<maps::grid::MLSMapSloped>(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
+        mls_map_ptr->translate(Eigen::Vector3d(mls_min_x, mls_min_y, 0));
+        // Fresh empty grid: any point cloud data accumulated at the old resolution is gone.
+        got_map = false;
+    }
+}
+
 bool PathPlannerNode::loadPlyAsMLS(const std::string& path){
-    std::ifstream fileIn(path);       
+    std::ifstream fileIn(path);
     if(path.find(".ply") != std::string::npos)
     {
         cloud = pcl::PointCloud<pcl::PointXYZ>::Ptr(new pcl::PointCloud<pcl::PointXYZ>());
@@ -416,9 +476,13 @@ bool PathPlannerNode::saveMLSMapAsBin(const std::string& filename = "") {
         return false;
     }
 
-    // Create a binary archive
-    boost::archive::binary_oarchive archive(binFile);
-    archive << *mls_map_ptr;
+    // Create a binary archive. Lock while serializing the map, since the save action runs on
+    // its own thread and the MLS map may be rebuilt concurrently by the executor thread.
+    {
+        std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+        boost::archive::binary_oarchive archive(binFile);
+        archive << *mls_map_ptr;
+    }
 
     RCLCPP_INFO_STREAM(this->get_logger(), "MLS Map saved to " << fileToUse);
     return true;
@@ -483,20 +547,30 @@ void PathPlannerNode::actionSaveMapAccepted(const std::shared_ptr<rclcpp_action:
 }
 
 void PathPlannerNode::plan(){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
 
     std::vector<trajectory_follower::SubTrajectory> trajectory2D, trajectory3D;
     base::Time time;
-    time.microseconds = get_parameter("planningTime").as_int();
+    time.microseconds = (int64_t)(planner_config.maxTime * 1e6);
 
     bool dumpOnError = get_parameter("dumpOnError").as_bool();
     bool dumpOnSuccess = get_parameter("dumpOnSuccess").as_bool();
 
     RCLCPP_INFO_STREAM(this->get_logger(), "Planner state: Planning");
+    // RAII guard: always clears is_planning, even if planner_ptr->plan() throws.
     is_planning = true;
+    struct PlanningFlagGuard {
+        std::atomic<bool>& flag;
+        ~PlanningFlagGuard() { flag = false; }
+    } planning_flag_guard{is_planning};
+
     RCLCPP_INFO_STREAM(this->get_logger(), "Start is  " << start_pose_rbs.position.transpose());
     RCLCPP_INFO_STREAM(this->get_logger(), "Goal is  " << goal_pose_rbs.position.transpose());
     ugv_nav4d::Planner::PLANNING_RESULT res = planner_ptr->plan(time, start_pose_rbs, goal_pose_rbs, trajectory2D, trajectory3D, dumpOnError, dumpOnSuccess);
-    is_planning = false;
+
+    latest_trajectory2D = trajectory2D;
+    latest_trajectory3D = trajectory3D;
+    latest_planning_result = res;
 
     switch(res)
     {
@@ -545,7 +619,11 @@ void PathPlannerNode::plan(){
             } else if (trajectory.driveMode == trajectory_follower::DriveMode::ModeSideways) {
                 label = "Lateral";
             } else {
-                throw std::runtime_error("Invalid DriveMode: " + std::to_string(trajectory.driveMode));
+                // Unknown drive mode: skip this segment instead of throwing (an uncaught
+                // exception here would abort the whole process).
+                RCLCPP_WARN_STREAM(this->get_logger(), "Skipping segment with invalid DriveMode: "
+                                   << std::to_string(trajectory.driveMode));
+                continue;
             }
 
             // If this is a new segment (first or label changed), start a new path_segment
@@ -562,10 +640,14 @@ void PathPlannerNode::plan(){
             }
 
             // Sample spline and add poses to current segment
-            const double stepDist = get_parameter("spline_resolution_distance").as_double();
+            const double stepDist = get_parameter("spline_sampling_resolution").as_double();
             std::vector<double> parameters;
             const std::vector<base::geometry::Spline3::vector_t> points = trajectory.posSpline.sample(stepDist, &parameters);
-            assert(parameters.size() == points.size());
+            if (parameters.size() != points.size()) {
+                // Should never happen; log instead of relying on assert (compiled out in release).
+                RCLCPP_WARN_STREAM(this->get_logger(), "Spline sample size mismatch: "
+                                   << parameters.size() << " params vs " << points.size() << " points.");
+            }
             for (size_t i = 0; i < parameters.size(); ++i) {
                 const double param = parameters[i];
 
@@ -673,11 +755,16 @@ void PathPlannerNode::plan(){
             labeled_path_message.paths.push_back(path_segment);
             labeled_path_message.labels.push_back(label_last);
         }
-
-        combined_path_publisher->publish(path);
-        labeled_path_publisher->publish(labeled_path_message);
+    }
+    else {
+        RCLCPP_WARN_STREAM(this->get_logger(), "Planning did not succeed; publishing empty path to clear any stale trajectory.");
     }
 
+    // Publish unconditionally: on failure this clears the previously published path
+    // instead of leaving a stale trajectory on the topic.
+    path.header.stamp = now;
+    combined_path_publisher->publish(path);
+    labeled_path_publisher->publish(labeled_path_message);
 }
 
 void PathPlannerNode::declareParameters(){
@@ -691,7 +778,6 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("mls_file_path", "default_value", param_desc);
     declare_parameter("robot_frame", "robot", param_desc);
     declare_parameter("world_frame", "map", param_desc);
-    declare_parameter("grid_resolution", 0.3, param_desc);
     declare_parameter("mls_gap_size", 0.1, param_desc);
     declare_parameter("dist_max_x", 50, param_desc);
     declare_parameter("dist_min_x", -50, param_desc);
@@ -703,6 +789,7 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("dumpOnError", false);
     declare_parameter("dumpOnSuccess", false);
     declare_parameter("initialPatchRadius", 3.0);
+    declare_parameter("grid_resolution", 0.3);
     declare_parameter("maxMotionCurveLength", 100.0);
     declare_parameter("minTurningRadius", 1.0);
     declare_parameter("multiplierBackward", 3.0);
@@ -716,13 +803,20 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("searchProgressSteps", 0.1);
     declare_parameter("searchRadius", 1.0);
     declare_parameter("translationSpeed", 1.0);
-    declare_parameter("spline_resolution_distance", 0.05);
+    declare_parameter("spline_sampling_resolution", 0.05);
     declare_parameter("remove_goal_offset", false);
+    declare_parameter("curvaturePenaltyWeight", 0.0);
+    declare_parameter("angularCostWeight", 1.0);
 
     declare_parameter("epsilonSteps", 2);
     declare_parameter("initialEpsilon", 64);
     declare_parameter("numThreads", 8);
-    declare_parameter("planningTime", 5000000); // microseconds
+    declare_parameter("usePathStatistics", false);
+    declare_parameter("searchUntilFirstSolution", false);
+    declare_parameter("corridorWidth", 3.5);
+    declare_parameter("maxTime", 5.0);
+    declare_parameter("goalOrientationMargin", 0.0);
+    declare_parameter("goalDistanceMargin", 0.0);
 
     declare_parameter("cellSkipFactor", 0.1);
     declare_parameter("destinationCircleRadius", 6);
@@ -735,7 +829,7 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("splineOrder", 4);
 
     declare_parameter("allowForwardDownhill", true);
-    declare_parameter("enableInclineLimitting", true);
+    declare_parameter("enableInclineLimitting", false);
     declare_parameter("inclineLimittingLimit", 0.1);
     declare_parameter("inclineLimittingMinSlope", 0.2);
     declare_parameter("costFunctionDist", 0.0);
@@ -747,9 +841,10 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("robotHeight", 1.7);
     declare_parameter("robotSizeX", 0.80);
     declare_parameter("robotSizeY", 0.80);
-    //declare_parameter("slopeMetric", :NONE);
-    declare_parameter("slopeMetricScale", 1.0);    
+    declare_parameter("slopeMetric", "NONE"); // Options: NONE, AVG_SLOPE, MAX_SLOPE, TRIANGLE_SLOPE
+    declare_parameter("slopeMetricScale", 1.0);
     declare_parameter("obstacleInflationMultiplier", 1.0);
+    declare_parameter("partiallyTraversableMultiplier", 2.0);
     declare_parameter("extend_trajectory", false);    
     declare_parameter("extension_distance", 0.0);    
 }
@@ -777,8 +872,10 @@ void PathPlannerNode::updateParameters(){
     mobility_config.multiplierBackwardTurn                = get_parameter("multiplierBackwardTurn").as_double();
     mobility_config.multiplierForwardTurn                 = get_parameter("multiplierForwardTurn").as_double();
     mobility_config.multiplierPointTurn                   = get_parameter("multiplierPointTurn").as_double();
-    mobility_config.spline_sampling_resolution            = get_parameter("spline_resolution_distance").as_double();
+    mobility_config.spline_sampling_resolution            = get_parameter("spline_sampling_resolution").as_double();
     mobility_config.remove_goal_offset                    = get_parameter("remove_goal_offset").as_bool();
+    mobility_config.curvaturePenaltyWeight                = get_parameter("curvaturePenaltyWeight").as_double();
+    mobility_config.angularCostWeight                     = get_parameter("angularCostWeight").as_double();
 
     traversability_config.gridResolution            = get_parameter("grid_resolution").as_double();
     traversability_config.maxSlope                  = get_parameter("maxSlope").as_double();
@@ -787,22 +884,130 @@ void PathPlannerNode::updateParameters(){
     traversability_config.robotSizeY                = get_parameter("robotSizeY").as_double();
     traversability_config.robotHeight               = get_parameter("robotHeight").as_double();
     traversability_config.slopeMetricScale          = get_parameter("slopeMetricScale").as_double();
-    //TODO: How can an enum be used in the parameter config? (Probably Int to Enum cast works)
-    traversability_config.slopeMetric = traversability_generator3d::SlopeMetric::NONE;
+    const std::string slope_metric = get_parameter("slopeMetric").as_string();
+    if (slope_metric == "AVG_SLOPE")
+        traversability_config.slopeMetric = traversability_generator3d::SlopeMetric::AVG_SLOPE;
+    else if (slope_metric == "MAX_SLOPE")
+        traversability_config.slopeMetric = traversability_generator3d::SlopeMetric::MAX_SLOPE;
+    else if (slope_metric == "TRIANGLE_SLOPE")
+        traversability_config.slopeMetric = traversability_generator3d::SlopeMetric::TRIANGLE_SLOPE;
+    else
+        traversability_config.slopeMetric = traversability_generator3d::SlopeMetric::NONE;
     traversability_config.inclineLimittingMinSlope  = get_parameter("inclineLimittingMinSlope").as_double(); 
     traversability_config.inclineLimittingLimit     = get_parameter("inclineLimittingLimit").as_double();
     traversability_config.costFunctionDist          = get_parameter("costFunctionDist").as_double();
     traversability_config.distToGround              = get_parameter("distToGround").as_double();
     traversability_config.minTraversablePercentage  = get_parameter("minTraversablePercentage").as_double();
     traversability_config.allowForwardDownhill      = get_parameter("allowForwardDownhill").as_bool();
+    traversability_config.enableInclineLimitting    = get_parameter("enableInclineLimitting").as_bool();
     traversability_config.obstacleInflationMultiplier = get_parameter("obstacleInflationMultiplier").as_double();
+    traversability_config.partiallyTraversableMultiplier = get_parameter("partiallyTraversableMultiplier").as_double();
 
     planner_config.epsilonSteps                     = get_parameter("epsilonSteps").as_int();
     planner_config.initialEpsilon                   = get_parameter("initialEpsilon").as_int();
-    planner_config.numThreads                       = get_parameter("numThreads").as_int(); 
+    planner_config.numThreads                       = get_parameter("numThreads").as_int();
+    planner_config.usePathStatistics                = get_parameter("usePathStatistics").as_bool();
+    planner_config.searchUntilFirstSolution         = get_parameter("searchUntilFirstSolution").as_bool();
+    planner_config.corridorWidth                    = get_parameter("corridorWidth").as_double();
+    planner_config.goalOrientationMargin            = get_parameter("goalOrientationMargin").as_double();
+    planner_config.goalDistanceMargin               = get_parameter("goalDistanceMargin").as_double();
+    planner_config.maxTime                          = get_parameter("maxTime").as_double();
+}
+
+void PathPlannerNode::updateParametersFromConfigs(
+    const sbpl_spline_primitives::SplinePrimitivesConfig& spline,
+    const ugv_nav4d::Mobility& mobility,
+    const traversability_generator3d::TraversabilityConfig& trav,
+    const ugv_nav4d::PlannerConfig& planner)
+{
+    // Map slopeMetric enum -> string for the parameter server.
+    std::string slope_metric;
+    switch (trav.slopeMetric)
+    {
+        case traversability_generator3d::SlopeMetric::AVG_SLOPE:      slope_metric = "AVG_SLOPE"; break;
+        case traversability_generator3d::SlopeMetric::MAX_SLOPE:      slope_metric = "MAX_SLOPE"; break;
+        case traversability_generator3d::SlopeMetric::TRIANGLE_SLOPE: slope_metric = "TRIANGLE_SLOPE"; break;
+        default:                                                      slope_metric = "NONE"; break;
+    }
+
+    std::vector<rclcpp::Parameter> params = {
+        // Shared grid resolution (spline.gridSize == trav.gridResolution)
+        rclcpp::Parameter("grid_resolution", trav.gridResolution),
+        // Spline primitives
+        rclcpp::Parameter("numAngles", spline.numAngles),
+        rclcpp::Parameter("numEndAngles", spline.numEndAngles),
+        rclcpp::Parameter("destinationCircleRadius", spline.destinationCircleRadius),
+        rclcpp::Parameter("cellSkipFactor", spline.cellSkipFactor),
+        rclcpp::Parameter("generateForwardMotions", spline.generateForwardMotions),
+        rclcpp::Parameter("generatePointTurnMotions", spline.generatePointTurnMotions),
+        rclcpp::Parameter("generateLateralMotions", spline.generateLateralMotions),
+        rclcpp::Parameter("generateBackwardMotions", spline.generateBackwardMotions),
+        rclcpp::Parameter("splineOrder", spline.splineOrder),
+        // Mobility (multipliers are declared as doubles on the parameter server)
+        rclcpp::Parameter("translationSpeed", mobility.translationSpeed),
+        rclcpp::Parameter("rotationSpeed", mobility.rotationSpeed),
+        rclcpp::Parameter("minTurningRadius", mobility.minTurningRadius),
+        rclcpp::Parameter("searchRadius", mobility.searchRadius),
+        rclcpp::Parameter("searchProgressSteps", mobility.searchProgressSteps),
+        rclcpp::Parameter("multiplierForward", (double)mobility.multiplierForward),
+        rclcpp::Parameter("multiplierBackward", (double)mobility.multiplierBackward),
+        rclcpp::Parameter("multiplierLateral", (double)mobility.multiplierLateral),
+        rclcpp::Parameter("multiplierForwardTurn", (double)mobility.multiplierForwardTurn),
+        rclcpp::Parameter("multiplierBackwardTurn", (double)mobility.multiplierBackwardTurn),
+        rclcpp::Parameter("multiplierPointTurn", (double)mobility.multiplierPointTurn),
+        rclcpp::Parameter("multiplierLateralCurve", (double)mobility.multiplierLateralCurve),
+        rclcpp::Parameter("maxMotionCurveLength", mobility.maxMotionCurveLength),
+        rclcpp::Parameter("spline_sampling_resolution", mobility.spline_sampling_resolution),
+        rclcpp::Parameter("remove_goal_offset", mobility.remove_goal_offset),
+        rclcpp::Parameter("curvaturePenaltyWeight", mobility.curvaturePenaltyWeight),
+        rclcpp::Parameter("angularCostWeight", mobility.angularCostWeight),
+        // Traversability
+        rclcpp::Parameter("maxSlope", trav.maxSlope),
+        rclcpp::Parameter("maxStepHeight", trav.maxStepHeight),
+        rclcpp::Parameter("robotSizeX", trav.robotSizeX),
+        rclcpp::Parameter("robotSizeY", trav.robotSizeY),
+        rclcpp::Parameter("robotHeight", trav.robotHeight),
+        rclcpp::Parameter("slopeMetricScale", trav.slopeMetricScale),
+        rclcpp::Parameter("slopeMetric", slope_metric),
+        rclcpp::Parameter("inclineLimittingMinSlope", trav.inclineLimittingMinSlope),
+        rclcpp::Parameter("inclineLimittingLimit", trav.inclineLimittingLimit),
+        rclcpp::Parameter("costFunctionDist", trav.costFunctionDist),
+        rclcpp::Parameter("distToGround", trav.distToGround),
+        rclcpp::Parameter("minTraversablePercentage", trav.minTraversablePercentage),
+        rclcpp::Parameter("allowForwardDownhill", trav.allowForwardDownhill),
+        rclcpp::Parameter("enableInclineLimitting", trav.enableInclineLimitting),
+        rclcpp::Parameter("obstacleInflationMultiplier", trav.obstacleInflationMultiplier),
+        rclcpp::Parameter("partiallyTraversableMultiplier", trav.partiallyTraversableMultiplier),
+        // Planner (epsilonSteps/initialEpsilon/numThreads are declared as ints)
+        rclcpp::Parameter("epsilonSteps", (int)planner.epsilonSteps),
+        rclcpp::Parameter("initialEpsilon", (int)planner.initialEpsilon),
+        rclcpp::Parameter("numThreads", (int)planner.numThreads),
+        rclcpp::Parameter("usePathStatistics", planner.usePathStatistics),
+        rclcpp::Parameter("searchUntilFirstSolution", planner.searchUntilFirstSolution),
+        rclcpp::Parameter("corridorWidth", planner.corridorWidth),
+        rclcpp::Parameter("maxTime", planner.maxTime),
+        rclcpp::Parameter("goalOrientationMargin", planner.goalOrientationMargin),
+        rclcpp::Parameter("goalDistanceMargin", planner.goalDistanceMargin),
+    };
+
+    // Setting the parameters triggers parametersCallback(), which queues them so the
+    // parameterUpdateTimerCallback() rebuilds the planner via configurePlanner().
+    set_parameters(params);
+    RCLCPP_INFO(this->get_logger(), "Applied %zu parameters from GUI; planner will reconfigure.", params.size());
 }
 
 void PathPlannerNode::configurePlanner(){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    // If the grid resolution changed, the MLS map must be recreated at the new resolution
+    // before the traversability map and planner are rebuilt below.
+    const double requested_res = get_parameter("grid_resolution").as_double();
+    if (std::abs(requested_res - current_grid_resolution) > 1e-9){
+        RCLCPP_INFO_STREAM(this->get_logger(), "grid_resolution changed ("
+                           << current_grid_resolution << " -> " << requested_res
+                           << "); recreating MLS map.");
+        initializeMLSMap();
+    }
+
     updateParameters();
     planner_ptr.reset(new ugv_nav4d::Planner(spline_primitive_config, traversability_config, mobility_config, planner_config));
     traversability_generator_ptr.reset(new traversability_generator3d::TraversabilityGenerator3d(traversability_config));
@@ -818,15 +1023,16 @@ void PathPlannerNode::configurePlanner(){
         }
 
         RCLCPP_INFO(this->get_logger(), "Planner state: Loading last known map");
+        if (status_callback) { status_callback("Loading map..."); }
         traversability_generator_ptr->setMLSGrid(mls_map_ptr);
 
         Eigen::Affine3d body2MLS;
         body2MLS.translation() << start_pose.pose.position.x, start_pose.pose.position.y, start_pose.pose.position.z;
-        Eigen::Quaterniond quat(start_pose.pose.orientation.w, 
-                                start_pose.pose.orientation.x, 
-                                start_pose.pose.orientation.y, 
+        Eigen::Quaterniond quat(start_pose.pose.orientation.w,
+                                start_pose.pose.orientation.x,
+                                start_pose.pose.orientation.y,
                                 start_pose.pose.orientation.z);
-        body2MLS.linear() = quat.toRotationMatrix(); 
+        body2MLS.linear() = quat.toRotationMatrix();
         Eigen::Affine3d body2Ground(Eigen::Affine3d::Identity());
         body2Ground.translation() = Eigen::Vector3d(0, 0, -get_parameter("distToGround").as_double());
         Eigen::Affine3d ground2Mls(body2MLS * body2Ground);
@@ -836,10 +1042,15 @@ void PathPlannerNode::configurePlanner(){
         auto travMap = traversability_generator_ptr->getTraversabilityMap();
         planner_ptr->updateMap(travMap);
         RCLCPP_INFO(this->get_logger(), "Planner state: Ready");
+        if (status_callback) { status_callback("Ready"); }
+        if (map_update_callback) {
+            map_update_callback();
+        }
     }
 }
 
 bool PathPlannerNode::publishMaps(){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
     if (!is_configured){
         configurePlanner();
     }
@@ -1010,4 +1221,42 @@ bool PathPlannerNode::publishTravMap(){
     trav_map_publisher->publish(map_msg);
     return true;
 }
+
+void PathPlannerNode::triggerPlanningFromGUI(const base::Pose& /*start*/, const base::Pose& goal)
+{
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    if (!is_configured){
+        configurePlanner();
+    }
+
+    if (!got_map){
+        RCLCPP_WARN_STREAM(this->get_logger(), "Unable to process planning request because planner is in state NO_MAP!");
+        return;
+    }
+
+    if (is_planning){
+        RCLCPP_WARN_STREAM(this->get_logger(), "Unable to process planning request because planner is in state PLANNING!");
+        return;
+    }
+
+    // The start pose always comes from the ROS node (robot's actual pose), not the GUI:
+    // from TF, or from the /start_pose topic when read_pose_from_topic is set. Only the
+    // goal is taken from the GUI.
+    if (!get_parameter("read_pose_from_topic").as_bool())
+    {
+        if (!updatePoseFromTF()){
+            RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to read start pose of the robot from TF!");
+            return;
+        }
+    }
+
+    start_pose_rbs.position = Eigen::Vector3d(start_pose.pose.position.x, start_pose.pose.position.y, start_pose.pose.position.z);
+    start_pose_rbs.orientation = Eigen::Quaterniond(start_pose.pose.orientation.w, start_pose.pose.orientation.x, start_pose.pose.orientation.y, start_pose.pose.orientation.z);
+
+    goal_pose_rbs.position = goal.position;
+    goal_pose_rbs.orientation = goal.orientation;
+
+    plan();
 }
+
+} // namespace ugv_nav4d_ros2
