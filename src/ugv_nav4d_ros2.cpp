@@ -31,11 +31,11 @@ PathPlannerNode::PathPlannerNode()
 
     min_point.x() = get_parameter("dist_min_x").as_int();
     min_point.y() = get_parameter("dist_min_y").as_int(); 
-    min_point.z() = get_parameter("dist_min_z").as_int(); 
+    min_point.z() = get_parameter("dist_min_z").as_double();
 
     max_point.x() = get_parameter("dist_max_x").as_int();
     max_point.y() = get_parameter("dist_max_y").as_int(); 
-    max_point.z() = get_parameter("dist_max_z").as_int(); 
+    max_point.z() = get_parameter("dist_max_z").as_double();
 
     box_filter.setMin(min_point);  // Set minimum bound
     box_filter.setMax(max_point);  // Set maximum bound
@@ -801,8 +801,9 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("dist_min_x", -50, param_desc);
     declare_parameter("dist_max_y", 50, param_desc);
     declare_parameter("dist_min_y", -50, param_desc);
-    declare_parameter("dist_max_z", 50, param_desc);
-    declare_parameter("dist_min_z", -50, param_desc);
+    // Height (Z) crop bounds are doubles to allow sub-meter height filtering of the input cloud.
+    declare_parameter("dist_max_z", 50.0, param_desc);
+    declare_parameter("dist_min_z", -50.0, param_desc);
     
     declare_parameter("dumpOnError", false);
     declare_parameter("dumpOnSuccess", false);
@@ -863,6 +864,7 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("slopeMetricScale", 1.0);
     declare_parameter("obstacleInflationMultiplier", 1.0);
     declare_parameter("partiallyTraversableMultiplier", 2.0);
+    declare_parameter("numYawSamples", 12); // yaw samples over [0,180) for partial-cell orientations
     declare_parameter("extend_trajectory", false);    
     declare_parameter("extension_distance", 0.0);    
 }
@@ -920,6 +922,7 @@ void PathPlannerNode::updateParameters(){
     traversability_config.enableInclineLimitting    = get_parameter("enableInclineLimitting").as_bool();
     traversability_config.obstacleInflationMultiplier = get_parameter("obstacleInflationMultiplier").as_double();
     traversability_config.partiallyTraversableMultiplier = get_parameter("partiallyTraversableMultiplier").as_double();
+    traversability_config.numYawSamples              = get_parameter("numYawSamples").as_int();
 
     planner_config.epsilonSteps                     = get_parameter("epsilonSteps").as_int();
     planner_config.initialEpsilon                   = get_parameter("initialEpsilon").as_int();
@@ -996,6 +999,7 @@ void PathPlannerNode::updateParametersFromConfigs(
         rclcpp::Parameter("enableInclineLimitting", trav.enableInclineLimitting),
         rclcpp::Parameter("obstacleInflationMultiplier", trav.obstacleInflationMultiplier),
         rclcpp::Parameter("partiallyTraversableMultiplier", trav.partiallyTraversableMultiplier),
+        rclcpp::Parameter("numYawSamples", trav.numYawSamples),
         // Planner (epsilonSteps/initialEpsilon/numThreads are declared as ints)
         rclcpp::Parameter("epsilonSteps", (int)planner.epsilonSteps),
         rclcpp::Parameter("initialEpsilon", (int)planner.initialEpsilon),

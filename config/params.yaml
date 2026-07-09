@@ -7,33 +7,32 @@ ugv_nav4d_ros2:
     mls_gap_size: 0.1
     ply_downsample_leaf_size: 0.0 # voxel leaf size (m) for PLY downsampling; 0 = disabled
     robot_frame: arter/base_link
-    robot_frame: husky/base_link
     world_frame: map
     grid_resolution: 0.5
     dist_max_x: 1000
     dist_min_x: -1000
     dist_max_y: 1000
     dist_min_y: -1000
-    dist_max_z: 1000
-    dist_min_z: -1000
+    dist_max_z: 1000.0  # height (Z) crop upper bound in m (double; supports sub-meter values)
+    dist_min_z: -1000.0 # height (Z) crop lower bound in m
     dumpOnError: false
     dumpOnSuccess: false
     initialPatchRadius: 3.0
     #Mobility Parameters
-    maxMotionCurveLength: 100.0
-    minTurningRadius: 0.8
-    multiplierBackward: 3.0
-    multiplierBackwardTurn: 3.0
+    maxMotionCurveLength: 10.0
+    minTurningRadius: 3.0
+    multiplierBackward: 2.0
+    multiplierBackwardTurn: 4.0
     multiplierForward: 1.0
-    multiplierForwardTurn: 2.0
+    multiplierForwardTurn: 4.0
     multiplierLateral: 4.0
     multiplierLateralCurve: 4.0
-    multiplierPointTurn: 2.0
-    rotationSpeed: 1.0
+    multiplierPointTurn: 3.0
+    rotationSpeed: 0.5
     searchProgressSteps: 0.1
     searchRadius: 1.0
-    translationSpeed: 1.0   
-    spline_sampling_resolution: 0.05
+    translationSpeed: 0.5
+    spline_sampling_resolution: 0.1
     remove_goal_offset: false
     curvaturePenaltyWeight: 3.0
     angularCostWeight: 3.0
@@ -48,33 +47,34 @@ ugv_nav4d_ros2:
     goalOrientationMargin: 1.0
     goalDistanceMargin: 0.5
     #Motion Primitive Parameters:
-    cellSkipFactor: 0.1
-    destinationCircleRadius: 6
+    cellSkipFactor: 1.0
+    destinationCircleRadius: 12
     generateBackwardMotions: true
     generateForwardMotions: true
-    generateLateralMotions: true
-    generatePointTurnMotions: true
-    numAngles: 16
-    numEndAngles: 8
+    generateLateralMotions: false
+    generatePointTurnMotions: false
+    numAngles: 42
+    numEndAngles: 21
     splineOrder: 4
     #Traversability Parameters:
     allowForwardDownhill: true
     costFunctionDist: 0.0
     distToGround: 0.0
     enableInclineLimitting: false
-    inclineLimittingLimit: 0.1
-    inclineLimittingMinSlope: 0.2
+    inclineLimittingLimit: 0.43
+    inclineLimittingMinSlope: 0.22
     initialPatchVariance: 0.0001
     maxSlope: 0.45
-    maxStepHeight: 0.25
+    maxStepHeight: 0.45
     minTraversablePercentage: 0.4
-    robotHeight: 1.0
-    robotSizeX: 1.2
-    robotSizeY: 0.8
-    slopeMetric: :NONE
+    robotHeight: 3.0
+    robotSizeX: 6.0
+    robotSizeY: 3.0
+    slopeMetric: "NONE"
     slopeMetricScale: 1.0
-    obstacleInflationMultiplier: 0.3
+    obstacleInflationMultiplier: 1.0
     partiallyTraversableMultiplier: 1.5
+    numYawSamples: 12 # yaw samples over [0,180) for partial-cell allowed orientations (12 -> 15deg step)
     #Trajectory Extension:
     extend_trajectory: true
-    extension_distance: 2.0 # in meters
+    extension_distance: 2.0
