@@ -111,6 +111,19 @@ target_link_libraries(${PROJECT_NAME}
   Qt5::Widgets
 )
 
+qt5_wrap_cpp(MOC_GOAL3D_TOOL_FILES include/ugv_nav4d_ros2_goal3d_tool/Goal3DTool.hpp)
+# Create the tool plugin library
+add_library(ugv_nav4d_ros2_goal3d_tool SHARED src/Goal3DTool.cpp ${MOC_GOAL3D_TOOL_FILES})
+ament_target_dependencies(ugv_nav4d_ros2_goal3d_tool  ${THIS_PACKAGE_INCLUDE_DEPENDS})
+target_include_directories(ugv_nav4d_ros2_goal3d_tool PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/ugv_nav4d_ros2_goal3d_tool/>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(ugv_nav4d_ros2_goal3d_tool
+  Qt5::Core
+  Qt5::Widgets
+)
+
 add_executable(ugv_nav4d_ros2_node
 	src/ugv_nav4d_ros2_node.cpp
 )
@@ -150,6 +163,11 @@ install(TARGETS ugv_nav4d_ros2_trav_map_plugin
   RUNTIME DESTINATION bin)
 
 install(TARGETS ugv_nav4d_ros2_mls_map_plugin
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+
+install(TARGETS ugv_nav4d_ros2_goal3d_tool
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)

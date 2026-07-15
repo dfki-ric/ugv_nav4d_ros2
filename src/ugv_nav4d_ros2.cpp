@@ -308,7 +308,7 @@ void PathPlannerNode::processGoalRequest(const geometry_msgs::msg::PoseStamped::
 
     goal_pose_rbs.position = Eigen::Vector3d(msg->pose.position.x, msg->pose.position.y, msg->pose.position.z);
     goal_pose_rbs.orientation = Eigen::Quaterniond(msg->pose.orientation.w, msg->pose.orientation.x, msg->pose.orientation.y, msg->pose.orientation.z);
-    
+
     plan();
 }
 
@@ -836,6 +836,11 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("maxTime", 5.0);
     declare_parameter("goalOrientationMargin", 0.0);
     declare_parameter("goalDistanceMargin", 0.0);
+    declare_parameter("useReedsSheppFinalPath", false);
+    declare_parameter("reedsSheppStepSize", 0.0); // <= 0 uses half the grid resolution
+    declare_parameter("reedsSheppMaxShortcut", 0); // <= 0 = unlimited
+    declare_parameter("useReedsSheppGoalShot", false); // requires useReedsSheppFinalPath
+    declare_parameter("reedsSheppGoalShotMaxDistance", 15.0);
 
     declare_parameter("cellSkipFactor", 0.1);
     declare_parameter("destinationCircleRadius", 6);
@@ -848,6 +853,7 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("splineOrder", 4);
 
     declare_parameter("allowForwardDownhill", true);
+    declare_parameter("articulatedSuspension", true); // if false, rigid chassis/axles model
     declare_parameter("enableInclineLimitting", false);
     declare_parameter("inclineLimittingLimit", 0.1);
     declare_parameter("inclineLimittingMinSlope", 0.2);
@@ -892,6 +898,9 @@ void PathPlannerNode::updateParameters(){
     mobility_config.multiplierBackwardTurn                = get_parameter("multiplierBackwardTurn").as_double();
     mobility_config.multiplierForwardTurn                 = get_parameter("multiplierForwardTurn").as_double();
     mobility_config.multiplierPointTurn                   = get_parameter("multiplierPointTurn").as_double();
+    mobility_config.multiplierLateralCurve                = get_parameter("multiplierLateralCurve").as_double();
+    mobility_config.searchProgressSteps                   = get_parameter("searchProgressSteps").as_double();
+    mobility_config.maxMotionCurveLength                  = get_parameter("maxMotionCurveLength").as_double();
     mobility_config.spline_sampling_resolution            = get_parameter("spline_sampling_resolution").as_double();
     mobility_config.remove_goal_offset                    = get_parameter("remove_goal_offset").as_bool();
     mobility_config.curvaturePenaltyWeight                = get_parameter("curvaturePenaltyWeight").as_double();
@@ -918,7 +927,9 @@ void PathPlannerNode::updateParameters(){
     traversability_config.costFunctionDist          = get_parameter("costFunctionDist").as_double();
     traversability_config.distToGround              = get_parameter("distToGround").as_double();
     traversability_config.minTraversablePercentage  = get_parameter("minTraversablePercentage").as_double();
+    traversability_config.initialPatchVariance      = get_parameter("initialPatchVariance").as_double();
     traversability_config.allowForwardDownhill      = get_parameter("allowForwardDownhill").as_bool();
+    traversability_config.articulatedSuspension     = get_parameter("articulatedSuspension").as_bool();
     traversability_config.enableInclineLimitting    = get_parameter("enableInclineLimitting").as_bool();
     traversability_config.obstacleInflationMultiplier = get_parameter("obstacleInflationMultiplier").as_double();
     traversability_config.partiallyTraversableMultiplier = get_parameter("partiallyTraversableMultiplier").as_double();
@@ -933,6 +944,11 @@ void PathPlannerNode::updateParameters(){
     planner_config.goalOrientationMargin            = get_parameter("goalOrientationMargin").as_double();
     planner_config.goalDistanceMargin               = get_parameter("goalDistanceMargin").as_double();
     planner_config.maxTime                          = get_parameter("maxTime").as_double();
+    planner_config.useReedsSheppFinalPath           = get_parameter("useReedsSheppFinalPath").as_bool();
+    planner_config.reedsSheppStepSize               = get_parameter("reedsSheppStepSize").as_double();
+    planner_config.reedsSheppMaxShortcut            = get_parameter("reedsSheppMaxShortcut").as_int();
+    planner_config.useReedsSheppGoalShot            = get_parameter("useReedsSheppGoalShot").as_bool();
+    planner_config.reedsSheppGoalShotMaxDistance    = get_parameter("reedsSheppGoalShotMaxDistance").as_double();
 }
 
 void PathPlannerNode::updateParametersFromConfigs(
@@ -995,7 +1011,9 @@ void PathPlannerNode::updateParametersFromConfigs(
         rclcpp::Parameter("costFunctionDist", trav.costFunctionDist),
         rclcpp::Parameter("distToGround", trav.distToGround),
         rclcpp::Parameter("minTraversablePercentage", trav.minTraversablePercentage),
+        rclcpp::Parameter("initialPatchVariance", trav.initialPatchVariance),
         rclcpp::Parameter("allowForwardDownhill", trav.allowForwardDownhill),
+        rclcpp::Parameter("articulatedSuspension", trav.articulatedSuspension),
         rclcpp::Parameter("enableInclineLimitting", trav.enableInclineLimitting),
         rclcpp::Parameter("obstacleInflationMultiplier", trav.obstacleInflationMultiplier),
         rclcpp::Parameter("partiallyTraversableMultiplier", trav.partiallyTraversableMultiplier),
@@ -1010,6 +1028,11 @@ void PathPlannerNode::updateParametersFromConfigs(
         rclcpp::Parameter("maxTime", planner.maxTime),
         rclcpp::Parameter("goalOrientationMargin", planner.goalOrientationMargin),
         rclcpp::Parameter("goalDistanceMargin", planner.goalDistanceMargin),
+        rclcpp::Parameter("useReedsSheppFinalPath", planner.useReedsSheppFinalPath),
+        rclcpp::Parameter("reedsSheppStepSize", planner.reedsSheppStepSize),
+        rclcpp::Parameter("reedsSheppMaxShortcut", planner.reedsSheppMaxShortcut),
+        rclcpp::Parameter("useReedsSheppGoalShot", planner.useReedsSheppGoalShot),
+        rclcpp::Parameter("reedsSheppGoalShotMaxDistance", planner.reedsSheppGoalShotMaxDistance),
     };
 
     // Setting the parameters triggers parametersCallback(), which queues them so the
@@ -1226,6 +1249,21 @@ bool PathPlannerNode::publishTravMap(){
                     patch_msg.color.r = 0.5;
                     patch_msg.color.g = 0.8;
                     patch_msg.color.b = 1.0;
+                    patch_msg.color.a = 1;
+                    break;
+
+                case traversability_generator3d::NodeType::PARTIALLY_TRAVERSABLE:
+                    // yellow-green, same as TravMap3dVisualization
+                    patch_msg.color.r = 0.6;
+                    patch_msg.color.g = 0.8;
+                    patch_msg.color.b = 0.0;
+                    patch_msg.color.a = 1;
+                    break;
+
+                default: // e.g. HOLE
+                    patch_msg.color.r = 0.3;
+                    patch_msg.color.g = 0.3;
+                    patch_msg.color.b = 0.3;
                     patch_msg.color.a = 1;
                     break;
             }

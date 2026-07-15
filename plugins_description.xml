@@ -17,3 +17,13 @@
     </description>
   </class>
 </library>
+
+<library path="ugv_nav4d_ros2_goal3d_tool">
+  <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_goal3d_tool::Goal3DTool"
+         base_class_type="rviz_common::Tool">
+    <description>
+      Goal tool that picks the true 3D point on the rendered MLS/traversability
+      map (instead of the z=0 ground plane) and publishes it as PoseStamped.
+    </description>
+  </class>
+</library>
