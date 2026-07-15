@@ -19,12 +19,12 @@ ugv_nav4d_ros2:
     dumpOnSuccess: false
     initialPatchRadius: 3.0
     #Mobility Parameters
-    maxMotionCurveLength: 10.0
-    minTurningRadius: 3.0
-    multiplierBackward: 2.0
+    maxMotionCurveLength: 20.0
+    minTurningRadius: 4.0
+    multiplierBackward: 4.0
     multiplierBackwardTurn: 4.0
     multiplierForward: 1.0
-    multiplierForwardTurn: 4.0
+    multiplierForwardTurn: 1.0
     multiplierLateral: 4.0
     multiplierLateralCurve: 4.0
     multiplierPointTurn: 3.0
@@ -34,7 +34,7 @@ ugv_nav4d_ros2:
     translationSpeed: 0.5
     spline_sampling_resolution: 0.1
     remove_goal_offset: false
-    curvaturePenaltyWeight: 3.0
+    curvaturePenaltyWeight: 0.5
     angularCostWeight: 3.0
     #Planner Parameters
     epsilonSteps: 2
@@ -42,8 +42,8 @@ ugv_nav4d_ros2:
     numThreads: 4
     usePathStatistics: false
     searchUntilFirstSolution: true
-    corridorWidth: 3.5
-    maxTime: 5.0
+    corridorWidth: 10.0
+    maxTime: 20.0
     goalOrientationMargin: 1.0
     goalDistanceMargin: 0.5
     # Reconstruct the final path from the solution states using Reeds-Shepp steering
@@ -57,8 +57,8 @@ ugv_nav4d_ros2:
     reedsSheppGoalShotMaxDistance: 15.0 # only attempt within this point-robot distance to goal [m]
     #Motion Primitive Parameters:
     cellSkipFactor: 1.0
-    destinationCircleRadius: 12
-    generateBackwardMotions: true
+    destinationCircleRadius: 10
+    generateBackwardMotions: false
     generateForwardMotions: true
     generateLateralMotions: false
     generatePointTurnMotions: false
@@ -77,13 +77,13 @@ ugv_nav4d_ros2:
     maxSlope: 0.45
     maxStepHeight: 0.45
     minTraversablePercentage: 0.4
-    robotHeight: 3.0
-    robotSizeX: 6.0
-    robotSizeY: 3.0
+    robotHeight: 0.5
+    robotSizeX: 1.2
+    robotSizeY: 1.2
     slopeMetric: "NONE"
     slopeMetricScale: 1.0
     obstacleInflationMultiplier: 1.0
-    partiallyTraversableMultiplier: 1.5
+    partiallyTraversableMultiplier: 1.0
     numYawSamples: 12 # yaw samples over [0,180) for partial-cell allowed orientations (12 -> 15deg step)
     #Trajectory Extension:
     extend_trajectory: true
