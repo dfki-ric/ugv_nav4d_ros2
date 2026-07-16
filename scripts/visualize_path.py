@@ -31,8 +31,13 @@ class CombinedPathArrowPublisher(Node):
         marker_array = MarkerArray()
 
         if not msg.paths:
-            self.get_logger().warn('No paths in received LabeledPathArray!')
+            # Empty message = "clear the path" (planning failed or path discarded).
+            # An empty MarkerArray would delete nothing, so send an explicit DELETEALL.
+            delete_marker = Marker()
+            delete_marker.action = Marker.DELETEALL
+            marker_array.markers.append(delete_marker)
             self.marker_pub.publish(marker_array)
+            self.get_logger().info('Received empty LabeledPathArray; cleared path markers.')
             return
 
         frame = msg.paths[0].header.frame_id

@@ -44,6 +44,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
   sensor_msgs
   tf2_ros
   nav_msgs
+  visualization_msgs
   pcl_conversions
   rviz_common
   rviz_rendering
@@ -61,6 +62,8 @@ rosidl_generate_interfaces("ugv_nav4d_ros2_msgs"
   "msg/MLSPatch.msg"
   "msg/MLSMap.msg"
   "msg/LabeledPathArray.msg"
+  "msg/ForbiddenZone.msg"
+  "srv/EditWaypoint.srv"
   "action/SaveMLSMap.action"
   DEPENDENCIES geometry_msgs std_msgs nav_msgs
   LIBRARY_NAME ${PROJECT_NAME}
@@ -124,6 +127,48 @@ target_link_libraries(ugv_nav4d_ros2_goal3d_tool
   Qt5::Widgets
 )
 
+qt5_wrap_cpp(MOC_FORBIDDEN_ZONE_TOOL_FILES include/ugv_nav4d_ros2_forbidden_zone_tool/ForbiddenZoneTool.hpp)
+# Create the tool plugin library
+add_library(ugv_nav4d_ros2_forbidden_zone_tool SHARED src/ForbiddenZoneTool.cpp ${MOC_FORBIDDEN_ZONE_TOOL_FILES})
+rosidl_target_interfaces(ugv_nav4d_ros2_forbidden_zone_tool "ugv_nav4d_ros2_msgs" "rosidl_typesupport_cpp")
+ament_target_dependencies(ugv_nav4d_ros2_forbidden_zone_tool  ${THIS_PACKAGE_INCLUDE_DEPENDS})
+target_include_directories(ugv_nav4d_ros2_forbidden_zone_tool PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/ugv_nav4d_ros2_forbidden_zone_tool/>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(ugv_nav4d_ros2_forbidden_zone_tool
+  Qt5::Core
+  Qt5::Widgets
+)
+
+qt5_wrap_cpp(MOC_OPERATOR_PANEL_FILES include/ugv_nav4d_ros2_operator_panel/OperatorPanel.hpp)
+# Create the panel plugin library
+add_library(ugv_nav4d_ros2_operator_panel SHARED src/OperatorPanel.cpp ${MOC_OPERATOR_PANEL_FILES})
+rosidl_target_interfaces(ugv_nav4d_ros2_operator_panel "ugv_nav4d_ros2_msgs" "rosidl_typesupport_cpp")
+ament_target_dependencies(ugv_nav4d_ros2_operator_panel  ${THIS_PACKAGE_INCLUDE_DEPENDS})
+target_include_directories(ugv_nav4d_ros2_operator_panel PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/ugv_nav4d_ros2_operator_panel/>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(ugv_nav4d_ros2_operator_panel
+  Qt5::Core
+  Qt5::Widgets
+)
+
+qt5_wrap_cpp(MOC_WAYPOINT3D_TOOL_FILES include/ugv_nav4d_ros2_waypoint3d_tool/Waypoint3DTool.hpp)
+# Create the tool plugin library
+add_library(ugv_nav4d_ros2_waypoint3d_tool SHARED src/Waypoint3DTool.cpp ${MOC_WAYPOINT3D_TOOL_FILES})
+rosidl_target_interfaces(ugv_nav4d_ros2_waypoint3d_tool "ugv_nav4d_ros2_msgs" "rosidl_typesupport_cpp")
+ament_target_dependencies(ugv_nav4d_ros2_waypoint3d_tool  ${THIS_PACKAGE_INCLUDE_DEPENDS})
+target_include_directories(ugv_nav4d_ros2_waypoint3d_tool PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/ugv_nav4d_ros2_waypoint3d_tool/>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(ugv_nav4d_ros2_waypoint3d_tool
+  Qt5::Core
+  Qt5::Widgets
+)
+
 add_executable(ugv_nav4d_ros2_node
 	src/ugv_nav4d_ros2_node.cpp
 )
@@ -168,6 +213,21 @@ install(TARGETS ugv_nav4d_ros2_mls_map_plugin
   RUNTIME DESTINATION bin)
 
 install(TARGETS ugv_nav4d_ros2_goal3d_tool
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+
+install(TARGETS ugv_nav4d_ros2_waypoint3d_tool
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+
+install(TARGETS ugv_nav4d_ros2_operator_panel
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+
+install(TARGETS ugv_nav4d_ros2_forbidden_zone_tool
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)

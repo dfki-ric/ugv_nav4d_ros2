@@ -27,3 +27,34 @@
     </description>
   </class>
 </library>
+
+<library path="ugv_nav4d_ros2_waypoint3d_tool">
+  <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_waypoint3d_tool::Waypoint3DTool"
+         base_class_type="rviz_common::Tool">
+    <description>
+      Appends a 3D waypoint (picked on the rendered MLS/traversability map) to
+      the planner's waypoint queue; the queue is planned through on the next goal.
+    </description>
+  </class>
+</library>
+
+<library path="ugv_nav4d_ros2_forbidden_zone_tool">
+  <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_forbidden_zone_tool::ForbiddenZoneTool"
+         base_class_type="rviz_common::Tool">
+    <description>
+      Draws a polygonal keep-out zone on the map (left-click vertices, minimum 3,
+      right-click to close); the planner marks the covered traversability nodes
+      as obstacles.
+    </description>
+  </class>
+</library>
+
+<library path="ugv_nav4d_ros2_operator_panel">
+  <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_operator_panel::OperatorPanel"
+         base_class_type="rviz_common::Panel">
+    <description>
+      Field operator panel: live planner status plus one-click waypoint-queue
+      and map save/republish actions.
+    </description>
+  </class>
+</library>

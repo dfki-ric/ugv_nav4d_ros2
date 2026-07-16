@@ -14,9 +14,11 @@ class FollowPathClient(Node):
     def __init__(self):
         super().__init__('follow_path_client')
 
+        # Gated topic: the planner only publishes here after the operator confirms
+        # the previewed path via the execute_path service / panel button.
         self.subscription = self.create_subscription(
             LabeledPathArray,
-            '/ugv_nav4d_ros2/labeled_path_segments',
+            '/ugv_nav4d_ros2/execute_path_segments',
             self.labeled_path_callback,
             10
         )

@@ -12,6 +12,11 @@
 
 #include <fstream>
 #include <cmath>
+#include <chrono>
+#include <deque>
+#include <iomanip>
+#include <sstream>
+#include <unordered_set>
 
 using namespace rclcpp;
 
@@ -75,8 +80,60 @@ void PathPlannerNode::setupSubscriptions()
     map_publish_service = this->create_service<std_srvs::srv::Trigger>(
             "/ugv_nav4d_ros2/map_publish", std::bind(&PathPlannerNode::mapPublishCallback, this, std::placeholders::_1, std::placeholders::_2));
 
-    sub_goal_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/goal_pose", 1, 
+    sub_goal_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/goal_pose", 1,
             bind(&PathPlannerNode::processGoalRequest, this, std::placeholders::_1));
+
+    // Waypoint queue: poses accumulated here are planned through (in order) when the
+    // next goal arrives. The queue is only consumed by planning, never by time.
+    sub_add_waypoint = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/add_waypoint", 10,
+            bind(&PathPlannerNode::addWaypointCallback, this, std::placeholders::_1));
+
+    clear_waypoints_service = this->create_service<std_srvs::srv::Trigger>(
+            "/ugv_nav4d_ros2/clear_waypoints", std::bind(&PathPlannerNode::clearWaypointsCallback, this, std::placeholders::_1, std::placeholders::_2));
+
+    remove_last_waypoint_service = this->create_service<std_srvs::srv::Trigger>(
+            "/ugv_nav4d_ros2/remove_last_waypoint", std::bind(&PathPlannerNode::removeLastWaypointCallback, this, std::placeholders::_1, std::placeholders::_2));
+
+    edit_waypoint_service = this->create_service<ugv_nav4d_ros2::srv::EditWaypoint>(
+            "/ugv_nav4d_ros2/edit_waypoint", std::bind(&PathPlannerNode::editWaypointCallback, this, std::placeholders::_1, std::placeholders::_2));
+
+    // transient_local so RViz still shows the queued waypoints after a display restart
+    waypoint_marker_publisher = this->create_publisher<visualization_msgs::msg::MarkerArray>(
+            "/ugv_nav4d_ros2/waypoint_markers", rclcpp::QoS(1).transient_local());
+
+    // Operator feedback: latest planner status as a plain string (transient_local so a
+    // late-joining RViz panel immediately sees the current state).
+    status_publisher = this->create_publisher<std_msgs::msg::String>(
+            "/ugv_nav4d_ros2/status", rclcpp::QoS(1).transient_local());
+
+    save_map_service = this->create_service<std_srvs::srv::Trigger>(
+            "/ugv_nav4d_ros2/save_mls_map", std::bind(&PathPlannerNode::saveMapCallback, this, std::placeholders::_1, std::placeholders::_2));
+
+    // Execution gate: planning only publishes a preview (path / labeled_path_segments /
+    // colored_path). The follower listens on execute_path_segments, which is only
+    // published when the operator confirms via the execute_path service.
+    execute_path_publisher = this->create_publisher<ugv_nav4d_ros2::msg::LabeledPathArray>(
+            "/ugv_nav4d_ros2/execute_path_segments", 10);
+
+    execute_path_service = this->create_service<std_srvs::srv::Trigger>(
+            "/ugv_nav4d_ros2/execute_path", std::bind(&PathPlannerNode::executePathCallback, this, std::placeholders::_1, std::placeholders::_2));
+
+    discard_path_service = this->create_service<std_srvs::srv::Trigger>(
+            "/ugv_nav4d_ros2/discard_path", std::bind(&PathPlannerNode::discardPathCallback, this, std::placeholders::_1, std::placeholders::_2));
+
+    // Forbidden zones (keep-out): circular regions the planner must not enter.
+    sub_add_forbidden_zone = create_subscription<ugv_nav4d_ros2::msg::ForbiddenZone>(
+            "/ugv_nav4d_ros2/add_forbidden_zone", 10,
+            bind(&PathPlannerNode::addForbiddenZoneCallback, this, std::placeholders::_1));
+
+    clear_forbidden_zones_service = this->create_service<std_srvs::srv::Trigger>(
+            "/ugv_nav4d_ros2/clear_forbidden_zones", std::bind(&PathPlannerNode::clearForbiddenZonesCallback, this, std::placeholders::_1, std::placeholders::_2));
+
+    remove_last_forbidden_zone_service = this->create_service<std_srvs::srv::Trigger>(
+            "/ugv_nav4d_ros2/remove_last_forbidden_zone", std::bind(&PathPlannerNode::removeLastForbiddenZoneCallback, this, std::placeholders::_1, std::placeholders::_2));
+
+    forbidden_zone_marker_publisher = this->create_publisher<visualization_msgs::msg::MarkerArray>(
+            "/ugv_nav4d_ros2/forbidden_zone_markers", rclcpp::QoS(1).transient_local());
 
     sub_start_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/start_pose", 1, 
             bind(&PathPlannerNode::readStartPose, this, std::placeholders::_1));
@@ -177,7 +234,7 @@ void PathPlannerNode::mapPublishCallback(
 {
     if (!got_map)
     {
-        RCLCPP_WARN(this->get_logger(), "No map received so far. Failed to publish maps.");
+        RCLCPP_WARN(this->get_logger(), "Cannot publish maps: no map loaded yet (no pointcloud received or file not loaded).");
         response->success = false;
         response->message = "No map received so far.";
         return;
@@ -215,12 +272,15 @@ void PathPlannerNode::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedP
             if (!get_parameter("read_pose_from_topic").as_bool())
             {
                 if (!updatePoseFromTF()){
-                    RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to read start pose of the robot from TF!");
+                    RCLCPP_ERROR_STREAM(this->get_logger(), "Cannot determine start pose: TF lookup "
+                                << get_parameter("world_frame").as_string() << " <- "
+                                << get_parameter("robot_frame").as_string() << " failed.");
                     return;
                 }
             }
 
-            RCLCPP_INFO(this->get_logger(), "Planner state: Got Map");
+            RCLCPP_INFO_STREAM(this->get_logger(), "Planner state: Got map (pointcloud with "
+                               << latest_pointcloud->width * latest_pointcloud->height << " points merged into MLS).");
             traversability_generator_ptr->setMLSGrid(mls_map_ptr);
 
             Eigen::Affine3d body2MLS;
@@ -241,24 +301,26 @@ void PathPlannerNode::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedP
             if (!initial_patch_added && initial_patch_radius > 0.0){
                 traversability_generator_ptr->setInitialPatch(ground2Mls, get_parameter("initialPatchRadius").as_double());
                 initial_patch_added = true;
-                RCLCPP_INFO(this->get_logger(), "Initial patch added to MLS.");
+                RCLCPP_INFO_STREAM(this->get_logger(), "Initial patch (radius " << initial_patch_radius << " m) added to MLS at the robot position.");
             }
 
             auto startPosition = ground2Mls.translation();
             traversability_generator_ptr->expandAll(startPosition);
+            applyForbiddenZones();
             auto travMap = traversability_generator_ptr->getTraversabilityMap();
             planner_ptr->updateMap(travMap);
             RCLCPP_INFO(this->get_logger(), "Planner state: Ready");
+            publishStatus("Ready");
             if (map_update_callback) {
                 map_update_callback();
             }
         }
         else{
-            RCLCPP_INFO(this->get_logger(), "Map not loaded because planner is in state: Planning");
+            RCLCPP_INFO(this->get_logger(), "Skipping map update: planning is in progress.");
         }
     }
     else{
-        RCLCPP_WARN_STREAM(this->get_logger(), "Unabled to load map from incoming cloud!");
+        RCLCPP_WARN_STREAM(this->get_logger(), "Failed to build MLS from the incoming pointcloud.");
     }
 }
 
@@ -286,19 +348,23 @@ void PathPlannerNode::processGoalRequest(const geometry_msgs::msg::PoseStamped::
     }
 
     if (!got_map){
-        RCLCPP_WARN_STREAM(this->get_logger(), "Unabled to process goal request because planner is in state NO_MAP!");
+        RCLCPP_WARN_STREAM(this->get_logger(), "Goal rejected: no map available yet.");
+        publishStatus("Goal rejected: no map available yet");
         return;
     }
 
     if (is_planning){
-        RCLCPP_WARN_STREAM(this->get_logger(), "Unabled to process goal request because planner is in state PLANNING!");
+        RCLCPP_WARN_STREAM(this->get_logger(), "Goal rejected: planner is busy with a previous request.");
+        publishStatus("Goal rejected: planner is busy");
         return;
     }
 
     if (!get_parameter("read_pose_from_topic").as_bool())
     {
         if (!updatePoseFromTF()){
-            RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to read start pose of the robot from TF!");
+            RCLCPP_ERROR_STREAM(this->get_logger(), "Cannot determine start pose: TF lookup "
+                                << get_parameter("world_frame").as_string() << " <- "
+                                << get_parameter("robot_frame").as_string() << " failed.");
             return;
         }
     }
@@ -309,7 +375,475 @@ void PathPlannerNode::processGoalRequest(const geometry_msgs::msg::PoseStamped::
     goal_pose_rbs.position = Eigen::Vector3d(msg->pose.position.x, msg->pose.position.y, msg->pose.position.z);
     goal_pose_rbs.orientation = Eigen::Quaterniond(msg->pose.orientation.w, msg->pose.orientation.x, msg->pose.orientation.y, msg->pose.orientation.z);
 
+    if (!waypoint_queue.empty()){
+        planThroughWaypoints();
+        return;
+    }
+
     plan();
+}
+
+void PathPlannerNode::addWaypointCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    waypoint_queue.push_back(msg->pose);
+    RCLCPP_INFO_STREAM(this->get_logger(), "Added waypoint " << waypoint_queue.size()
+                       << " at (" << msg->pose.position.x << ", " << msg->pose.position.y
+                       << ", " << msg->pose.position.z << ")");
+    publishWaypointMarkers();
+    publishStatus(std::to_string(waypoint_queue.size()) + " waypoint(s) queued");
+}
+
+void PathPlannerNode::clearWaypointsCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+                                             std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    const size_t count = waypoint_queue.size();
+    waypoint_queue.clear();
+    publishWaypointMarkers();
+    response->success = true;
+    response->message = "Cleared " + std::to_string(count) + " waypoint(s).";
+    RCLCPP_INFO_STREAM(this->get_logger(), response->message);
+    publishStatus(response->message);
+}
+
+void PathPlannerNode::removeLastWaypointCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+                                                 std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    if (waypoint_queue.empty()){
+        response->success = false;
+        response->message = "No waypoints queued.";
+        return;
+    }
+    waypoint_queue.pop_back();
+    publishWaypointMarkers();
+    response->success = true;
+    response->message = std::to_string(waypoint_queue.size()) + " waypoint(s) remaining.";
+    RCLCPP_INFO_STREAM(this->get_logger(), "Removed last waypoint; " << response->message);
+    publishStatus("Removed last waypoint; " + response->message);
+}
+
+void PathPlannerNode::editWaypointCallback(const std::shared_ptr<ugv_nav4d_ros2::srv::EditWaypoint::Request> request,
+                                           std::shared_ptr<ugv_nav4d_ros2::srv::EditWaypoint::Response> response){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    if (request->index == 0 || request->index > waypoint_queue.size()){
+        response->success = false;
+        response->message = "Waypoint " + std::to_string(request->index) + " does not exist ("
+                            + std::to_string(waypoint_queue.size()) + " queued).";
+        publishStatus(response->message);
+        return;
+    }
+    const size_t i = request->index - 1;
+    if (request->remove){
+        waypoint_queue.erase(waypoint_queue.begin() + i);
+        response->message = "Deleted waypoint " + std::to_string(request->index) + "; "
+                            + std::to_string(waypoint_queue.size()) + " remaining (renumbered).";
+    } else {
+        waypoint_queue[i] = request->pose;
+        response->message = "Replaced waypoint " + std::to_string(request->index) + ".";
+    }
+    response->success = true;
+    publishWaypointMarkers();
+    RCLCPP_INFO_STREAM(this->get_logger(), response->message);
+    publishStatus(response->message);
+}
+
+void PathPlannerNode::publishWaypointMarkers(){
+    visualization_msgs::msg::MarkerArray marker_array;
+
+    visualization_msgs::msg::Marker delete_all;
+    delete_all.action = visualization_msgs::msg::Marker::DELETEALL;
+    marker_array.markers.push_back(delete_all);
+
+    const std::string frame = get_parameter("world_frame").as_string();
+    const auto now = this->get_clock()->now();
+    // Queued waypoints are body-frame poses (ground + distToGround); draw the
+    // markers back at ground level so they sit on the clicked patch.
+    const double dist_to_ground = get_parameter("distToGround").as_double();
+
+    for (size_t i = 0; i < waypoint_queue.size(); ++i){
+        visualization_msgs::msg::Marker arrow;
+        arrow.header.frame_id = frame;
+        arrow.header.stamp = now;
+        arrow.ns = "waypoints";
+        arrow.id = static_cast<int>(2 * i);
+        arrow.type = visualization_msgs::msg::Marker::ARROW;
+        arrow.action = visualization_msgs::msg::Marker::ADD;
+        arrow.pose = waypoint_queue[i];
+        arrow.pose.position.z -= dist_to_ground;
+        arrow.scale.x = 1.0;
+        arrow.scale.y = 0.15;
+        arrow.scale.z = 0.15;
+        arrow.color.r = 0.0;
+        arrow.color.g = 0.8;
+        arrow.color.b = 1.0;
+        arrow.color.a = 1.0;
+        marker_array.markers.push_back(arrow);
+
+        visualization_msgs::msg::Marker text;
+        text.header.frame_id = frame;
+        text.header.stamp = now;
+        text.ns = "waypoint_labels";
+        text.id = static_cast<int>(2 * i + 1);
+        text.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+        text.action = visualization_msgs::msg::Marker::ADD;
+        text.pose = waypoint_queue[i];
+        text.pose.position.z += 0.7 - dist_to_ground;
+        text.scale.z = 0.5;
+        text.color.r = 1.0;
+        text.color.g = 1.0;
+        text.color.b = 1.0;
+        text.color.a = 1.0;
+        text.text = std::to_string(i + 1);
+        marker_array.markers.push_back(text);
+    }
+
+    waypoint_marker_publisher->publish(marker_array);
+}
+
+void PathPlannerNode::planThroughWaypoints(){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+
+    // Target sequence: the queued waypoints in click order, then the final goal.
+    std::vector<base::samples::RigidBodyState> targets;
+    for (const auto& wp : waypoint_queue){
+        base::samples::RigidBodyState rbs;
+        rbs.position = Eigen::Vector3d(wp.position.x, wp.position.y, wp.position.z);
+        rbs.orientation = Eigen::Quaterniond(wp.orientation.w, wp.orientation.x, wp.orientation.y, wp.orientation.z);
+        targets.push_back(rbs);
+    }
+    targets.push_back(goal_pose_rbs);
+
+    base::Time time;
+    time.microseconds = (int64_t)(planner_config.maxTime * 1e6);
+    const bool dumpOnError = get_parameter("dumpOnError").as_bool();
+    const bool dumpOnSuccess = get_parameter("dumpOnSuccess").as_bool();
+
+    RCLCPP_INFO_STREAM(this->get_logger(), "Planner state: Planning through "
+                       << waypoint_queue.size() << " waypoint(s)");
+    publishStatus("Planning through " + std::to_string(waypoint_queue.size()) + " waypoint(s)...");
+    is_planning = true;
+    struct PlanningFlagGuard {
+        std::atomic<bool>& flag;
+        ~PlanningFlagGuard() { flag = false; }
+    } planning_flag_guard{is_planning};
+
+    std::vector<trajectory_follower::SubTrajectory> combined2D, combined3D;
+    base::samples::RigidBodyState segment_start = start_pose_rbs;
+    const auto chain_t0 = std::chrono::steady_clock::now();
+
+    for (size_t k = 0; k < targets.size(); ++k){
+        std::vector<trajectory_follower::SubTrajectory> trajectory2D, trajectory3D;
+        RCLCPP_INFO_STREAM(this->get_logger(), "Leg " << (k + 1) << "/" << targets.size()
+                           << ": (" << segment_start.position.transpose()
+                           << ") -> (" << targets[k].position.transpose() << ")");
+
+        const ugv_nav4d::Planner::PLANNING_RESULT res =
+            planner_ptr->plan(time, segment_start, targets[k], trajectory2D, trajectory3D, dumpOnError, dumpOnSuccess);
+
+        if (res != ugv_nav4d::Planner::FOUND_SOLUTION){
+            // Abort the whole mission and clear any stale path: a partial path up to a
+            // failed segment must not be executed. The queue is kept so the operator can
+            // fix the offending waypoint and retry.
+            RCLCPP_ERROR_STREAM(this->get_logger(), "Waypoint leg " << (k + 1) << "/"
+                                << targets.size() << " failed: " << planningResultToString(res)
+                                << ". Mission aborted; waypoint queue kept for correction.");
+            publishStatus(std::string("Waypoint leg ") + std::to_string(k + 1) + "/" +
+                          std::to_string(targets.size()) + " failed: " + planningResultToString(res));
+            latest_trajectory2D.clear();
+            latest_trajectory3D.clear();
+            latest_planning_result = res;
+            publishPlannedPath({}, false);
+            return;
+        }
+
+        combined2D.insert(combined2D.end(), trajectory2D.begin(), trajectory2D.end());
+        combined3D.insert(combined3D.end(), trajectory3D.begin(), trajectory3D.end());
+        segment_start = targets[k];
+    }
+
+    latest_trajectory2D = combined2D;
+    latest_trajectory3D = combined3D;
+    latest_planning_result = ugv_nav4d::Planner::FOUND_SOLUTION;
+
+    const double chain_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - chain_t0).count();
+    std::ostringstream chain_msg;
+    chain_msg << "FOUND_SOLUTION: " << targets.size() << " leg(s), " << combined3D.size()
+              << " trajectory segment(s) (" << std::fixed << std::setprecision(2) << chain_seconds << " s)";
+    RCLCPP_INFO_STREAM(this->get_logger(), chain_msg.str());
+    publishStatus(chain_msg.str());
+
+    publishPlannedPath(combined3D, true);
+
+    // The queue is deliberately kept after planning: re-sending a goal replans
+    // through the same waypoints (e.g. after editing one). It is only emptied
+    // by the explicit clear_waypoints service / panel button.
+}
+
+void PathPlannerNode::publishStatus(const std::string& status){
+    std_msgs::msg::String msg;
+    msg.data = status;
+    status_publisher->publish(msg);
+    if (status_callback) {
+        status_callback(status);
+    }
+}
+
+void PathPlannerNode::saveMapCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+                                      std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+    if (!got_map || !mls_map_ptr){
+        response->success = false;
+        response->message = "No MLS map available to save.";
+        publishStatus(response->message);
+        return;
+    }
+    const std::string filename = generateTimestampedFilename(".bin");
+    if (saveMLSMapAsBin(filename)){
+        response->success = true;
+        response->message = "MLS map saved to " + filename;
+    } else {
+        response->success = false;
+        response->message = "Failed to save MLS map to " + filename;
+    }
+    publishStatus(response->message);
+}
+
+// Even-odd rule point-in-polygon test in the XY plane.
+static bool pointInPolygonXY(double x, double y, const std::vector<geometry_msgs::msg::Point>& poly){
+    bool inside = false;
+    const size_t n = poly.size();
+    for (size_t i = 0, j = n - 1; i < n; j = i++){
+        const double xi = poly[i].x, yi = poly[i].y;
+        const double xj = poly[j].x, yj = poly[j].y;
+        if (((yi > y) != (yj > y)) &&
+            (x < (xj - xi) * (y - yi) / (yj - yi) + xi)){
+            inside = !inside;
+        }
+    }
+    return inside;
+}
+
+void PathPlannerNode::addForbiddenZoneCallback(const ugv_nav4d_ros2::msg::ForbiddenZone::SharedPtr msg){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    if (msg->vertices.size() < 3){
+        RCLCPP_WARN_STREAM(this->get_logger(), "Ignoring forbidden zone with only "
+                           << msg->vertices.size() << " vertices (minimum 3).");
+        return;
+    }
+    forbidden_zones.push_back(*msg);
+    RCLCPP_INFO_STREAM(this->get_logger(), "Added forbidden zone " << forbidden_zones.size()
+                       << " with " << msg->vertices.size() << " vertices.");
+    onForbiddenZonesChanged();
+    publishStatus(std::to_string(forbidden_zones.size()) + " forbidden zone(s) active");
+}
+
+void PathPlannerNode::clearForbiddenZonesCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+                                                  std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    if (forbidden_zones.empty()){
+        // Nothing to clear; skip the (expensive) trav map regeneration.
+        response->success = true;
+        response->message = "No forbidden zones set; nothing to clear.";
+        return;
+    }
+    const size_t count = forbidden_zones.size();
+    forbidden_zones.clear();
+    onForbiddenZonesChanged();
+    response->success = true;
+    response->message = "Cleared " + std::to_string(count) + " forbidden zone(s).";
+    RCLCPP_INFO_STREAM(this->get_logger(), response->message);
+    publishStatus(response->message);
+}
+
+void PathPlannerNode::removeLastForbiddenZoneCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+                                                      std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    if (forbidden_zones.empty()){
+        response->success = false;
+        response->message = "No forbidden zones set.";
+        return;
+    }
+    forbidden_zones.pop_back();
+    onForbiddenZonesChanged();
+    response->success = true;
+    response->message = std::to_string(forbidden_zones.size()) + " forbidden zone(s) remaining.";
+    RCLCPP_INFO_STREAM(this->get_logger(), "Removed last forbidden zone; " << response->message);
+    publishStatus("Removed last forbidden zone; " + response->message);
+}
+
+void PathPlannerNode::onForbiddenZonesChanged(){
+    publishForbiddenZoneMarkers();
+    // Zones are baked into the trav map during generation, so a change requires a
+    // rebuild. Clearing a zone has no cheaper path anyway (original node types are
+    // not stored). Also refreshes the trav map in RViz.
+    if (is_configured && got_map){
+        configurePlanner();
+        publishTravMap();
+    }
+}
+
+void PathPlannerNode::applyForbiddenZones(){
+    if (forbidden_zones.empty() || !traversability_generator_ptr){
+        return;
+    }
+    // The map reference is const, but it stores non-const TravGenNode pointers,
+    // so the nodes themselves can be re-typed.
+    const auto& trav_map_3d = traversability_generator_ptr->getTraversabilityMap();
+    size_t marked = 0;
+
+    for (const auto& zone : forbidden_zones)
+    {
+        // Flood-fill the connected surface the polygon was drawn on: seed at the
+        // patches nearest to the clicked vertices, then grow along the trav
+        // graph's neighbor connections while staying inside the polygon. Other
+        // storeys are separate connected components, so they are never touched --
+        // no height band or margin needed.
+        std::deque<traversability_generator3d::TravGenNode*> queue;
+        std::unordered_set<traversability_generator3d::TravGenNode*> visited;
+
+        for (const auto& v : zone.vertices)
+        {
+            maps::grid::Index idx;
+            if (!trav_map_3d.toGrid(Eigen::Vector3d(v.x, v.y, v.z), idx)){
+                continue;
+            }
+            traversability_generator3d::TravGenNode* seed = nullptr;
+            double best_dz = std::numeric_limits<double>::max();
+            for (traversability_generator3d::TravGenNode* n : trav_map_3d.at(idx))
+            {
+                const double dz = std::abs(n->getHeight() - v.z);
+                if (dz < best_dz){
+                    best_dz = dz;
+                    seed = n;
+                }
+            }
+            if (seed && visited.insert(seed).second){
+                queue.push_back(seed);
+            }
+        }
+
+        if (queue.empty()){
+            RCLCPP_WARN_STREAM(this->get_logger(), "Forbidden zone with " << zone.vertices.size()
+                               << " vertices matched no traversability patches; zone has no effect.");
+            continue;
+        }
+
+        while (!queue.empty())
+        {
+            traversability_generator3d::TravGenNode* node = queue.front();
+            queue.pop_front();
+
+            // Same marking travgen uses for real obstacles, so all planner
+            // checks (goal validity, expansions, obstacle checks) respect it.
+            node->setType(maps::grid::TraversabilityNodeBase::OBSTACLE);
+            node->getUserData().nodeType = traversability_generator3d::NodeType::OBSTACLE;
+            ++marked;
+
+            for (maps::grid::TraversabilityNodeBase* nb : node->getConnections())
+            {
+                auto* neighbor = static_cast<traversability_generator3d::TravGenNode*>(nb);
+                if (visited.count(neighbor)){
+                    continue;
+                }
+                Eigen::Vector3d position;
+                trav_map_3d.fromGrid(neighbor->getIndex(), position, neighbor->getHeight(), false);
+                if (!pointInPolygonXY(position.x(), position.y(), zone.vertices)){
+                    continue;
+                }
+                visited.insert(neighbor);
+                queue.push_back(neighbor);
+            }
+        }
+    }
+
+    RCLCPP_INFO_STREAM(this->get_logger(), "Applied " << forbidden_zones.size()
+                       << " forbidden zone(s): " << marked << " trav node(s) marked as obstacle.");
+}
+
+void PathPlannerNode::publishForbiddenZoneMarkers(){
+    visualization_msgs::msg::MarkerArray marker_array;
+
+    visualization_msgs::msg::Marker delete_all;
+    delete_all.action = visualization_msgs::msg::Marker::DELETEALL;
+    marker_array.markers.push_back(delete_all);
+
+    const std::string frame = get_parameter("world_frame").as_string();
+    const auto now = this->get_clock()->now();
+
+    for (size_t i = 0; i < forbidden_zones.size(); ++i){
+        const auto& zone = forbidden_zones[i];
+        const size_t n_verts = zone.vertices.size();
+        if (n_verts < 3){
+            continue;
+        }
+
+        // Closed outline on the ground.
+        visualization_msgs::msg::Marker outline;
+        outline.header.frame_id = frame;
+        outline.header.stamp = now;
+        outline.ns = "forbidden_zones";
+        outline.id = static_cast<int>(2 * i);
+        outline.type = visualization_msgs::msg::Marker::LINE_STRIP;
+        outline.action = visualization_msgs::msg::Marker::ADD;
+        outline.pose.orientation.w = 1.0;
+        outline.scale.x = 0.1;
+        outline.color.r = 1.0;
+        outline.color.g = 0.1;
+        outline.color.b = 0.1;
+        outline.color.a = 1.0;
+        for (size_t k = 0; k <= n_verts; ++k){
+            outline.points.push_back(zone.vertices[k % n_verts]);
+        }
+        marker_array.markers.push_back(outline);
+
+        // Translucent vertical wall along the edges (works for concave polygons,
+        // no triangulation of the interior needed).
+        visualization_msgs::msg::Marker wall;
+        wall.header.frame_id = frame;
+        wall.header.stamp = now;
+        wall.ns = "forbidden_zone_walls";
+        wall.id = static_cast<int>(2 * i + 1);
+        wall.type = visualization_msgs::msg::Marker::TRIANGLE_LIST;
+        wall.action = visualization_msgs::msg::Marker::ADD;
+        wall.pose.orientation.w = 1.0;
+        wall.scale.x = 1.0;
+        wall.scale.y = 1.0;
+        wall.scale.z = 1.0;
+        wall.color.r = 1.0;
+        wall.color.g = 0.1;
+        wall.color.b = 0.1;
+        wall.color.a = 0.3;
+        const double wall_height = 2.0;
+        for (size_t k = 0; k < n_verts; ++k){
+            geometry_msgs::msg::Point a = zone.vertices[k];
+            geometry_msgs::msg::Point b = zone.vertices[(k + 1) % n_verts];
+            geometry_msgs::msg::Point a_top = a;
+            geometry_msgs::msg::Point b_top = b;
+            a_top.z += wall_height;
+            b_top.z += wall_height;
+            // two triangles per edge: (a, b, b_top) and (a, b_top, a_top)
+            wall.points.push_back(a);
+            wall.points.push_back(b);
+            wall.points.push_back(b_top);
+            wall.points.push_back(a);
+            wall.points.push_back(b_top);
+            wall.points.push_back(a_top);
+        }
+        marker_array.markers.push_back(wall);
+    }
+
+    forbidden_zone_marker_publisher->publish(marker_array);
+}
+
+const char* PathPlannerNode::planningResultToString(ugv_nav4d::Planner::PLANNING_RESULT res){
+    switch(res)
+    {
+        case ugv_nav4d::Planner::FOUND_SOLUTION: return "FOUND_SOLUTION";
+        case ugv_nav4d::Planner::GOAL_INVALID:   return "GOAL_INVALID";
+        case ugv_nav4d::Planner::START_INVALID:  return "START_INVALID";
+        case ugv_nav4d::Planner::INTERNAL_ERROR: return "INTERNAL_ERROR";
+        case ugv_nav4d::Planner::NO_SOLUTION:    return "NO_SOLUTION";
+        case ugv_nav4d::Planner::NO_MAP:         return "NO_MAP";
+    }
+    return "UNKNOWN";
 }
 
 void PathPlannerNode::readStartPose(const geometry_msgs::msg::PoseStamped::SharedPtr msg){
@@ -337,14 +871,16 @@ void PathPlannerNode::initializeMLSMap(){
         if (mls_file_type == "ply"){
             if (loadPlyAsMLS(mls_file_path)){
                 got_map = true;
-                RCLCPP_INFO_STREAM(this->get_logger(), "Loaded map from PLY.");
+                RCLCPP_INFO_STREAM(this->get_logger(), "Loaded MLS from PLY '" << mls_file_path << "' ("
+                                   << mls_map_ptr->getNumCells().transpose() << " cells @ "
+                                   << current_grid_resolution << " m).");
             }
         }
         else if (mls_file_type == "bin"){
             // A .bin map has its resolution baked in; grid_resolution cannot change it.
             if(loadMLSMapFromBin(mls_file_path)){
                 got_map = true;
-                RCLCPP_INFO_STREAM(this->get_logger(), "Loaded map from BIN.");
+                RCLCPP_INFO_STREAM(this->get_logger(), "Loaded MLS from BIN '" << mls_file_path << "'.");
                 if (mls_map_ptr){
                     const double loaded_res = mls_map_ptr->getResolution().x();
                     if (std::abs(loaded_res - current_grid_resolution) > 1e-9){
@@ -432,7 +968,7 @@ bool PathPlannerNode::loadPlyAsMLS(const std::string& path){
         }
         return true;
     }
-    RCLCPP_ERROR_STREAM(this->get_logger(), "Unabled to load mls. Unknown format!");
+    RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to load MLS from '" << path << "': unknown format (expected .ply).");
     return false;
 }
 
@@ -489,7 +1025,7 @@ bool PathPlannerNode::saveMLSMapAsBin(const std::string& filename = "") {
     // Open a binary file for output
     std::ofstream binFile(fileToUse, std::ios::binary);
     if (!binFile) {
-        std::cerr << "Error opening file for writing: " << fileToUse << std::endl;
+        RCLCPP_ERROR_STREAM(this->get_logger(), "Cannot open file for writing: " << fileToUse);
         return false;
     }
 
@@ -514,7 +1050,7 @@ bool PathPlannerNode::loadMLSMapFromBin(const std::string& filename){
     // Open the binary file in input mode
     std::ifstream file(filename, std::ios::binary);
     if (!file.is_open()) {
-        RCLCPP_WARN_STREAM(this->get_logger(), "Failed to open file: " << filename);
+        RCLCPP_WARN_STREAM(this->get_logger(), "Cannot open MLS map file for reading: " << filename);
         return false;
     }
 
@@ -536,7 +1072,7 @@ rclcpp_action::GoalResponse PathPlannerNode::actionSaveMap(
     const rclcpp_action::GoalUUID & uuid,
     std::shared_ptr<const SaveMLSMap::Goal> goal)
 {
-    RCLCPP_INFO(this->get_logger(), "Received save map request");
+    RCLCPP_INFO_STREAM(this->get_logger(), "Save map action: filename '" << goal->filename << "' (empty = timestamped).");
     (void)uuid;  // Suppress unused variable warning
     return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;  // Accept the goal
 }
@@ -573,7 +1109,6 @@ void PathPlannerNode::plan(){
     bool dumpOnError = get_parameter("dumpOnError").as_bool();
     bool dumpOnSuccess = get_parameter("dumpOnSuccess").as_bool();
 
-    RCLCPP_INFO_STREAM(this->get_logger(), "Planner state: Planning");
     // RAII guard: always clears is_planning, even if planner_ptr->plan() throws.
     is_planning = true;
     struct PlanningFlagGuard {
@@ -581,36 +1116,37 @@ void PathPlannerNode::plan(){
         ~PlanningFlagGuard() { flag = false; }
     } planning_flag_guard{is_planning};
 
-    RCLCPP_INFO_STREAM(this->get_logger(), "Start is  " << start_pose_rbs.position.transpose());
-    RCLCPP_INFO_STREAM(this->get_logger(), "Goal is  " << goal_pose_rbs.position.transpose());
+    RCLCPP_INFO_STREAM(this->get_logger(), "Planning: start (" << start_pose_rbs.position.transpose()
+                       << ") -> goal (" << goal_pose_rbs.position.transpose()
+                       << "), time budget " << planner_config.maxTime << " s");
+    publishStatus("Planning...");
+
+    const auto plan_t0 = std::chrono::steady_clock::now();
     ugv_nav4d::Planner::PLANNING_RESULT res = planner_ptr->plan(time, start_pose_rbs, goal_pose_rbs, trajectory2D, trajectory3D, dumpOnError, dumpOnSuccess);
+    const double plan_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - plan_t0).count();
 
     latest_trajectory2D = trajectory2D;
     latest_trajectory3D = trajectory3D;
     latest_planning_result = res;
 
-    switch(res)
-    {
-        case ugv_nav4d::Planner::FOUND_SOLUTION:
-            RCLCPP_INFO_STREAM(this->get_logger(), "FOUND_SOLUTION");
-            break;
-        case ugv_nav4d::Planner::GOAL_INVALID:
-            RCLCPP_INFO_STREAM(this->get_logger(), "GOAL_INVALID");
-            break;
-        case ugv_nav4d::Planner::START_INVALID:
-            RCLCPP_INFO_STREAM(this->get_logger(), "START_INVALID");
-            break;
-        case ugv_nav4d::Planner::INTERNAL_ERROR:
-            RCLCPP_INFO_STREAM(this->get_logger(), "INTERNAL_ERROR");
-            break;
-        case ugv_nav4d::Planner::NO_SOLUTION:
-            RCLCPP_INFO_STREAM(this->get_logger(), "NO_SOLUTION");
-            break;
-        case ugv_nav4d::Planner::NO_MAP:
-            RCLCPP_INFO_STREAM(this->get_logger(), "NO_MAP");
-            break;
+    std::ostringstream result_msg;
+    result_msg << planningResultToString(res);
+    if (res == ugv_nav4d::Planner::FOUND_SOLUTION) {
+        result_msg << ": " << trajectory3D.size() << " trajectory segment(s)";
     }
-    
+    result_msg << " (" << std::fixed << std::setprecision(2) << plan_seconds << " s)";
+    if (res == ugv_nav4d::Planner::FOUND_SOLUTION) {
+        RCLCPP_INFO_STREAM(this->get_logger(), result_msg.str());
+    } else {
+        RCLCPP_ERROR_STREAM(this->get_logger(), result_msg.str());
+    }
+    publishStatus(result_msg.str());
+
+    publishPlannedPath(trajectory3D, res == ugv_nav4d::Planner::FOUND_SOLUTION);
+}
+
+void PathPlannerNode::publishPlannedPath(const std::vector<trajectory_follower::SubTrajectory>& trajectory3D, bool found_solution)
+{
     ugv_nav4d_ros2::msg::LabeledPathArray labeled_path_message;
     auto now = this->get_clock()->now();
 
@@ -622,7 +1158,7 @@ void PathPlannerNode::plan(){
     std::string label;
     bool first_segment = true;
 
-    if (res == ugv_nav4d::Planner::FOUND_SOLUTION) {
+    if (found_solution) {
         for (size_t seg_idx = 0; seg_idx < trajectory3D.size(); ++seg_idx) {
             auto& trajectory = trajectory3D[seg_idx];
 
@@ -782,6 +1318,50 @@ void PathPlannerNode::plan(){
     path.header.stamp = now;
     combined_path_publisher->publish(path);
     labeled_path_publisher->publish(labeled_path_message);
+
+    // Hold the path for the execution gate. Anything that plans (or fails to)
+    // replaces the pending path, so Execute always sends what RViz shows.
+    pending_labeled_path = labeled_path_message;
+    has_pending_path = found_solution && !labeled_path_message.paths.empty();
+    if (has_pending_path) {
+        publishStatus("Path ready (" + std::to_string(pending_labeled_path.paths.size()) +
+                      " segment(s)) - review in RViz, then Execute to send to the follower");
+    }
+}
+
+void PathPlannerNode::executePathCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+                                          std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    if (!has_pending_path){
+        response->success = false;
+        response->message = "No planned path pending; plan first.";
+        publishStatus(response->message);
+        return;
+    }
+    execute_path_publisher->publish(pending_labeled_path);
+    response->success = true;
+    response->message = "Path sent to follower (" +
+                        std::to_string(pending_labeled_path.paths.size()) + " segment(s)).";
+    RCLCPP_INFO_STREAM(this->get_logger(), response->message);
+    publishStatus(response->message);
+}
+
+void PathPlannerNode::discardPathCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+                                          std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    if (!has_pending_path){
+        response->success = false;
+        response->message = "No planned path pending.";
+        return;
+    }
+    has_pending_path = false;
+    pending_labeled_path = ugv_nav4d_ros2::msg::LabeledPathArray();
+    // Clear the preview in RViz as well.
+    publishPlannedPath({}, false);
+    response->success = true;
+    response->message = "Pending path discarded.";
+    RCLCPP_INFO_STREAM(this->get_logger(), response->message);
+    publishStatus(response->message);
 }
 
 void PathPlannerNode::declareParameters(){
@@ -1062,13 +1642,15 @@ void PathPlannerNode::configurePlanner(){
         if (!get_parameter("read_pose_from_topic").as_bool())
         {
             if (!updatePoseFromTF()){
-                RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to read start pose of the robot from TF!");
+                RCLCPP_ERROR_STREAM(this->get_logger(), "Cannot determine start pose: TF lookup "
+                                << get_parameter("world_frame").as_string() << " <- "
+                                << get_parameter("robot_frame").as_string() << " failed.");
                 return;
             }
         }
 
-        RCLCPP_INFO(this->get_logger(), "Planner state: Loading last known map");
-        if (status_callback) { status_callback("Loading map..."); }
+        RCLCPP_INFO(this->get_logger(), "Planner state: Configuring with the already-loaded map (no disk access)");
+        publishStatus("Generating traversability map...");
         traversability_generator_ptr->setMLSGrid(mls_map_ptr);
 
         Eigen::Affine3d body2MLS;
@@ -1084,10 +1666,11 @@ void PathPlannerNode::configurePlanner(){
 
         auto startPosition = ground2Mls.translation();
         traversability_generator_ptr->expandAll(startPosition);
+        applyForbiddenZones();
         auto travMap = traversability_generator_ptr->getTraversabilityMap();
         planner_ptr->updateMap(travMap);
         RCLCPP_INFO(this->get_logger(), "Planner state: Ready");
-        if (status_callback) { status_callback("Ready"); }
+        publishStatus("Ready");
         if (map_update_callback) {
             map_update_callback();
         }
@@ -1170,7 +1753,7 @@ bool PathPlannerNode::publishMLSMap(){
     }
 
     if (map_msg.patches.size() == 0){
-        RCLCPP_WARN(this->get_logger(), "Empty MLS Map!");
+        RCLCPP_WARN(this->get_logger(), "Cannot publish MLS map: map is empty.");
         return false;
     }
 
@@ -1274,7 +1857,7 @@ bool PathPlannerNode::publishTravMap(){
 
 
     if (map_msg.patches.size() == 0){
-        RCLCPP_WARN(this->get_logger(), "Empty Traversability Map!");
+        RCLCPP_WARN(this->get_logger(), "Cannot publish traversability map: map is empty (it is generated on configure/plan).");
         return false;
     }
 
@@ -1290,12 +1873,14 @@ void PathPlannerNode::triggerPlanningFromGUI(const base::Pose& /*start*/, const 
     }
 
     if (!got_map){
-        RCLCPP_WARN_STREAM(this->get_logger(), "Unable to process planning request because planner is in state NO_MAP!");
+        RCLCPP_WARN_STREAM(this->get_logger(), "GUI planning request rejected: no map available yet.");
+        publishStatus("Planning request rejected: no map available yet");
         return;
     }
 
     if (is_planning){
-        RCLCPP_WARN_STREAM(this->get_logger(), "Unable to process planning request because planner is in state PLANNING!");
+        RCLCPP_WARN_STREAM(this->get_logger(), "GUI planning request rejected: planner is busy with a previous request.");
+        publishStatus("Planning request rejected: planner is busy");
         return;
     }
 
@@ -1305,7 +1890,9 @@ void PathPlannerNode::triggerPlanningFromGUI(const base::Pose& /*start*/, const 
     if (!get_parameter("read_pose_from_topic").as_bool())
     {
         if (!updatePoseFromTF()){
-            RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to read start pose of the robot from TF!");
+            RCLCPP_ERROR_STREAM(this->get_logger(), "Cannot determine start pose: TF lookup "
+                                << get_parameter("world_frame").as_string() << " <- "
+                                << get_parameter("robot_frame").as_string() << " failed.");
             return;
         }
     }

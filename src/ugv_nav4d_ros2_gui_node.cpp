@@ -4,22 +4,6 @@
 #include "ugv_nav4d_ros2.hpp"
 #include <thread>
 
-#pragma message("Compiler version: " __VERSION__)
-#pragma message("C++ standard (__cplusplus): "  )
-#if defined(__cplusplus)
-  #if __cplusplus == 201703L
-    #pragma message("Standard value is C++17")
-  #elif __cplusplus == 202002L
-    #pragma message("Standard value is C++20")
-  #elif __cplusplus == 201402L
-    #pragma message("Standard value is C++14")
-  #elif __cplusplus == 201103L
-    #pragma message("Standard value is C++11")
-  #else
-    #pragma message("Standard value is unknown")
-  #endif
-#endif
-
 int main(int argc, char * argv[])
 {
     // Initialize ROS 2
@@ -91,9 +75,7 @@ int main(int argc, char * argv[])
 
     // Setup callback to trigger ROS 2 planning when "Plan" is requested from the GUI
     gui.customPlanCallback = [&gui, ros_node](const base::Pose& start, const base::Pose& goal) {
-        printf("DEBUG: customPlanCallback started\n");
         ros_node->triggerPlanningFromGUI(start, goal);
-        printf("DEBUG: triggerPlanningFromGUI returned\n");
 
         // Reflect the actual start pose used by the node (from TF / topic) in the GUI marker.
         base::Pose startPose = ros_node->getStartPose();
@@ -104,14 +86,10 @@ int main(int argc, char * argv[])
         auto path2D = ros_node->getLatestTrajectory2D();
         auto path3D = ros_node->getLatestTrajectory3D();
         auto res = ros_node->getLatestPlanningResult();
-        printf("DEBUG: got latest trajectories and result: %d\n", (int)res);
         
         QMetaObject::invokeMethod(&gui, [&gui, path2D, path3D, res]() {
-            printf("DEBUG: inside QMetaObject::invokeMethod lambda\n");
             gui.showPath(path2D, path3D, res);
-            printf("DEBUG: gui.showPath returned inside lambda\n");
         }, Qt::QueuedConnection);
-        printf("DEBUG: customPlanCallback returning\n");
     };
     
     // Show GUI Window

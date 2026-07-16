@@ -1,0 +1,8 @@
+# Edit the waypoint queue by number (1-based, as shown in the RViz markers).
+uint32 index
+# true: delete the waypoint; false: replace its pose with `pose`
+bool remove
+geometry_msgs/Pose pose
+---
+bool success
+string message
