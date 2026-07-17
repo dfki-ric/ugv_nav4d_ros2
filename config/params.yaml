@@ -18,6 +18,9 @@ ugv_nav4d_ros2:
     dumpOnError: false
     dumpOnSuccess: false
     return_face_forward: true # rotate return headings 180deg to prefer forward driving
+    mission_file: "ugv_nav4d_mission.txt"
+    speed_zone_surface_tolerance: 0.75 # max vertical error [m] when matching robot/zone to a TravMap surface
+    speed_zone_release_delay: 0.5 # seconds to retain a limit after leaving, preventing localization-edge chatter
     initialPatchRadius: 3.0
     #Mobility Parameters
     maxMotionCurveLength: 20.0
@@ -89,3 +92,23 @@ ugv_nav4d_ros2:
     #Trajectory Extension:
     extend_trajectory: true
     extension_distance: 2.0
+
+ugv_nav4d_field_operations:
+  ros__parameters:
+    localization_timeout: 2.0
+    # false: a loaded/pregenerated MLS remains valid after first publication.
+    # true: require periodic trav-map updates according to map_timeout.
+    monitor_map_freshness: false
+    map_timeout: 10.0
+    communications_timeout: 5.0
+    heartbeat_required: false
+    low_battery_percentage: 0.20
+    critical_battery_percentage: 0.10
+    # Policies: warn, pause, return. Return creates a preview and still requires
+    # operator approval before execution.
+    low_battery_policy: "warn"
+    lost_communications_policy: "warn"
+    cpu_load_warning: 90.0
+    cpu_temperature_warning: 85.0
+    disk_free_warning_gb: 2.0
+    mission_audit_file: "ugv_nav4d_mission_audit.jsonl"

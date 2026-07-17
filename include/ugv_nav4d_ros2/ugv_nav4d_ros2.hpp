@@ -5,6 +5,8 @@
 #include <functional>
 #include <atomic>
 #include <mutex>
+#include <unordered_set>
+#include <vector>
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
@@ -18,14 +20,20 @@
 #include <nav_msgs/msg/path.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/float32.hpp>
 
 #include "ugv_nav4d_ros2/msg/mls_map.hpp"
 #include "ugv_nav4d_ros2/msg/mls_patch.hpp"
 #include "ugv_nav4d_ros2/action/save_mls_map.hpp"
 #include "ugv_nav4d_ros2/msg/labeled_path_array.hpp"
 #include "ugv_nav4d_ros2/msg/forbidden_zone.hpp"
+#include "ugv_nav4d_ros2/msg/mission_status.hpp"
+#include "ugv_nav4d_ros2/msg/route_risk.hpp"
+#include "ugv_nav4d_ros2/msg/operational_zone_array.hpp"
 #include "ugv_nav4d_ros2/srv/edit_waypoint.hpp"
 #include "ugv_nav4d_ros2/srv/delete_forbidden_zone.hpp"
+#include "ugv_nav4d_ros2/srv/inspect_traversability.hpp"
 
 #include "ugv_nav4d_ros2/msg/trav_map.hpp"
 #include "ugv_nav4d_ros2/msg/trav_patch.hpp"
@@ -125,6 +133,20 @@ private:
                               std::shared_ptr<ugv_nav4d_ros2::srv::EditWaypoint::Response> response);
     void planThroughWaypoints(bool record_mission = true);
     void publishStatus(const std::string& status);
+    void publishMissionStatus(uint8_t state, const std::string& summary,
+                              const std::string& failure_reason = "");
+    void publishRouteRisk(const nav_msgs::msg::Path& path,
+                          const ugv_nav4d_ros2::msg::LabeledPathArray& labeled);
+    bool validatePendingPath();
+    void inspectTraversabilityCallback(
+        const std::shared_ptr<ugv_nav4d_ros2::srv::InspectTraversability::Request> request,
+        std::shared_ptr<ugv_nav4d_ros2::srv::InspectTraversability::Response> response);
+    void replanCurrentMissionCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                                      std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+    void saveMissionCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                             std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+    void loadMissionCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                             std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void saveMapCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                          std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void executePathCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
@@ -140,11 +162,13 @@ private:
                                          std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void publishForbiddenZoneMarkers();
     void applyForbiddenZones();
-    void onForbiddenZonesChanged();
+    void onForbiddenZonesChanged(bool planning_graph_changed);
     void deleteForbiddenZoneCallback(const std::shared_ptr<ugv_nav4d_ros2::srv::DeleteForbiddenZone::Request> request,
                                      std::shared_ptr<ugv_nav4d_ros2::srv::DeleteForbiddenZone::Response> response);
     void planReturnCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                             std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+    void planReturnCurrentCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                                   std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void setReturnForwardCallback(const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
                                   std::shared_ptr<std_srvs::srv::SetBool::Response> response);
     void publishPlannedPath(const std::vector<trajectory_follower::SubTrajectory>& trajectory3D, bool found_solution);
@@ -163,6 +187,9 @@ private:
     bool publishMaps();
     void parameterUpdateTimerCallback();
     void poseUpdateTimerCallback();
+    void rebuildSpeedZoneCache();
+    void publishZoneSpeedLimit(const geometry_msgs::msg::Point& robot_position);
+    void emitZoneSpeedLimit(float limit);
 
     //action server
     rclcpp_action::GoalResponse actionSaveMap(
@@ -192,6 +219,8 @@ private:
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr colored_path_publisher;
     rclcpp::Publisher<ugv_nav4d_ros2::msg::TravMap>::SharedPtr trav_map_publisher;
     rclcpp::Publisher<ugv_nav4d_ros2::msg::MLSMap>::SharedPtr mls_map_publisher;
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr robot_pose_publisher;
+    rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr zone_speed_limit_publisher;
 
     //services
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_publish_service;
@@ -207,7 +236,14 @@ private:
 
     //operator feedback
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_publisher;
+    rclcpp::Publisher<ugv_nav4d_ros2::msg::MissionStatus>::SharedPtr mission_status_publisher;
+    rclcpp::Publisher<ugv_nav4d_ros2::msg::RouteRisk>::SharedPtr route_risk_publisher;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr route_valid_publisher;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr save_map_service;
+    rclcpp::Service<ugv_nav4d_ros2::srv::InspectTraversability>::SharedPtr inspect_traversability_service;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr replan_current_mission_service;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr save_mission_service;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr load_mission_service;
 
     //execution gate: planned paths are only previews until confirmed
     rclcpp::Publisher<ugv_nav4d_ros2::msg::LabeledPathArray>::SharedPtr execute_path_publisher;
@@ -215,18 +251,24 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr discard_path_service;
     ugv_nav4d_ros2::msg::LabeledPathArray pending_labeled_path;
     bool has_pending_path{false};
+    bool path_approved{false};
 
     //forbidden zones (keep-out): applied to the trav map after every regeneration
     rclcpp::Subscription<ugv_nav4d_ros2::msg::ForbiddenZone>::SharedPtr sub_add_forbidden_zone;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr clear_forbidden_zones_service;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr remove_last_forbidden_zone_service;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr forbidden_zone_marker_publisher;
+    rclcpp::Publisher<ugv_nav4d_ros2::msg::OperationalZoneArray>::SharedPtr operational_zones_publisher;
     rclcpp::Service<ugv_nav4d_ros2::srv::DeleteForbiddenZone>::SharedPtr delete_forbidden_zone_service;
     std::vector<ugv_nav4d_ros2::msg::ForbiddenZone> forbidden_zones;
+    std::vector<std::unordered_set<const traversability_generator3d::TravGenNode*>> speed_zone_node_sets;
+    float last_zone_speed_limit{0.0f};
+    rclcpp::Time last_zone_speed_limit_match;
 
     // Return mission: endpoints of the last outward mission. Keeping both
     // makes return planning independent of the robot's live pose.
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr plan_return_service;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr plan_return_current_service;
     rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr set_return_forward_service;
     base::samples::RigidBodyState last_mission_start;
     base::samples::RigidBodyState last_mission_goal;

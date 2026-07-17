@@ -115,4 +115,24 @@ def generate_launch_description():
         )
     )
 
+    declared_arguments.append(
+        Node(
+        package="ugv_nav4d_ros2",
+        executable="follow_path_client.py",
+        name="ugv_nav4d_follow_path_client",
+        output="screen",
+        parameters=[LaunchConfiguration("main_param_file")],
+        )
+    )
+
+    declared_arguments.append(
+        Node(
+        package="ugv_nav4d_ros2",
+        executable="field_operations.py",
+        name="ugv_nav4d_field_operations",
+        output="screen",
+        parameters=[LaunchConfiguration("main_param_file")],
+        )
+    )
+
     return LaunchDescription(declared_arguments)

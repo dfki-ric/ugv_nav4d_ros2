@@ -1,3 +1,4 @@
+<class_libraries>
 <library path="ugv_nav4d_ros2_trav_map_plugin">
   <class name="TraversabilityMap"
          type="ugv_nav4d_ros2::ugv_nav4d_ros2_trav_map_plugin::TravMapDisplay"
@@ -42,9 +43,8 @@
   <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_forbidden_zone_tool::ForbiddenZoneTool"
          base_class_type="rviz_common::Tool">
     <description>
-      Draws a polygonal keep-out zone on the map (left-click vertices, minimum 3,
-      right-click to close); the planner marks the covered traversability nodes
-      as obstacles.
+      Draws a polygonal operational zone on the map. Zone properties select
+      keep-out, caution, speed-limit, preferred, direction, or note semantics.
     </description>
   </class>
 </library>
@@ -53,8 +53,19 @@
   <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_operator_panel::OperatorPanel"
          base_class_type="rviz_common::Panel">
     <description>
-      Field operator panel: live planner status plus one-click waypoint-queue
-      and map save/republish actions.
+      Field operator panel: planner/execution status, route risk, system health,
+      pause/resume/abort/replan, mission editing, persistence, and map actions.
     </description>
   </class>
 </library>
+
+<library path="ugv_nav4d_ros2_inspect_tool">
+  <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_inspect_tool::InspectTraversabilityTool"
+         base_class_type="rviz_common::Tool">
+    <description>
+      Click a traversability patch to show its classification, slope, cost, and
+      permitted heading bands.
+    </description>
+  </class>
+</library>
+</class_libraries>

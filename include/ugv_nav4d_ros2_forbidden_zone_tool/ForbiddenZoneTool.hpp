@@ -24,6 +24,8 @@ namespace rviz_common
 namespace properties
 {
 class StringProperty;
+class EnumProperty;
+class FloatProperty;
 }
 }
 
@@ -33,11 +35,11 @@ namespace ugv_nav4d_ros2_forbidden_zone_tool
 {
 
 /**
- * Draws a polygonal keep-out zone on the map: left-click on patches to add
- * vertices (minimum 3), right-click to close the polygon and send it to the
- * planner, which marks the covered trav nodes as obstacles. Deactivating the
- * tool discards an unfinished polygon. The tool stays active after closing a
- * polygon so several zones can be added in a row.
+ * Draws a polygonal operational zone on the map: left-click on patches to add
+ * vertices (minimum 3), then right-click to close and publish it. RViz tool
+ * properties select keep-out, caution, speed-limit, preferred-corridor,
+ * direction-restricted, or annotation semantics. Deactivating the tool
+ * discards an unfinished polygon.
  */
 class ForbiddenZoneTool : public rviz_common::Tool
 {
@@ -73,6 +75,12 @@ private:
     rclcpp::Clock::SharedPtr clock_;
 
     rviz_common::properties::StringProperty* topic_property_;
+    rviz_common::properties::EnumProperty* zone_type_property_;
+    rviz_common::properties::StringProperty* label_property_;
+    rviz_common::properties::FloatProperty* cost_multiplier_property_;
+    rviz_common::properties::FloatProperty* speed_limit_property_;
+    rviz_common::properties::FloatProperty* heading_property_;
+    rviz_common::properties::FloatProperty* duration_property_;
 };
 
 } // namespace ugv_nav4d_ros2_forbidden_zone_tool

@@ -22,16 +22,42 @@ OperatorPanel::OperatorPanel(QWidget* parent)
 {
     auto* layout = new QVBoxLayout;
 
+    // Safety-critical control stays above all variable-height status text so
+    // long planner/health messages can never push it out of the panel viewport.
+    stop_button_ = new QPushButton("STOP");
+    stop_button_->setMinimumHeight(44);
+    stop_button_->setStyleSheet("QPushButton { font-weight: bold; font-size: 16px; background-color: #b71c1c; color: white; padding: 6px; }");
+    layout->addWidget(stop_button_);
+
     status_label_ = new QLabel("(waiting for planner status)");
     status_label_->setWordWrap(true);
+    status_label_->setMaximumHeight(60);
     status_label_->setStyleSheet("QLabel { font-weight: bold; }");
     layout->addWidget(new QLabel("Planner status:"));
     layout->addWidget(status_label_);
 
+    execution_label_ = new QLabel("Execution: idle");
+    execution_label_->setWordWrap(true);
+    execution_label_->setMaximumHeight(60);
+    risk_label_ = new QLabel("Route risk: no path");
+    risk_label_->setWordWrap(true);
+    risk_label_->setMaximumHeight(60);
+    health_label_ = new QLabel("System health: waiting");
+    health_label_->setWordWrap(true);
+    health_label_->setMaximumHeight(60);
+    inspection_label_ = new QLabel("Inspection: select Inspect Traversability and click a map patch");
+    inspection_label_->setWordWrap(true);
+    inspection_label_->setMaximumHeight(60);
+    inspection_label_->setStyleSheet("QLabel { color: #69a8ff; }");
+    layout->addWidget(execution_label_);
+    layout->addWidget(risk_label_);
+    layout->addWidget(health_label_);
+    layout->addWidget(inspection_label_);
+
     auto* buttons = new QGridLayout;
-    stop_button_ = new QPushButton("STOP");
-    stop_button_->setStyleSheet("QPushButton { font-weight: bold; font-size: 16px; background-color: #b71c1c; color: white; padding: 6px; }");
-    buttons->addWidget(stop_button_, 0, 0, 1, 2);
+    pause_button_ = new QPushButton("Pause");
+    resume_button_ = new QPushButton("Resume");
+    replan_button_ = new QPushButton("Replan from robot");
     execute_path_button_ = new QPushButton("Execute path");
     execute_path_button_->setStyleSheet("QPushButton { font-weight: bold; background-color: #2e7d32; color: white; }");
     discard_path_button_ = new QPushButton("Discard path");
@@ -42,15 +68,22 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     save_map_button_ = new QPushButton("Save MLS map");
     republish_maps_button_ = new QPushButton("Republish maps");
     regenerate_maps_button_ = new QPushButton("Regenerate maps");
-    buttons->addWidget(execute_path_button_, 1, 0);
-    buttons->addWidget(discard_path_button_, 1, 1);
-    buttons->addWidget(clear_waypoints_button_, 2, 0);
-    buttons->addWidget(undo_waypoint_button_, 2, 1);
-    buttons->addWidget(clear_zones_button_, 3, 0);
-    buttons->addWidget(undo_zone_button_, 3, 1);
-    buttons->addWidget(save_map_button_, 4, 0);
-    buttons->addWidget(republish_maps_button_, 4, 1);
-    buttons->addWidget(regenerate_maps_button_, 5, 0, 1, 2);
+    buttons->addWidget(pause_button_, 0, 0);
+    buttons->addWidget(resume_button_, 0, 1);
+    buttons->addWidget(replan_button_, 1, 0, 1, 2);
+    buttons->addWidget(execute_path_button_, 2, 0);
+    buttons->addWidget(discard_path_button_, 2, 1);
+    buttons->addWidget(clear_waypoints_button_, 3, 0);
+    buttons->addWidget(undo_waypoint_button_, 3, 1);
+    buttons->addWidget(clear_zones_button_, 4, 0);
+    buttons->addWidget(undo_zone_button_, 4, 1);
+    buttons->addWidget(save_map_button_, 5, 0);
+    buttons->addWidget(republish_maps_button_, 5, 1);
+    buttons->addWidget(regenerate_maps_button_, 6, 0, 1, 2);
+    save_mission_button_ = new QPushButton("Save mission");
+    load_mission_button_ = new QPushButton("Load mission");
+    buttons->addWidget(save_mission_button_, 7, 0);
+    buttons->addWidget(load_mission_button_, 7, 1);
     plan_return_button_ = new QPushButton("Plan return");
     layout->addLayout(buttons);
 
@@ -87,6 +120,9 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     setLayout(layout);
 
     connect(stop_button_, &QPushButton::clicked, this, &OperatorPanel::onStopExecution);
+    connect(pause_button_, &QPushButton::clicked, this, &OperatorPanel::onPauseExecution);
+    connect(resume_button_, &QPushButton::clicked, this, &OperatorPanel::onResumeExecution);
+    connect(replan_button_, &QPushButton::clicked, this, &OperatorPanel::onReplanMission);
     connect(execute_path_button_, &QPushButton::clicked, this, &OperatorPanel::onExecutePath);
     connect(discard_path_button_, &QPushButton::clicked, this, &OperatorPanel::onDiscardPath);
     connect(delete_waypoint_button_, &QPushButton::clicked, this, &OperatorPanel::onDeleteWaypoint);
@@ -101,6 +137,9 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     connect(save_map_button_, &QPushButton::clicked, this, &OperatorPanel::onSaveMap);
     connect(republish_maps_button_, &QPushButton::clicked, this, &OperatorPanel::onRepublishMaps);
     connect(regenerate_maps_button_, &QPushButton::clicked, this, &OperatorPanel::onRegenerateMaps);
+    connect(save_mission_button_, &QPushButton::clicked, this, &OperatorPanel::onSaveMission);
+    connect(load_mission_button_, &QPushButton::clicked, this, &OperatorPanel::onLoadMission);
+    updateExecuteEnabled();
 }
 
 OperatorPanel::~OperatorPanel() = default;
@@ -117,8 +156,60 @@ void OperatorPanel::onInitialize()
         {
             setStatusText(QString::fromStdString(msg->data));
         });
+    execution_status_sub_ = node_->create_subscription<ugv_nav4d_ros2::msg::MissionStatus>(
+        "/ugv_nav4d_ros2/execution_status", 10,
+        [this](const ugv_nav4d_ros2::msg::MissionStatus::SharedPtr msg)
+        {
+            const QString text = QString("Execution: %1 — %2 [%3/%4], %5 m remaining")
+                .arg(QString::fromStdString(msg->state_name))
+                .arg(QString::fromStdString(msg->summary))
+                .arg(msg->current_segment).arg(msg->total_segments)
+                .arg(msg->distance_remaining, 0, 'f', 1);
+            QMetaObject::invokeMethod(execution_label_, [label = execution_label_, text]() {
+                label->setText(text);
+                label->setToolTip(text);
+            }, Qt::QueuedConnection);
+        });
+    route_risk_sub_ = node_->create_subscription<ugv_nav4d_ros2::msg::RouteRisk>(
+        "/ugv_nav4d_ros2/route_risk", rclcpp::QoS(1).transient_local(),
+        [this](const ugv_nav4d_ros2::msg::RouteRisk::SharedPtr msg)
+        {
+            const QString text = "Route risk: " + QString::fromStdString(msg->summary);
+            QMetaObject::invokeMethod(this, [this, text, valid = msg->valid]() {
+                risk_label_->setText(text);
+                risk_label_->setToolTip(text);
+                route_ready_ = valid;
+                updateExecuteEnabled();
+            }, Qt::QueuedConnection);
+        });
+    system_health_sub_ = node_->create_subscription<ugv_nav4d_ros2::msg::SystemHealth>(
+        "/ugv_nav4d_ros2/system_health", 10,
+        [this](const ugv_nav4d_ros2::msg::SystemHealth::SharedPtr msg)
+        {
+            const QString text = "System health: " + QString::fromStdString(msg->summary);
+            QMetaObject::invokeMethod(this, [this, text, level = msg->level]() {
+                health_label_->setText(text);
+                health_label_->setToolTip(text);
+                health_label_->setStyleSheet(level == ugv_nav4d_ros2::msg::SystemHealth::OK
+                    ? "QLabel { color: #2e7d32; }" : "QLabel { color: #c62828; font-weight: bold; }");
+                health_ok_ = level != ugv_nav4d_ros2::msg::SystemHealth::ERROR;
+                updateExecuteEnabled();
+            }, Qt::QueuedConnection);
+        });
+    inspection_result_sub_ = node_->create_subscription<std_msgs::msg::String>(
+        "/ugv_nav4d_ros2/inspection_result", rclcpp::QoS(1).transient_local(),
+        [this](const std_msgs::msg::String::SharedPtr msg)
+        {
+            const QString text = "Inspection: " + QString::fromStdString(msg->data);
+            QMetaObject::invokeMethod(inspection_label_,
+                [label = inspection_label_, text]() { label->setText(text); label->setToolTip(text); },
+                Qt::QueuedConnection);
+        });
 
     stop_execution_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/stop_execution");
+    pause_execution_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/pause_execution");
+    resume_execution_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/resume_execution");
+    replan_mission_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/replan_current_mission");
     execute_path_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/execute_path");
     discard_path_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/discard_path");
     edit_waypoint_client_ = node_->create_client<ugv_nav4d_ros2::srv::EditWaypoint>("/ugv_nav4d_ros2/edit_waypoint");
@@ -132,6 +223,8 @@ void OperatorPanel::onInitialize()
     save_map_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/save_mls_map");
     map_publish_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/map_publish");
     regenerate_maps_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/regenerate_maps");
+    save_mission_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/save_mission");
+    load_mission_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/load_mission");
 
 }
 
@@ -142,7 +235,16 @@ void OperatorPanel::setStatusText(const QString& text)
     QMetaObject::invokeMethod(status_label_, [label = status_label_, text]()
     {
         label->setText(text);
+        label->setToolTip(text);
     }, Qt::QueuedConnection);
+}
+
+void OperatorPanel::updateExecuteEnabled()
+{
+    execute_path_button_->setEnabled(health_ok_ && route_ready_);
+    execute_path_button_->setToolTip(health_ok_ && route_ready_
+        ? "Send the reviewed path to the controller."
+        : "Execution requires a valid route and non-error system health.");
 }
 
 void OperatorPanel::callTrigger(const rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr& client,
@@ -180,6 +282,21 @@ void OperatorPanel::callTrigger(const rclcpp::Client<std_srvs::srv::Trigger>::Sh
 void OperatorPanel::onStopExecution()
 {
     callTrigger(stop_execution_client_, "STOP");
+}
+
+void OperatorPanel::onPauseExecution()
+{
+    callTrigger(pause_execution_client_, "Pause");
+}
+
+void OperatorPanel::onResumeExecution()
+{
+    callTrigger(resume_execution_client_, "Resume");
+}
+
+void OperatorPanel::onReplanMission()
+{
+    callTrigger(replan_mission_client_, "Replan");
 }
 
 void OperatorPanel::onExecutePath()
@@ -288,6 +405,16 @@ void OperatorPanel::onRepublishMaps()
 void OperatorPanel::onRegenerateMaps()
 {
     callTrigger(regenerate_maps_client_, "Regenerate maps");
+}
+
+void OperatorPanel::onSaveMission()
+{
+    callTrigger(save_mission_client_, "Save mission");
+}
+
+void OperatorPanel::onLoadMission()
+{
+    callTrigger(load_mission_client_, "Load mission");
 }
 
 } // namespace ugv_nav4d_ros2_operator_panel

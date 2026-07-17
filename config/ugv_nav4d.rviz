@@ -19,7 +19,7 @@ Panels:
       - /Publish Point1
       - /3D Goal Pose1
       - /Add 3D Waypoint1
-      - /Add Forbidden Zone1
+      - /Add Operational Zone1
     Name: Tool Properties
     Splitter Ratio: 0.5886790156364441
   - Class: rviz_common/Views
@@ -5404,7 +5404,14 @@ Visualization Manager:
       Replace Index: 0
       Topic: /ugv_nav4d_ros2/add_waypoint
     - Class: ugv_nav4d_ros2::ugv_nav4d_ros2_forbidden_zone_tool::ForbiddenZoneTool
+      Cost multiplier: 2
+      Duration: 0
+      Label: ""
+      Preferred heading: 0
+      Speed limit: 0.25
       Topic: /ugv_nav4d_ros2/add_forbidden_zone
+      Zone type: Keep-out
+    - Class: ugv_nav4d_ros2::ugv_nav4d_ros2_inspect_tool::InspectTraversabilityTool
   Transformation:
     Current:
       Class: rviz_default_plugins/TF

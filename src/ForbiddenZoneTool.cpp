@@ -12,6 +12,8 @@
 #include <rviz_common/viewport_mouse_event.hpp>
 #include <rviz_common/interaction/view_picker_iface.hpp>
 #include <rviz_common/properties/string_property.hpp>
+#include <rviz_common/properties/enum_property.hpp>
+#include <rviz_common/properties/float_property.hpp>
 #include <rviz_rendering/objects/billboard_line.hpp>
 #include <rviz_rendering/objects/shape.hpp>
 #include <rviz_rendering/render_window.hpp>
@@ -28,8 +30,30 @@ ForbiddenZoneTool::ForbiddenZoneTool()
 
     topic_property_ = new rviz_common::properties::StringProperty(
         "Topic", "/ugv_nav4d_ros2/add_forbidden_zone",
-        "Topic on which the forbidden zone polygon is published.",
+        "Topic on which the operational zone polygon is published.",
         getPropertyContainer(), SLOT(updateTopic()), this);
+    zone_type_property_ = new rviz_common::properties::EnumProperty(
+        "Zone type", "Keep-out", "How this polygon affects planning/execution.",
+        getPropertyContainer());
+    zone_type_property_->addOption("Keep-out", ugv_nav4d_ros2::msg::ForbiddenZone::KEEP_OUT);
+    zone_type_property_->addOption("Caution / high cost", ugv_nav4d_ros2::msg::ForbiddenZone::CAUTION);
+    zone_type_property_->addOption("Speed limit", ugv_nav4d_ros2::msg::ForbiddenZone::SPEED_LIMIT);
+    zone_type_property_->addOption("Preferred corridor", ugv_nav4d_ros2::msg::ForbiddenZone::PREFERRED);
+    zone_type_property_->addOption("Direction restricted", ugv_nav4d_ros2::msg::ForbiddenZone::DIRECTION_RESTRICTED);
+    zone_type_property_->addOption("Annotation", ugv_nav4d_ros2::msg::ForbiddenZone::ANNOTATION);
+    label_property_ = new rviz_common::properties::StringProperty(
+        "Label", "", "Operator note displayed above the zone.", getPropertyContainer());
+    cost_multiplier_property_ = new rviz_common::properties::FloatProperty(
+        "Cost multiplier", 2.0, "Caution penalty or preferred-corridor divisor.", getPropertyContainer());
+    cost_multiplier_property_->setMin(1.0);
+    speed_limit_property_ = new rviz_common::properties::FloatProperty(
+        "Speed limit", 0.25, "Execution speed limit in m/s.", getPropertyContainer());
+    speed_limit_property_->setMin(0.0);
+    heading_property_ = new rviz_common::properties::FloatProperty(
+        "Preferred heading", 0.0, "Direction-zone heading in radians.", getPropertyContainer());
+    duration_property_ = new rviz_common::properties::FloatProperty(
+        "Duration", 0.0, "Zone lifetime in seconds; zero means no expiry.", getPropertyContainer());
+    duration_property_->setMin(0.0);
 }
 
 ForbiddenZoneTool::~ForbiddenZoneTool() = default;
@@ -42,7 +66,7 @@ void ForbiddenZoneTool::onInitialize()
 
     projection_finder_ = std::make_shared<rviz_rendering::ViewportProjectionFinder>();
 
-    setName("Add Forbidden Zone");
+    setName("Add Operational Zone");
     updateTopic();
 }
 
@@ -192,6 +216,19 @@ void ForbiddenZoneTool::publishZone()
     ugv_nav4d_ros2::msg::ForbiddenZone zone;
     zone.header.frame_id = context_->getFixedFrame().toStdString();
     zone.header.stamp = clock_->now();
+    zone.zone_type = static_cast<uint8_t>(zone_type_property_->getOptionInt());
+    zone.label = label_property_->getStdString();
+    zone.cost_multiplier = cost_multiplier_property_->getFloat();
+    zone.speed_limit = speed_limit_property_->getFloat();
+    zone.preferred_heading = heading_property_->getFloat();
+    if (duration_property_->getFloat() > 0.0f)
+    {
+        const rclcpp::Time expiry = clock_->now() + rclcpp::Duration::from_seconds(
+            duration_property_->getFloat());
+        const int64_t expiry_nanoseconds = expiry.nanoseconds();
+        zone.expires_at.sec = static_cast<int32_t>(expiry_nanoseconds / 1000000000LL);
+        zone.expires_at.nanosec = static_cast<uint32_t>(expiry_nanoseconds % 1000000000LL);
+    }
     const auto ordered = orderedVertices();
     zone.vertices.reserve(ordered.size());
     for (const auto& v : ordered)
@@ -204,7 +241,7 @@ void ForbiddenZoneTool::publishZone()
     }
 
     RVIZ_COMMON_LOG_INFO_STREAM(
-        "Publishing forbidden zone on " << topic_property_->getStdString()
+        "Publishing operational zone on " << topic_property_->getStdString()
         << ": " << zone.vertices.size() << " vertices, frame " << zone.header.frame_id);
 
     publisher_->publish(zone);

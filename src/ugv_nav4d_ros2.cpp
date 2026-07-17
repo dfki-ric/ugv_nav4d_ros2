@@ -11,9 +11,11 @@
 #include <boost/archive/binary_iarchive.hpp>
 
 #include <algorithm>
+#include <array>
 #include <fstream>
 #include <cmath>
 #include <chrono>
+#include <cctype>
 #include <deque>
 #include <iomanip>
 #include <limits>
@@ -23,6 +25,24 @@
 using namespace rclcpp;
 
 namespace ugv_nav4d_ros2 {
+
+namespace {
+
+bool zoneAffectsPlanning(const ugv_nav4d_ros2::msg::ForbiddenZone& zone)
+{
+    return zone.zone_type != ugv_nav4d_ros2::msg::ForbiddenZone::SPEED_LIMIT &&
+           zone.zone_type != ugv_nav4d_ros2::msg::ForbiddenZone::ANNOTATION;
+}
+
+std::string normalizedFrame(std::string frame)
+{
+    while (!frame.empty() && frame.front() == '/'){
+        frame.erase(frame.begin());
+    }
+    return frame;
+}
+
+} // namespace
 
 PathPlannerNode::PathPlannerNode()
     : Node("ugv_nav4d_ros2")
@@ -61,8 +81,14 @@ PathPlannerNode::PathPlannerNode()
             "/ugv_nav4d_ros2/mission_path", rclcpp::QoS(1).transient_local());
     trav_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::TravMap>("/ugv_nav4d_ros2/trav_map", 10);
     mls_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::MLSMap>("/ugv_nav4d_ros2/mls_map", 10);
+    robot_pose_publisher = this->create_publisher<geometry_msgs::msg::PoseStamped>(
+            "/ugv_nav4d_ros2/robot_pose", 10);
+    zone_speed_limit_publisher = this->create_publisher<std_msgs::msg::Float32>(
+            "/ugv_nav4d_ros2/zone_speed_limit", 10);
+    last_zone_speed_limit_match = this->get_clock()->now();
 
     setupSubscriptions();
+    publishMissionStatus(ugv_nav4d_ros2::msg::MissionStatus::READY, "Planner node started");
 }
 
 void PathPlannerNode::setupSubscriptions()
@@ -111,9 +137,23 @@ void PathPlannerNode::setupSubscriptions()
     // late-joining RViz panel immediately sees the current state).
     status_publisher = this->create_publisher<std_msgs::msg::String>(
             "/ugv_nav4d_ros2/status", rclcpp::QoS(1).transient_local());
+    mission_status_publisher = this->create_publisher<ugv_nav4d_ros2::msg::MissionStatus>(
+            "/ugv_nav4d_ros2/planner_status", rclcpp::QoS(1).transient_local());
+    route_risk_publisher = this->create_publisher<ugv_nav4d_ros2::msg::RouteRisk>(
+            "/ugv_nav4d_ros2/route_risk", rclcpp::QoS(1).transient_local());
+    route_valid_publisher = this->create_publisher<std_msgs::msg::Bool>(
+            "/ugv_nav4d_ros2/route_valid", rclcpp::QoS(1).transient_local());
 
     save_map_service = this->create_service<std_srvs::srv::Trigger>(
             "/ugv_nav4d_ros2/save_mls_map", std::bind(&PathPlannerNode::saveMapCallback, this, std::placeholders::_1, std::placeholders::_2));
+    inspect_traversability_service = this->create_service<ugv_nav4d_ros2::srv::InspectTraversability>(
+            "/ugv_nav4d_ros2/inspect_traversability", std::bind(&PathPlannerNode::inspectTraversabilityCallback, this, std::placeholders::_1, std::placeholders::_2));
+    replan_current_mission_service = this->create_service<std_srvs::srv::Trigger>(
+            "/ugv_nav4d_ros2/replan_current_mission", std::bind(&PathPlannerNode::replanCurrentMissionCallback, this, std::placeholders::_1, std::placeholders::_2));
+    save_mission_service = this->create_service<std_srvs::srv::Trigger>(
+            "/ugv_nav4d_ros2/save_mission", std::bind(&PathPlannerNode::saveMissionCallback, this, std::placeholders::_1, std::placeholders::_2));
+    load_mission_service = this->create_service<std_srvs::srv::Trigger>(
+            "/ugv_nav4d_ros2/load_mission", std::bind(&PathPlannerNode::loadMissionCallback, this, std::placeholders::_1, std::placeholders::_2));
 
     // Execution gate: planning only publishes a preview (path / labeled_path_segments /
     // colored_path). The follower listens on execute_path_segments, which is only
@@ -140,6 +180,8 @@ void PathPlannerNode::setupSubscriptions()
 
     forbidden_zone_marker_publisher = this->create_publisher<visualization_msgs::msg::MarkerArray>(
             "/ugv_nav4d_ros2/forbidden_zone_markers", rclcpp::QoS(1).transient_local());
+    operational_zones_publisher = this->create_publisher<ugv_nav4d_ros2::msg::OperationalZoneArray>(
+            "/ugv_nav4d_ros2/operational_zones", rclcpp::QoS(1).transient_local());
 
     delete_forbidden_zone_service = this->create_service<ugv_nav4d_ros2::srv::DeleteForbiddenZone>(
             "/ugv_nav4d_ros2/delete_forbidden_zone", std::bind(&PathPlannerNode::deleteForbiddenZoneCallback, this, std::placeholders::_1, std::placeholders::_2));
@@ -148,6 +190,8 @@ void PathPlannerNode::setupSubscriptions()
     // reverse order.
     plan_return_service = this->create_service<std_srvs::srv::Trigger>(
             "/ugv_nav4d_ros2/plan_return", std::bind(&PathPlannerNode::planReturnCallback, this, std::placeholders::_1, std::placeholders::_2));
+    plan_return_current_service = this->create_service<std_srvs::srv::Trigger>(
+            "/ugv_nav4d_ros2/plan_return_current", std::bind(&PathPlannerNode::planReturnCurrentCallback, this, std::placeholders::_1, std::placeholders::_2));
     set_return_forward_service = this->create_service<std_srvs::srv::SetBool>(
             "/ugv_nav4d_ros2/set_return_forward", std::bind(&PathPlannerNode::setReturnForwardCallback, this, std::placeholders::_1, std::placeholders::_2));
 
@@ -186,13 +230,31 @@ void PathPlannerNode::parameterUpdateTimerCallback(){
         RCLCPP_INFO(this->get_logger(), "Parameters changed; reconfiguring planner.");
         configurePlanner();
     }
+    const auto now = this->get_clock()->now();
+    const size_t old_zone_count = forbidden_zones.size();
+    const bool planning_zone_expired = std::any_of(
+        forbidden_zones.begin(), forbidden_zones.end(),
+        [&now](const auto& zone){
+            const bool expired =
+                (zone.expires_at.sec != 0 || zone.expires_at.nanosec != 0) &&
+                rclcpp::Time(zone.expires_at) <= now;
+            return expired && zoneAffectsPlanning(zone);
+        });
+    forbidden_zones.erase(
+        std::remove_if(forbidden_zones.begin(), forbidden_zones.end(),
+            [&now](const auto& zone){
+                return (zone.expires_at.sec != 0 || zone.expires_at.nanosec != 0) &&
+                       rclcpp::Time(zone.expires_at) <= now;
+            }),
+        forbidden_zones.end());
+    if (forbidden_zones.size() != old_zone_count){
+        publishStatus(std::to_string(old_zone_count - forbidden_zones.size()) +
+                      " temporary operational zone(s) expired");
+        onForbiddenZonesChanged(planning_zone_expired);
+    }
 }
 
 void PathPlannerNode::poseUpdateTimerCallback(){
-    if (!pose_update_callback){
-        return;
-    }
-
     base::Pose pose;
     {
         std::lock_guard<std::recursive_mutex> lock(planner_mutex);
@@ -204,7 +266,14 @@ void PathPlannerNode::poseUpdateTimerCallback(){
         }
         pose = getStartPose();
     }
-    pose_update_callback(pose);
+    geometry_msgs::msg::PoseStamped pose_message = start_pose;
+    pose_message.header.stamp = this->get_clock()->now();
+    pose_message.header.frame_id = get_parameter("world_frame").as_string();
+    robot_pose_publisher->publish(pose_message);
+    publishZoneSpeedLimit(pose_message.pose.position);
+    if (pose_update_callback){
+        pose_update_callback(pose);
+    }
 }
 
 rcl_interfaces::msg::SetParametersResult PathPlannerNode::parametersCallback(const std::vector<rclcpp::Parameter> &parameters){
@@ -301,6 +370,12 @@ void PathPlannerNode::regenerateMapsCallback(
         return;
     }
 
+    has_pending_path = false;
+    path_approved = false;
+    std_msgs::msg::Bool route_valid;
+    route_valid.data = false;
+    route_valid_publisher->publish(route_valid);
+
     publishStatus("Regenerating MLS and traversability maps...");
     if (get_parameter("load_mls_from_file").as_bool())
     {
@@ -388,8 +463,10 @@ void PathPlannerNode::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedP
             auto startPosition = ground2Mls.translation();
             traversability_generator_ptr->expandAll(startPosition);
             applyForbiddenZones();
+            rebuildSpeedZoneCache();
             auto travMap = traversability_generator_ptr->getTraversabilityMap();
             planner_ptr->updateMap(travMap);
+            validatePendingPath();
             RCLCPP_INFO(this->get_logger(), "Planner state: Ready");
             publishStatus("Ready");
             if (map_update_callback) {
@@ -672,6 +749,113 @@ void PathPlannerNode::publishStatus(const std::string& status){
     if (status_callback) {
         status_callback(status);
     }
+
+    std::string lower = status;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+    uint8_t state = ugv_nav4d_ros2::msg::MissionStatus::READY;
+    std::string failure;
+    if (lower.find("planning") != std::string::npos){
+        state = ugv_nav4d_ros2::msg::MissionStatus::PLANNING;
+    } else if (lower.find("path ready") != std::string::npos){
+        state = ugv_nav4d_ros2::msg::MissionStatus::AWAITING_APPROVAL;
+    } else if (lower.find("sent to follower") != std::string::npos){
+        state = ugv_nav4d_ros2::msg::MissionStatus::EXECUTING;
+    } else if (lower.find("failed") != std::string::npos ||
+               lower.find("cannot") != std::string::npos ||
+               lower.find("no map") != std::string::npos){
+        state = ugv_nav4d_ros2::msg::MissionStatus::FAILED;
+        failure = status;
+    }
+    publishMissionStatus(state, status, failure);
+}
+
+void PathPlannerNode::publishMissionStatus(uint8_t state, const std::string& summary,
+                                           const std::string& failure_reason){
+    if (!mission_status_publisher){
+        return;
+    }
+    ugv_nav4d_ros2::msg::MissionStatus msg;
+    msg.header.stamp = this->get_clock()->now();
+    msg.header.frame_id = get_parameter("world_frame").as_string();
+    msg.state = state;
+    switch (state){
+        case ugv_nav4d_ros2::msg::MissionStatus::READY: msg.state_name = "READY"; break;
+        case ugv_nav4d_ros2::msg::MissionStatus::PLANNING: msg.state_name = "PLANNING"; break;
+        case ugv_nav4d_ros2::msg::MissionStatus::AWAITING_APPROVAL: msg.state_name = "AWAITING_APPROVAL"; break;
+        case ugv_nav4d_ros2::msg::MissionStatus::EXECUTING: msg.state_name = "EXECUTING"; break;
+        case ugv_nav4d_ros2::msg::MissionStatus::PAUSED: msg.state_name = "PAUSED"; break;
+        case ugv_nav4d_ros2::msg::MissionStatus::COMPLETED: msg.state_name = "COMPLETED"; break;
+        case ugv_nav4d_ros2::msg::MissionStatus::FAILED: msg.state_name = "FAILED"; break;
+        case ugv_nav4d_ros2::msg::MissionStatus::ABORTED: msg.state_name = "ABORTED"; break;
+        default: msg.state_name = "IDLE"; break;
+    }
+    msg.summary = summary;
+    msg.failure_reason = failure_reason;
+    msg.total_segments = static_cast<uint32_t>(pending_labeled_path.paths.size());
+    msg.route_valid = has_pending_path;
+    mission_status_publisher->publish(msg);
+}
+
+static std::string nodeTypeName(traversability_generator3d::NodeType type){
+    std::ostringstream stream;
+    stream << type;
+    return stream.str();
+}
+
+void PathPlannerNode::inspectTraversabilityCallback(
+        const std::shared_ptr<ugv_nav4d_ros2::srv::InspectTraversability::Request> request,
+        std::shared_ptr<ugv_nav4d_ros2::srv::InspectTraversability::Response> response){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    if (!traversability_generator_ptr){
+        response->success = false;
+        response->message = "Traversability map is unavailable.";
+        return;
+    }
+    const auto& map = traversability_generator_ptr->getTraversabilityMap();
+    maps::grid::Index index;
+    const Eigen::Vector3d query(request->point.x, request->point.y, request->point.z);
+    if (!map.toGrid(query, index)){
+        response->success = false;
+        response->message = "Point is outside the traversability map.";
+        return;
+    }
+    const traversability_generator3d::TravGenNode* best = nullptr;
+    double best_distance = std::numeric_limits<double>::max();
+    Eigen::Vector3d best_position;
+    for (const auto* node : map.at(index)){
+        Eigen::Vector3d position;
+        if (!map.fromGrid(node->getIndex(), position, node->getHeight(), false)){
+            continue;
+        }
+        const double distance = (position - query).norm();
+        if (distance < best_distance){
+            best = node;
+            best_distance = distance;
+            best_position = position;
+        }
+    }
+    if (!best){
+        response->success = false;
+        response->message = "No traversability surface exists in this cell.";
+        return;
+    }
+    const auto& data = best->getUserData();
+    response->success = true;
+    response->message = nodeTypeName(data.nodeType);
+    response->matched_point.x = best_position.x();
+    response->matched_point.y = best_position.y();
+    response->matched_point.z = best_position.z();
+    response->distance = best_distance;
+    response->type = static_cast<uint8_t>(data.nodeType);
+    response->type_name = nodeTypeName(data.nodeType);
+    response->slope = data.slope;
+    response->slope_direction = data.slopeDirectionAtan2;
+    response->cost = data.cost;
+    for (const auto& allowed : data.allowedOrientations){
+        response->allowed_orientation_starts.push_back(allowed.getStart().getRad());
+        response->allowed_orientation_widths.push_back(allowed.getWidth());
+    }
 }
 
 void PathPlannerNode::saveMapCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
@@ -693,8 +877,200 @@ void PathPlannerNode::saveMapCallback(const std::shared_ptr<std_srvs::srv::Trigg
     publishStatus(response->message);
 }
 
+void PathPlannerNode::replanCurrentMissionCallback(
+        const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+        std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    if (!got_map || !is_configured){
+        response->success = false;
+        response->message = "Cannot replan: planner or map is unavailable.";
+        return;
+    }
+    if (!get_parameter("read_pose_from_topic").as_bool() && !updatePoseFromTF()){
+        response->success = false;
+        response->message = "Cannot replan: current robot pose is unavailable.";
+        return;
+    }
+    start_pose_rbs.position = Eigen::Vector3d(
+        start_pose.pose.position.x, start_pose.pose.position.y, start_pose.pose.position.z);
+    start_pose_rbs.orientation = Eigen::Quaterniond(
+        start_pose.pose.orientation.w, start_pose.pose.orientation.x,
+        start_pose.pose.orientation.y, start_pose.pose.orientation.z);
+    if (waypoint_queue.empty()) plan(false);
+    else planThroughWaypoints(false);
+    response->success = latest_planning_result == ugv_nav4d::Planner::FOUND_SOLUTION;
+    response->message = response->success
+        ? "Replanned from the current robot pose; review the new path before Execute."
+        : std::string("Replanning failed: ") + planningResultToString(latest_planning_result);
+    publishStatus(response->message);
+}
+
+void PathPlannerNode::saveMissionCallback(
+        const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+        std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    const std::string filename = get_parameter("mission_file").as_string();
+    std::ofstream out(filename);
+    if (!out){
+        response->success = false;
+        response->message = "Cannot open mission file for writing: " + filename;
+        return;
+    }
+    out << "UGV_NAV4D_MISSION_V1\n";
+    const auto& g = goal_pose_rbs;
+    out << "goal " << std::setprecision(17)
+        << g.position.x() << ' ' << g.position.y() << ' ' << g.position.z() << ' '
+        << g.orientation.x() << ' ' << g.orientation.y() << ' '
+        << g.orientation.z() << ' ' << g.orientation.w() << '\n';
+    out << "waypoints " << waypoint_queue.size() << '\n';
+    for (const auto& wp : waypoint_queue){
+        out << "wp " << wp.position.x << ' ' << wp.position.y << ' ' << wp.position.z << ' '
+            << wp.orientation.x << ' ' << wp.orientation.y << ' '
+            << wp.orientation.z << ' ' << wp.orientation.w << '\n';
+    }
+    out << "zones " << forbidden_zones.size() << '\n';
+    for (const auto& zone : forbidden_zones){
+        out << "zone " << static_cast<unsigned>(zone.zone_type) << ' '
+            << std::quoted(zone.label) << ' ' << zone.cost_multiplier << ' '
+            << zone.speed_limit << ' ' << zone.preferred_heading << ' '
+            << zone.expires_at.sec << ' ' << zone.expires_at.nanosec << ' '
+            << zone.vertices.size() << '\n';
+        for (const auto& v : zone.vertices) out << "v " << v.x << ' ' << v.y << ' ' << v.z << '\n';
+    }
+    response->success = static_cast<bool>(out);
+    response->message = response->success ? "Mission saved to " + filename
+                                          : "Failed while writing mission file " + filename;
+    publishStatus(response->message);
+}
+
+void PathPlannerNode::loadMissionCallback(
+        const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+        std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    const std::string filename = get_parameter("mission_file").as_string();
+    std::ifstream in(filename);
+    std::string token, magic;
+    if (!(in >> magic) || magic != "UGV_NAV4D_MISSION_V1"){
+        response->success = false;
+        response->message = "Invalid or unreadable mission file: " + filename;
+        return;
+    }
+    base::samples::RigidBodyState loaded_goal;
+    if (!(in >> token) || token != "goal" ||
+        !(in >> loaded_goal.position.x() >> loaded_goal.position.y() >> loaded_goal.position.z()
+             >> loaded_goal.orientation.x() >> loaded_goal.orientation.y()
+             >> loaded_goal.orientation.z() >> loaded_goal.orientation.w())){
+        response->success = false;
+        response->message = "Mission file has an invalid goal.";
+        return;
+    }
+    size_t waypoint_count = 0;
+    if (!(in >> token >> waypoint_count) || token != "waypoints"){
+        response->success = false;
+        response->message = "Mission file has an invalid waypoint section.";
+        return;
+    }
+    std::vector<geometry_msgs::msg::Pose> loaded_waypoints;
+    for (size_t i = 0; i < waypoint_count; ++i){
+        geometry_msgs::msg::Pose wp;
+        if (!(in >> token) || token != "wp" ||
+            !(in >> wp.position.x >> wp.position.y >> wp.position.z
+                 >> wp.orientation.x >> wp.orientation.y >> wp.orientation.z >> wp.orientation.w)){
+            response->success = false;
+            response->message = "Mission file has an invalid waypoint.";
+            return;
+        }
+        loaded_waypoints.push_back(wp);
+    }
+    size_t zone_count = 0;
+    if (!(in >> token >> zone_count) || token != "zones"){
+        response->success = false;
+        response->message = "Mission file has an invalid zone section.";
+        return;
+    }
+    std::vector<ugv_nav4d_ros2::msg::ForbiddenZone> loaded_zones;
+    for (size_t i = 0; i < zone_count; ++i){
+        ugv_nav4d_ros2::msg::ForbiddenZone zone;
+        unsigned zone_type = 0;
+        size_t vertex_count = 0;
+        if (!(in >> token) || token != "zone" ||
+            !(in >> zone_type >> std::quoted(zone.label) >> zone.cost_multiplier
+                 >> zone.speed_limit >> zone.preferred_heading
+                 >> zone.expires_at.sec >> zone.expires_at.nanosec >> vertex_count)){
+            response->success = false;
+            response->message = "Mission file has invalid zone metadata.";
+            return;
+        }
+        zone.zone_type = static_cast<uint8_t>(zone_type);
+        zone.header.frame_id = get_parameter("world_frame").as_string();
+        for (size_t k = 0; k < vertex_count; ++k){
+            geometry_msgs::msg::Point v;
+            if (!(in >> token) || token != "v" || !(in >> v.x >> v.y >> v.z)){
+                response->success = false;
+                response->message = "Mission file has an invalid zone vertex.";
+                return;
+            }
+            zone.vertices.push_back(v);
+        }
+        if (zone.vertices.size() < 3){
+            response->success = false;
+            response->message = "Mission file contains an operational zone with fewer than three vertices.";
+            return;
+        }
+        double twice_area = 0.0;
+        bool finite_vertices = true;
+        for (size_t k = 0, j = zone.vertices.size() - 1;
+             k < zone.vertices.size(); j = k++){
+            const auto& a = zone.vertices[j];
+            const auto& b = zone.vertices[k];
+            finite_vertices = finite_vertices && std::isfinite(a.x) &&
+                std::isfinite(a.y) && std::isfinite(a.z);
+            twice_area += a.x * b.y - b.x * a.y;
+        }
+        const bool valid_speed =
+            zone.zone_type != ugv_nav4d_ros2::msg::ForbiddenZone::SPEED_LIMIT ||
+            (std::isfinite(zone.speed_limit) && zone.speed_limit > 0.0f);
+        if (!finite_vertices || std::abs(twice_area) <= 1e-6 || !valid_speed){
+            response->success = false;
+            response->message = "Mission file contains an invalid operational zone.";
+            return;
+        }
+        loaded_zones.push_back(zone);
+    }
+    goal_pose_rbs = loaded_goal;
+    waypoint_queue = std::move(loaded_waypoints);
+    const bool planning_graph_changed =
+        std::any_of(forbidden_zones.begin(), forbidden_zones.end(), zoneAffectsPlanning) ||
+        std::any_of(loaded_zones.begin(), loaded_zones.end(), zoneAffectsPlanning);
+    forbidden_zones = std::move(loaded_zones);
+    publishWaypointMarkers();
+    onForbiddenZonesChanged(planning_graph_changed);
+    response->success = true;
+    response->message = "Mission loaded from " + filename + "; set/review the goal and plan.";
+    publishStatus(response->message);
+}
+
 // Even-odd rule point-in-polygon test in the XY plane.
 static bool pointInPolygonXY(double x, double y, const std::vector<geometry_msgs::msg::Point>& poly){
+    if (poly.size() < 3){
+        return false;
+    }
+    // Treat the boundary as inside. This prevents the speed command oscillating
+    // when localization noise places the robot on alternating sides of an edge.
+    constexpr double boundary_epsilon = 1e-6;
+    for (size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++){
+        const double ab_x = poly[i].x - poly[j].x;
+        const double ab_y = poly[i].y - poly[j].y;
+        const double ap_x = x - poly[j].x;
+        const double ap_y = y - poly[j].y;
+        const double cross = std::abs(ab_x * ap_y - ab_y * ap_x);
+        const double edge_length = std::hypot(ab_x, ab_y);
+        const double dot = ap_x * ab_x + ap_y * ab_y;
+        if (cross <= boundary_epsilon * std::max(1.0, edge_length) &&
+            dot >= -boundary_epsilon && dot <= ab_x * ab_x + ab_y * ab_y + boundary_epsilon){
+            return true;
+        }
+    }
     bool inside = false;
     const size_t n = poly.size();
     for (size_t i = 0, j = n - 1; i < n; j = i++){
@@ -708,18 +1084,249 @@ static bool pointInPolygonXY(double x, double y, const std::vector<geometry_msgs
     return inside;
 }
 
+void PathPlannerNode::rebuildSpeedZoneCache(){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    speed_zone_node_sets.clear();
+    speed_zone_node_sets.resize(forbidden_zones.size());
+    if (!traversability_generator_ptr){
+        return;
+    }
+
+    const auto& map = traversability_generator_ptr->getTraversabilityMap();
+    const auto now = this->get_clock()->now();
+    const double surface_tolerance = std::max(
+        0.0, get_parameter("speed_zone_surface_tolerance").as_double());
+    for (size_t zone_index = 0; zone_index < forbidden_zones.size(); ++zone_index){
+        const auto& zone = forbidden_zones[zone_index];
+        const bool expired =
+            (zone.expires_at.sec != 0 || zone.expires_at.nanosec != 0) &&
+            rclcpp::Time(zone.expires_at) <= now;
+        if (expired || zone.zone_type != ugv_nav4d_ros2::msg::ForbiddenZone::SPEED_LIMIT ||
+            zone.vertices.size() < 3){
+            continue;
+        }
+
+        auto& zone_nodes = speed_zone_node_sets[zone_index];
+        std::vector<traversability_generator3d::TravGenNode*> seeds;
+        std::deque<traversability_generator3d::TravGenNode*> queue;
+        for (const auto& vertex : zone.vertices){
+            maps::grid::Index index;
+            if (!map.toGrid(Eigen::Vector3d(vertex.x, vertex.y, vertex.z), index)){
+                continue;
+            }
+            traversability_generator3d::TravGenNode* seed = nullptr;
+            double best_dz = std::numeric_limits<double>::max();
+            for (auto* node : map.at(index)){
+                const auto type = node->getUserData().nodeType;
+                if (type != traversability_generator3d::NodeType::TRAVERSABLE &&
+                    type != traversability_generator3d::NodeType::PARTIALLY_TRAVERSABLE){
+                    continue;
+                }
+                const double dz = std::abs(node->getHeight() - vertex.z);
+                if (dz < best_dz){
+                    best_dz = dz;
+                    seed = node;
+                }
+            }
+            if (seed && best_dz <= surface_tolerance){
+                seeds.push_back(seed);
+            }
+        }
+
+        if (seeds.empty()){
+            RCLCPP_WARN_STREAM(this->get_logger(), "Speed-limit zone " << (zone_index + 1)
+                               << " matched no traversability surface; the conservative XY fallback will be used.");
+            continue;
+        }
+        zone_nodes.insert(seeds.front());
+        queue.push_back(seeds.front());
+
+        // Restrict the flood-fill to the polygon. Even if two storeys are globally
+        // connected by a ramp, an overlapping XY footprint cannot jump vertically
+        // unless that connection itself lies inside this zone.
+        while (!queue.empty()){
+            auto* node = queue.front();
+            queue.pop_front();
+            for (auto* base_neighbor : node->getConnections()){
+                auto* neighbor = static_cast<traversability_generator3d::TravGenNode*>(base_neighbor);
+                if (zone_nodes.count(neighbor)){
+                    continue;
+                }
+                const auto type = neighbor->getUserData().nodeType;
+                if (type != traversability_generator3d::NodeType::TRAVERSABLE &&
+                    type != traversability_generator3d::NodeType::PARTIALLY_TRAVERSABLE){
+                    continue;
+                }
+                Eigen::Vector3d position;
+                if (!map.fromGrid(neighbor->getIndex(), position, neighbor->getHeight(), false) ||
+                    !pointInPolygonXY(position.x(), position.y(), zone.vertices)){
+                    continue;
+                }
+                zone_nodes.insert(neighbor);
+                queue.push_back(neighbor);
+            }
+        }
+        const bool ambiguous_surface = std::any_of(
+            seeds.begin(), seeds.end(),
+            [&zone_nodes](const auto* seed){ return !zone_nodes.count(seed); });
+        if (ambiguous_surface){
+            zone_nodes.clear();
+            RCLCPP_WARN_STREAM(this->get_logger(), "Speed-limit zone " << (zone_index + 1)
+                               << " has vertices on disconnected surfaces; the conservative XY fallback will be used.");
+        }
+    }
+}
+
+void PathPlannerNode::emitZoneSpeedLimit(float limit){
+    const auto now = this->get_clock()->now();
+    if (!std::isfinite(limit) || limit < 0.0f){
+        RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                             "Refusing to publish an invalid zone speed limit.");
+        limit = last_zone_speed_limit;
+    }
+    if (limit > 0.0f){
+        last_zone_speed_limit = limit;
+        last_zone_speed_limit_match = now;
+    } else {
+        const double release_delay = std::max(
+            0.0, get_parameter("speed_zone_release_delay").as_double());
+        if (last_zone_speed_limit > 0.0f &&
+            (now - last_zone_speed_limit_match).seconds() < release_delay){
+            limit = last_zone_speed_limit;
+        } else {
+            last_zone_speed_limit = 0.0f;
+        }
+    }
+    std_msgs::msg::Float32 result;
+    result.data = limit;
+    zone_speed_limit_publisher->publish(result);
+}
+
+void PathPlannerNode::publishZoneSpeedLimit(const geometry_msgs::msg::Point& robot_position){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    const auto now = this->get_clock()->now();
+
+    // If surface matching becomes unavailable, apply the lowest XY-overlapping
+    // limit. Slowing on an extra storey is safer than silently dropping a limit.
+    float xy_fallback_limit = 0.0f;
+    for (const auto& zone : forbidden_zones){
+        const bool expired =
+            (zone.expires_at.sec != 0 || zone.expires_at.nanosec != 0) &&
+            rclcpp::Time(zone.expires_at) <= now;
+        if (!expired && zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::SPEED_LIMIT &&
+            std::isfinite(zone.speed_limit) && zone.speed_limit > 0.0f &&
+            pointInPolygonXY(robot_position.x, robot_position.y, zone.vertices)){
+            xy_fallback_limit = xy_fallback_limit > 0.0f
+                ? std::min(xy_fallback_limit, zone.speed_limit)
+                : zone.speed_limit;
+        }
+    }
+
+    if (!got_map || !is_configured || !traversability_generator_ptr ||
+        speed_zone_node_sets.size() != forbidden_zones.size()){
+        emitZoneSpeedLimit(xy_fallback_limit);
+        return;
+    }
+
+    const auto& map = traversability_generator_ptr->getTraversabilityMap();
+    maps::grid::Index robot_index;
+    const double ground_z = robot_position.z - get_parameter("distToGround").as_double();
+    if (!map.toGrid(Eigen::Vector3d(robot_position.x, robot_position.y, ground_z), robot_index)){
+        emitZoneSpeedLimit(xy_fallback_limit);
+        return;
+    }
+
+    const traversability_generator3d::TravGenNode* robot_node = nullptr;
+    double best_dz = std::numeric_limits<double>::max();
+    for (const auto* node : map.at(robot_index)){
+        const auto type = node->getUserData().nodeType;
+        if (type != traversability_generator3d::NodeType::TRAVERSABLE &&
+            type != traversability_generator3d::NodeType::PARTIALLY_TRAVERSABLE){
+            continue;
+        }
+        const double dz = std::abs(node->getHeight() - ground_z);
+        if (dz < best_dz){
+            best_dz = dz;
+            robot_node = node;
+        }
+    }
+
+    const double surface_tolerance = std::max(
+        0.0, get_parameter("speed_zone_surface_tolerance").as_double());
+    if (!robot_node || best_dz > surface_tolerance){
+        if (xy_fallback_limit > 0.0f){
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                "Robot pose did not match a nearby traversability surface; applying the fail-safe XY speed limit.");
+        }
+        emitZoneSpeedLimit(xy_fallback_limit);
+        return;
+    }
+
+    float resolved_limit = 0.0f;
+    for (size_t i = 0; robot_node && i < forbidden_zones.size(); ++i){
+        const auto& zone = forbidden_zones[i];
+        const bool expired =
+            (zone.expires_at.sec != 0 || zone.expires_at.nanosec != 0) &&
+            rclcpp::Time(zone.expires_at) <= now;
+        if (expired || zone.zone_type != ugv_nav4d_ros2::msg::ForbiddenZone::SPEED_LIMIT ||
+            !std::isfinite(zone.speed_limit) || zone.speed_limit <= 0.0f ||
+            !pointInPolygonXY(robot_position.x, robot_position.y, zone.vertices)){
+            continue;
+        }
+        // An empty cache means the drawn surface could not be resolved. Apply
+        // this zone conservatively at matching XY until the cache can be rebuilt.
+        if (!speed_zone_node_sets[i].empty() && !speed_zone_node_sets[i].count(robot_node)){
+            continue;
+        }
+        resolved_limit = resolved_limit > 0.0f
+            ? std::min(resolved_limit, zone.speed_limit)
+            : zone.speed_limit;
+    }
+    emitZoneSpeedLimit(resolved_limit);
+}
+
 void PathPlannerNode::addForbiddenZoneCallback(const ugv_nav4d_ros2::msg::ForbiddenZone::SharedPtr msg){
     std::lock_guard<std::recursive_mutex> lock(planner_mutex);
     if (msg->vertices.size() < 3){
-        RCLCPP_WARN_STREAM(this->get_logger(), "Ignoring forbidden zone with only "
+        RCLCPP_WARN_STREAM(this->get_logger(), "Ignoring operational zone with only "
                            << msg->vertices.size() << " vertices (minimum 3).");
         return;
     }
+    const std::string world_frame = normalizedFrame(get_parameter("world_frame").as_string());
+    const std::string zone_frame = normalizedFrame(msg->header.frame_id);
+    if (!zone_frame.empty() && zone_frame != world_frame){
+        RCLCPP_ERROR_STREAM(this->get_logger(), "Ignoring operational zone in frame '"
+                            << msg->header.frame_id << "'; expected '" << world_frame << "'.");
+        publishStatus("Operational zone rejected: RViz fixed frame must match " + world_frame);
+        return;
+    }
+    double twice_area = 0.0;
+    for (size_t i = 0, j = msg->vertices.size() - 1; i < msg->vertices.size(); j = i++){
+        const auto& a = msg->vertices[j];
+        const auto& b = msg->vertices[i];
+        if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.z)){
+            RCLCPP_ERROR(this->get_logger(), "Ignoring operational zone with a non-finite vertex.");
+            publishStatus("Operational zone rejected: invalid vertex");
+            return;
+        }
+        twice_area += a.x * b.y - b.x * a.y;
+    }
+    if (std::abs(twice_area) <= 1e-6){
+        RCLCPP_ERROR(this->get_logger(), "Ignoring operational zone with a degenerate polygon.");
+        publishStatus("Operational zone rejected: polygon area is zero");
+        return;
+    }
+    if (msg->zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::SPEED_LIMIT &&
+        (!std::isfinite(msg->speed_limit) || msg->speed_limit <= 0.0f)){
+        RCLCPP_ERROR(this->get_logger(), "Ignoring speed-limit zone with a non-positive or invalid limit.");
+        publishStatus("Speed-limit zone rejected: limit must be greater than zero");
+        return;
+    }
     forbidden_zones.push_back(*msg);
-    RCLCPP_INFO_STREAM(this->get_logger(), "Added forbidden zone " << forbidden_zones.size()
+    RCLCPP_INFO_STREAM(this->get_logger(), "Added operational zone " << forbidden_zones.size()
                        << " with " << msg->vertices.size() << " vertices.");
-    onForbiddenZonesChanged();
-    publishStatus(std::to_string(forbidden_zones.size()) + " forbidden zone(s) active");
+    onForbiddenZonesChanged(zoneAffectsPlanning(*msg));
+    publishStatus(std::to_string(forbidden_zones.size()) + " operational zone(s) active");
 }
 
 void PathPlannerNode::clearForbiddenZonesCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
@@ -728,14 +1335,16 @@ void PathPlannerNode::clearForbiddenZonesCallback(const std::shared_ptr<std_srvs
     if (forbidden_zones.empty()){
         // Nothing to clear; skip the (expensive) trav map regeneration.
         response->success = true;
-        response->message = "No forbidden zones set; nothing to clear.";
+        response->message = "No operational zones set; nothing to clear.";
         return;
     }
     const size_t count = forbidden_zones.size();
+    const bool planning_graph_changed =
+        std::any_of(forbidden_zones.begin(), forbidden_zones.end(), zoneAffectsPlanning);
     forbidden_zones.clear();
-    onForbiddenZonesChanged();
+    onForbiddenZonesChanged(planning_graph_changed);
     response->success = true;
-    response->message = "Cleared " + std::to_string(count) + " forbidden zone(s).";
+    response->message = "Cleared " + std::to_string(count) + " operational zone(s).";
     RCLCPP_INFO_STREAM(this->get_logger(), response->message);
     publishStatus(response->message);
 }
@@ -745,25 +1354,38 @@ void PathPlannerNode::removeLastForbiddenZoneCallback(const std::shared_ptr<std_
     std::lock_guard<std::recursive_mutex> lock(planner_mutex);
     if (forbidden_zones.empty()){
         response->success = false;
-        response->message = "No forbidden zones set.";
+        response->message = "No operational zones set.";
         return;
     }
+    const bool planning_graph_changed = zoneAffectsPlanning(forbidden_zones.back());
     forbidden_zones.pop_back();
-    onForbiddenZonesChanged();
+    onForbiddenZonesChanged(planning_graph_changed);
     response->success = true;
-    response->message = std::to_string(forbidden_zones.size()) + " forbidden zone(s) remaining.";
-    RCLCPP_INFO_STREAM(this->get_logger(), "Removed last forbidden zone; " << response->message);
-    publishStatus("Removed last forbidden zone; " + response->message);
+    response->message = std::to_string(forbidden_zones.size()) + " operational zone(s) remaining.";
+    RCLCPP_INFO_STREAM(this->get_logger(), "Removed last operational zone; " << response->message);
+    publishStatus("Removed last operational zone; " + response->message);
 }
 
-void PathPlannerNode::onForbiddenZonesChanged(){
+void PathPlannerNode::onForbiddenZonesChanged(bool planning_graph_changed){
     publishForbiddenZoneMarkers();
+    if (!planning_graph_changed){
+        rebuildSpeedZoneCache();
+        publishZoneSpeedLimit(start_pose.pose.position);
+        return;
+    }
     // Zones are baked into the trav map during generation, so a change requires a
     // rebuild. Clearing a zone has no cheaper path anyway (original node types are
     // not stored). Also refreshes the trav map in RViz.
     if (is_configured && got_map){
         configurePlanner();
         publishTravMap();
+        validatePendingPath();
+    } else if (has_pending_path){
+        has_pending_path = false;
+        path_approved = false;
+        std_msgs::msg::Bool route_valid;
+        route_valid.data = false;
+        route_valid_publisher->publish(route_valid);
     }
 }
 
@@ -776,8 +1398,48 @@ void PathPlannerNode::applyForbiddenZones(){
     const auto& trav_map_3d = traversability_generator_ptr->getTraversabilityMap();
     size_t marked = 0;
 
+    // Preferred polygons become genuinely attractive by adding a modest cost
+    // outside all preferred corridors. Merely reducing the usual zero-valued
+    // terrain cost inside a corridor would have no planning effect.
+    std::vector<const ugv_nav4d_ros2::msg::ForbiddenZone*> preferred_zones;
+    for (const auto& zone : forbidden_zones){
+        const bool expired = (zone.expires_at.sec != 0 || zone.expires_at.nanosec != 0) &&
+                             rclcpp::Time(zone.expires_at) <= this->get_clock()->now();
+        if (!expired && zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::PREFERRED){
+            preferred_zones.push_back(&zone);
+        }
+    }
+    if (!preferred_zones.empty()){
+        for (const auto& levels : trav_map_3d){
+            for (auto* node : levels){
+                Eigen::Vector3d position;
+                if (!trav_map_3d.fromGrid(node->getIndex(), position, node->getHeight(), false)) continue;
+                bool preferred = false;
+                for (const auto* zone : preferred_zones){
+                    if (pointInPolygonXY(position.x(), position.y(), zone->vertices)){
+                        preferred = true;
+                        break;
+                    }
+                }
+                if (!preferred && node->getUserData().nodeType != traversability_generator3d::NodeType::OBSTACLE){
+                    node->getUserData().cost += 500;
+                }
+            }
+        }
+    }
+
     for (const auto& zone : forbidden_zones)
     {
+        if ((zone.expires_at.sec != 0 || zone.expires_at.nanosec != 0) &&
+            rclcpp::Time(zone.expires_at) <= this->get_clock()->now()){
+            continue;
+        }
+        if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::ANNOTATION ||
+            zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::SPEED_LIMIT){
+            // These are execution/operator semantics and intentionally do not
+            // change graph connectivity.
+            continue;
+        }
         // Flood-fill the connected surface the polygon was drawn on: seed at the
         // patches nearest to the clicked vertices, then grow along the trav
         // graph's neighbor connections while staying inside the polygon. Other
@@ -818,10 +1480,25 @@ void PathPlannerNode::applyForbiddenZones(){
             traversability_generator3d::TravGenNode* node = queue.front();
             queue.pop_front();
 
-            // Same marking travgen uses for real obstacles, so all planner
-            // checks (goal validity, expansions, obstacle checks) respect it.
-            node->setType(maps::grid::TraversabilityNodeBase::OBSTACLE);
-            node->getUserData().nodeType = traversability_generator3d::NodeType::OBSTACLE;
+            auto& data = node->getUserData();
+            if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::KEEP_OUT){
+                // Same marking travgen uses for real obstacles, so all planner
+                // checks (goal validity, expansions, obstacle checks) respect it.
+                node->setType(maps::grid::TraversabilityNodeBase::OBSTACLE);
+                data.nodeType = traversability_generator3d::NodeType::OBSTACLE;
+            } else if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::CAUTION){
+                const double multiplier = std::max(1.0f, zone.cost_multiplier);
+                data.cost += static_cast<int>(1000.0 * multiplier);
+            } else if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::PREFERRED){
+                const double divisor = std::max(1.0f, zone.cost_multiplier);
+                data.cost = static_cast<int>(data.cost / divisor);
+            } else if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::DIRECTION_RESTRICTED){
+                data.allowedOrientations.clear();
+                constexpr double width = M_PI / 3.0; // +/- 30 degrees
+                data.allowedOrientations.emplace_back(
+                    base::Angle::fromRad(zone.preferred_heading - width / 2.0), width);
+                data.nodeType = traversability_generator3d::NodeType::PARTIALLY_TRAVERSABLE;
+            }
             ++marked;
 
             for (maps::grid::TraversabilityNodeBase* nb : node->getConnections())
@@ -842,7 +1519,7 @@ void PathPlannerNode::applyForbiddenZones(){
     }
 
     RCLCPP_INFO_STREAM(this->get_logger(), "Applied " << forbidden_zones.size()
-                       << " forbidden zone(s): " << marked << " trav node(s) marked as obstacle.");
+                       << " operational zone(s) to " << marked << " traversability node(s).");
 }
 
 void PathPlannerNode::deleteForbiddenZoneCallback(const std::shared_ptr<ugv_nav4d_ros2::srv::DeleteForbiddenZone::Request> request,
@@ -850,15 +1527,17 @@ void PathPlannerNode::deleteForbiddenZoneCallback(const std::shared_ptr<ugv_nav4
     std::lock_guard<std::recursive_mutex> lock(planner_mutex);
     if (request->index == 0 || request->index > forbidden_zones.size()){
         response->success = false;
-        response->message = "Forbidden zone " + std::to_string(request->index) + " does not exist ("
+        response->message = "Operational zone " + std::to_string(request->index) + " does not exist ("
                             + std::to_string(forbidden_zones.size()) + " active).";
         publishStatus(response->message);
         return;
     }
-    forbidden_zones.erase(forbidden_zones.begin() + (request->index - 1));
-    onForbiddenZonesChanged();
+    const auto zone_it = forbidden_zones.begin() + (request->index - 1);
+    const bool planning_graph_changed = zoneAffectsPlanning(*zone_it);
+    forbidden_zones.erase(zone_it);
+    onForbiddenZonesChanged(planning_graph_changed);
     response->success = true;
-    response->message = "Deleted forbidden zone " + std::to_string(request->index) + "; "
+    response->message = "Deleted operational zone " + std::to_string(request->index) + "; "
                         + std::to_string(forbidden_zones.size()) + " remaining (renumbered).";
     RCLCPP_INFO_STREAM(this->get_logger(), response->message);
     publishStatus(response->message);
@@ -955,6 +1634,40 @@ void PathPlannerNode::setReturnForwardCallback(
     publishStatus(response->message);
 }
 
+void PathPlannerNode::planReturnCurrentCallback(
+        const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+        std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    if (!has_last_mission_start || !got_map || !is_configured){
+        response->success = false;
+        response->message = "Cannot plan direct return: mission start or map is unavailable.";
+        return;
+    }
+    if (!get_parameter("read_pose_from_topic").as_bool() && !updatePoseFromTF()){
+        response->success = false;
+        response->message = "Cannot plan direct return: current robot pose is unavailable.";
+        return;
+    }
+    const auto saved_start = start_pose_rbs;
+    const auto saved_goal = goal_pose_rbs;
+    start_pose_rbs.position = Eigen::Vector3d(
+        start_pose.pose.position.x, start_pose.pose.position.y, start_pose.pose.position.z);
+    start_pose_rbs.orientation = Eigen::Quaterniond(
+        start_pose.pose.orientation.w, start_pose.pose.orientation.x,
+        start_pose.pose.orientation.y, start_pose.pose.orientation.z);
+    goal_pose_rbs = last_mission_start;
+    is_return_plan = true;
+    plan(false);
+    is_return_plan = false;
+    start_pose_rbs = saved_start;
+    goal_pose_rbs = saved_goal;
+    response->success = latest_planning_result == ugv_nav4d::Planner::FOUND_SOLUTION;
+    response->message = response->success
+        ? "Direct return from current pose is ready; review and Execute."
+        : std::string("Direct return planning failed: ") + planningResultToString(latest_planning_result);
+    publishStatus(response->message);
+}
+
 void PathPlannerNode::publishForbiddenZoneMarkers(){
     visualization_msgs::msg::MarkerArray marker_array;
 
@@ -985,6 +1698,11 @@ void PathPlannerNode::publishForbiddenZoneMarkers(){
         outline.color.r = 1.0;
         outline.color.g = 0.1;
         outline.color.b = 0.1;
+        if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::CAUTION){ outline.color.g = 0.75; }
+        else if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::SPEED_LIMIT){ outline.color.r = 0.1; outline.color.g = 0.5; outline.color.b = 1.0; }
+        else if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::PREFERRED){ outline.color.r = 0.1; outline.color.g = 1.0; outline.color.b = 0.2; }
+        else if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::DIRECTION_RESTRICTED){ outline.color.r = 0.7; outline.color.g = 0.2; outline.color.b = 1.0; }
+        else if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::ANNOTATION){ outline.color.r = 1.0; outline.color.g = 1.0; outline.color.b = 1.0; }
         outline.color.a = 1.0;
         for (size_t k = 0; k <= n_verts; ++k){
             outline.points.push_back(zone.vertices[k % n_verts]);
@@ -1004,9 +1722,7 @@ void PathPlannerNode::publishForbiddenZoneMarkers(){
         wall.scale.x = 1.0;
         wall.scale.y = 1.0;
         wall.scale.z = 1.0;
-        wall.color.r = 1.0;
-        wall.color.g = 0.1;
-        wall.color.b = 0.1;
+        wall.color = outline.color;
         wall.color.a = 0.3;
         const double wall_height = 2.0;
         for (size_t k = 0; k < n_verts; ++k){
@@ -1052,11 +1768,21 @@ void PathPlannerNode::publishForbiddenZoneMarkers(){
         label.color.g = 0.3;
         label.color.b = 0.3;
         label.color.a = 1.0;
-        label.text = std::to_string(i + 1);
+        static const std::array<const char*, 6> type_names{
+            "KEEP-OUT", "CAUTION", "SPEED", "PREFERRED", "DIRECTION", "NOTE"};
+        const std::string type_name = zone.zone_type < type_names.size()
+            ? type_names[zone.zone_type] : "ZONE";
+        label.text = std::to_string(i + 1) + " " + type_name;
+        if (!zone.label.empty()) label.text += ": " + zone.label;
         marker_array.markers.push_back(label);
     }
 
     forbidden_zone_marker_publisher->publish(marker_array);
+    ugv_nav4d_ros2::msg::OperationalZoneArray zones_message;
+    zones_message.header.frame_id = frame;
+    zones_message.header.stamp = now;
+    zones_message.zones = forbidden_zones;
+    operational_zones_publisher->publish(zones_message);
 }
 
 const char* PathPlannerNode::planningResultToString(ugv_nav4d::Planner::PLANNING_RESULT res){
@@ -1619,15 +2345,181 @@ void PathPlannerNode::publishPlannedPath(const std::vector<trajectory_follower::
     combined_path_publisher->publish(path);
     labeled_path_publisher->publish(labeled_path_message);
     colored_path_publisher->publish(colored_path_message);
+    publishRouteRisk(path, labeled_path_message);
 
     // Hold the path for the execution gate. Anything that plans (or fails to)
     // replaces the pending path, so Execute always sends what RViz shows.
     pending_labeled_path = labeled_path_message;
     has_pending_path = found_solution && !labeled_path_message.paths.empty();
+    path_approved = false;
+    std_msgs::msg::Bool route_valid;
+    // Preview paths are not resumable by the follower until explicitly approved.
+    route_valid.data = false;
+    route_valid_publisher->publish(route_valid);
     if (has_pending_path) {
         publishStatus("Path ready (" + std::to_string(pending_labeled_path.paths.size()) +
                       " segment(s)) - review in RViz, then Execute to send to the follower");
     }
+}
+
+void PathPlannerNode::publishRouteRisk(
+        const nav_msgs::msg::Path& path,
+        const ugv_nav4d_ros2::msg::LabeledPathArray& labeled){
+    if (!route_risk_publisher){
+        return;
+    }
+    ugv_nav4d_ros2::msg::RouteRisk risk;
+    risk.header = path.header;
+    risk.minimum_clearance = -1.0f;
+    risk.minimum_orientation_margin = static_cast<float>(2.0 * M_PI);
+    if (path.poses.empty() || !traversability_generator_ptr){
+        risk.valid = false;
+        risk.summary = "No valid route available";
+        route_risk_publisher->publish(risk);
+        return;
+    }
+
+    for (size_t i = 1; i < path.poses.size(); ++i){
+        const auto& a = path.poses[i - 1].pose.position;
+        const auto& b = path.poses[i].pose.position;
+        const double dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+        risk.path_length += std::sqrt(dx * dx + dy * dy + dz * dz);
+        risk.max_step = std::max(risk.max_step, static_cast<float>(std::abs(dz)));
+    }
+    for (size_t i = 0; i < labeled.paths.size() && i < labeled.labels.size(); ++i){
+        double length = 0.0;
+        const auto& poses = labeled.paths[i].poses;
+        for (size_t k = 1; k < poses.size(); ++k){
+            const auto& a = poses[k - 1].pose.position;
+            const auto& b = poses[k].pose.position;
+            length += std::hypot(b.x - a.x, b.y - a.y);
+        }
+        if (labeled.labels[i] == "Backward") risk.reverse_distance += length;
+        else risk.forward_distance += length;
+    }
+    const double speed = std::max(0.01, mobility_config.translationSpeed);
+    risk.estimated_duration = risk.path_length / speed;
+
+    const auto& map = traversability_generator_ptr->getTraversabilityMap();
+    std::vector<Eigen::Vector2d> obstacles;
+    for (const auto& levels : map){
+        for (const auto* node : levels){
+            if (node->getUserData().nodeType == traversability_generator3d::NodeType::OBSTACLE ||
+                node->getUserData().nodeType == traversability_generator3d::NodeType::INFLATED_OBSTACLE){
+                Eigen::Vector3d p;
+                if (obstacles.size() < 20000 &&
+                    map.fromGrid(node->getIndex(), p, node->getHeight(), false)){
+                    obstacles.emplace_back(p.x(), p.y());
+                }
+            }
+        }
+    }
+
+    size_t known_samples = 0, unknown_samples = 0, partial_samples = 0;
+    double minimum_clearance = std::numeric_limits<double>::max();
+    const size_t stride = std::max<size_t>(1, path.poses.size() / 200);
+    for (size_t i = 0; i < path.poses.size(); i += stride){
+        const auto& pose = path.poses[i].pose.position;
+        const Eigen::Vector3d query(pose.x, pose.y, pose.z);
+        maps::grid::Index index;
+        if (map.toGrid(query, index)){
+            const traversability_generator3d::TravGenNode* best = nullptr;
+            double best_dz = std::numeric_limits<double>::max();
+            for (const auto* node : map.at(index)){
+                const double dz = std::abs(node->getHeight() - pose.z);
+                if (dz < best_dz){ best = node; best_dz = dz; }
+            }
+            if (best){
+                ++known_samples;
+                const auto& data = best->getUserData();
+                risk.max_slope = std::max(risk.max_slope, static_cast<float>(data.slope));
+                if (data.nodeType == traversability_generator3d::NodeType::UNKNOWN) ++unknown_samples;
+                if (data.nodeType == traversability_generator3d::NodeType::PARTIALLY_TRAVERSABLE) ++partial_samples;
+                if (!data.allowedOrientations.empty()){
+                    double widest = 0.0;
+                    for (const auto& allowed : data.allowedOrientations){
+                        widest = std::max(widest, allowed.getWidth());
+                    }
+                    risk.minimum_orientation_margin = std::min(
+                        risk.minimum_orientation_margin, static_cast<float>(widest));
+                }
+            } else {
+                ++unknown_samples;
+            }
+        } else {
+            ++unknown_samples;
+        }
+        for (const auto& obstacle : obstacles){
+            minimum_clearance = std::min(
+                minimum_clearance, (obstacle - Eigen::Vector2d(pose.x, pose.y)).norm());
+        }
+    }
+    const double samples = static_cast<double>(known_samples + unknown_samples);
+    if (samples > 0.0){
+        risk.unknown_percentage = 100.0 * unknown_samples / samples;
+        risk.partial_percentage = 100.0 * partial_samples / samples;
+    }
+    if (std::isfinite(minimum_clearance)) risk.minimum_clearance = minimum_clearance;
+    if (risk.minimum_orientation_margin >= 2.0 * M_PI - 1e-3)
+        risk.minimum_orientation_margin = static_cast<float>(2.0 * M_PI);
+
+    if (risk.max_slope > 0.8 * traversability_config.maxSlope)
+        risk.warnings.push_back("Route approaches the configured maximum slope");
+    if (risk.unknown_percentage > 0.0)
+        risk.warnings.push_back("Route crosses unknown terrain");
+    if (risk.minimum_clearance >= 0.0 &&
+        risk.minimum_clearance < std::hypot(traversability_config.robotSizeX,
+                                            traversability_config.robotSizeY) / 2.0)
+        risk.warnings.push_back("Route has low obstacle clearance");
+    risk.high_risk_sections = static_cast<uint32_t>(risk.warnings.size());
+    risk.valid = true;
+    std::ostringstream summary;
+    summary << std::fixed << std::setprecision(1) << risk.path_length << " m, "
+            << risk.estimated_duration << " s, max slope "
+            << (risk.max_slope * 180.0 / M_PI) << " deg";
+    if (!risk.warnings.empty()) summary << ", " << risk.warnings.size() << " warning(s)";
+    risk.summary = summary.str();
+    route_risk_publisher->publish(risk);
+}
+
+bool PathPlannerNode::validatePendingPath(){
+    if (!has_pending_path || !traversability_generator_ptr){
+        return false;
+    }
+    const auto& map = traversability_generator_ptr->getTraversabilityMap();
+    bool valid = true;
+    for (const auto& segment : pending_labeled_path.paths){
+        for (const auto& stamped_pose : segment.poses){
+            const auto& p = stamped_pose.pose.position;
+            maps::grid::Index index;
+            if (!map.toGrid(Eigen::Vector3d(p.x, p.y, p.z), index)){
+                valid = false;
+                break;
+            }
+            const traversability_generator3d::TravGenNode* best = nullptr;
+            double best_dz = std::numeric_limits<double>::max();
+            for (const auto* node : map.at(index)){
+                const double dz = std::abs(node->getHeight() - p.z);
+                if (dz < best_dz){ best = node; best_dz = dz; }
+            }
+            if (!best || best->getUserData().nodeType == traversability_generator3d::NodeType::OBSTACLE ||
+                best->getUserData().nodeType == traversability_generator3d::NodeType::INFLATED_OBSTACLE){
+                valid = false;
+                break;
+            }
+        }
+        if (!valid) break;
+    }
+    std_msgs::msg::Bool route_valid;
+    route_valid.data = valid && path_approved;
+    route_valid_publisher->publish(route_valid);
+    if (!valid){
+        has_pending_path = false;
+        path_approved = false;
+        publishMissionStatus(ugv_nav4d_ros2::msg::MissionStatus::PAUSED,
+                             "Remaining route is no longer traversable; replan required");
+    }
+    return valid;
 }
 
 void PathPlannerNode::executePathCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
@@ -1640,6 +2532,10 @@ void PathPlannerNode::executePathCallback(const std::shared_ptr<std_srvs::srv::T
         return;
     }
     execute_path_publisher->publish(pending_labeled_path);
+    path_approved = true;
+    std_msgs::msg::Bool route_valid;
+    route_valid.data = true;
+    route_valid_publisher->publish(route_valid);
     response->success = true;
     response->message = "Path sent to follower (" +
                         std::to_string(pending_labeled_path.paths.size()) + " segment(s)).";
@@ -1656,6 +2552,7 @@ void PathPlannerNode::discardPathCallback(const std::shared_ptr<std_srvs::srv::T
         return;
     }
     has_pending_path = false;
+    path_approved = false;
     pending_labeled_path = ugv_nav4d_ros2::msg::LabeledPathArray();
     // Clear the preview in RViz as well.
     publishPlannedPath({}, false);
@@ -1689,6 +2586,9 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("dumpOnError", false);
     declare_parameter("dumpOnSuccess", false);
     declare_parameter("return_face_forward", true);
+    declare_parameter("mission_file", "ugv_nav4d_mission.txt");
+    declare_parameter("speed_zone_surface_tolerance", 0.75);
+    declare_parameter("speed_zone_release_delay", 0.5);
     declare_parameter("initialPatchRadius", 3.0);
     declare_parameter("grid_resolution", 0.3);
     declare_parameter("maxMotionCurveLength", 100.0);
@@ -1969,6 +2869,7 @@ void PathPlannerNode::configurePlanner(){
         auto startPosition = ground2Mls.translation();
         traversability_generator_ptr->expandAll(startPosition);
         applyForbiddenZones();
+        rebuildSpeedZoneCache();
         auto travMap = traversability_generator_ptr->getTraversabilityMap();
         planner_ptr->updateMap(travMap);
         RCLCPP_INFO(this->get_logger(), "Planner state: Ready");
@@ -2090,6 +2991,15 @@ bool PathPlannerNode::publishTravMap(){
             patch_msg.position.x = position.x();
             patch_msg.position.y = position.y();
             patch_msg.position.z = position.z();
+            patch_msg.type = static_cast<uint8_t>(n->getUserData().nodeType);
+            patch_msg.type_name = nodeTypeName(n->getUserData().nodeType);
+            patch_msg.slope = n->getUserData().slope;
+            patch_msg.slope_direction = n->getUserData().slopeDirectionAtan2;
+            patch_msg.cost = n->getUserData().cost;
+            for (const auto& allowed : n->getUserData().allowedOrientations){
+                patch_msg.allowed_orientation_starts.push_back(allowed.getStart().getRad());
+                patch_msg.allowed_orientation_widths.push_back(allowed.getWidth());
+            }
 
             switch(n->getUserData().nodeType){
                 case traversability_generator3d::NodeType::TRAVERSABLE:

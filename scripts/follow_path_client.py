@@ -3,11 +3,13 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from action_msgs.msg import GoalStatus
 
 from nav_msgs.msg import Path
 from nav2_msgs.action import FollowPath
 from std_srvs.srv import Trigger
-from ugv_nav4d_ros2.msg import LabeledPathArray
+from std_msgs.msg import Bool
+from ugv_nav4d_ros2.msg import LabeledPathArray, MissionStatus
 
 import math
 
@@ -33,6 +35,14 @@ class FollowPathClient(Node):
         # segments. Named under the planner namespace for the RViz operator panel.
         self.stop_service = self.create_service(
             Trigger, '/ugv_nav4d_ros2/stop_execution', self.stop_callback)
+        self.pause_service = self.create_service(
+            Trigger, '/ugv_nav4d_ros2/pause_execution', self.pause_callback)
+        self.resume_service = self.create_service(
+            Trigger, '/ugv_nav4d_ros2/resume_execution', self.resume_callback)
+        self.status_pub = self.create_publisher(
+            MissionStatus, '/ugv_nav4d_ros2/execution_status', 10)
+        self.route_valid_sub = self.create_subscription(
+            Bool, '/ugv_nav4d_ros2/route_valid', self.route_valid_callback, 10)
 
         self.path_queue = []
         self.goal_in_progress = False
@@ -40,8 +50,43 @@ class FollowPathClient(Node):
         self.goal_finished = True
         self.pending_labeled_path_msg = None
         self.cancel_in_progress = False
+        self.cancel_reason = None
+        self.paused = False
+        self.route_valid = True
+        self.current_item = None
+        self.current_segment = 0
+        self.total_segments = 0
+        self.distance_remaining = 0.0
+        self.current_speed = 0.0
 
         self.get_logger().info('LabeledPath FollowPathClient ready.')
+        self.publish_status(MissionStatus.READY, 'Follower ready')
+
+    def publish_status(self, state, summary, failure_reason='', can_resume=None):
+        msg = MissionStatus()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.state = state
+        names = {
+            MissionStatus.IDLE: 'IDLE', MissionStatus.READY: 'READY',
+            MissionStatus.EXECUTING: 'EXECUTING', MissionStatus.PAUSED: 'PAUSED',
+            MissionStatus.COMPLETED: 'COMPLETED', MissionStatus.FAILED: 'FAILED',
+            MissionStatus.ABORTED: 'ABORTED'}
+        msg.state_name = names.get(state, 'UNKNOWN')
+        msg.summary = summary
+        msg.failure_reason = failure_reason
+        msg.current_segment = self.current_segment
+        msg.total_segments = self.total_segments
+        msg.progress = (float(self.current_segment - 1) / self.total_segments
+                        if self.total_segments else 0.0)
+        msg.distance_remaining = float(self.distance_remaining)
+        msg.current_speed = float(self.current_speed)
+        msg.estimated_seconds_remaining = (
+            float(self.distance_remaining / abs(self.current_speed))
+            if abs(self.current_speed) > 0.02 else -1.0)
+        msg.motion_mode = self.current_item[1] if self.current_item else ''
+        msg.route_valid = self.route_valid
+        msg.can_resume = self.paused if can_resume is None else can_resume
+        self.status_pub.publish(msg)
 
     def pose_distance(self, pose1, pose2):
         dx = pose1.pose.position.x - pose2.pose.position.x
@@ -116,6 +161,7 @@ class FollowPathClient(Node):
         if self.current_goal_handle is not None and not self.goal_finished:
             self.get_logger().info("Canceling previous goal before accepting new one.")
             self.pending_labeled_path_msg = msg
+            self.cancel_reason = 'replace'
             if not self.cancel_in_progress:
                 self.cancel_in_progress = True
                 cancel_future = self.current_goal_handle.cancel_goal_async()
@@ -153,6 +199,11 @@ class FollowPathClient(Node):
 
         self.goal_in_progress = False
         self.goal_finished = True
+        self.paused = False
+        self.route_valid = True
+        self.current_item = None
+        self.total_segments = len(self.path_queue)
+        self.current_segment = 0
         self.send_next_path()
 
     def send_next_path(self):
@@ -161,9 +212,20 @@ class FollowPathClient(Node):
             self.goal_in_progress = False
             self.current_goal_handle = None
             self.goal_finished = True
+            self.current_item = None
+            self.publish_status(MissionStatus.COMPLETED, 'Mission completed')
             return
 
-        path, label = self.path_queue.pop(0)
+        self.current_item = self.path_queue.pop(0)
+        self.current_segment += 1
+        self.send_current_path()
+
+    def send_current_path(self):
+        if self.current_item is None:
+            self.publish_status(MissionStatus.FAILED, 'No segment available to resume',
+                                'Internal execution queue is empty')
+            return
+        path, label = self.current_item
         self.get_logger().info(f'Sending path labeled "{label}" with {len(path.poses)} poses.')
 
         goal_msg = FollowPath.Goal()
@@ -179,12 +241,81 @@ class FollowPathClient(Node):
                 '/follow_path action server not available; dropping path. '
                 'Is the controller running?')
             self.clear()
+            self.publish_status(MissionStatus.FAILED, 'Controller unavailable',
+                                '/follow_path action server is unavailable')
             return
 
         self.goal_in_progress = True
         self.goal_finished = False
-        future = self._action_client.send_goal_async(goal_msg)
+        self.paused = False
+        self.cancel_reason = None
+        self.publish_status(
+            MissionStatus.EXECUTING,
+            f'Executing segment {self.current_segment}/{self.total_segments}: {label}')
+        future = self._action_client.send_goal_async(
+            goal_msg, feedback_callback=self.feedback_callback)
         future.add_done_callback(self.goal_response_callback)
+
+    def feedback_callback(self, feedback_msg):
+        feedback = feedback_msg.feedback
+        self.distance_remaining = float(feedback.distance_to_goal)
+        self.current_speed = float(feedback.speed)
+        self.publish_status(
+            MissionStatus.EXECUTING,
+            f'Executing segment {self.current_segment}/{self.total_segments}')
+
+    def route_valid_callback(self, msg):
+        self.route_valid = bool(msg.data)
+        if not self.route_valid and self.current_goal_handle is not None and not self.paused:
+            self.get_logger().error('Remaining route invalidated; pausing execution.')
+            self._request_pause('Route invalidated by a map or operational-zone change')
+
+    def _request_pause(self, reason):
+        if self.current_goal_handle is None or self.goal_finished:
+            return False
+        self.paused = True
+        self.cancel_reason = 'pause'
+        if not self.cancel_in_progress:
+            self.cancel_in_progress = True
+            future = self.current_goal_handle.cancel_goal_async()
+            future.add_done_callback(self.after_cancel_pause)
+        self.publish_status(MissionStatus.PAUSED, reason)
+        return True
+
+    def pause_callback(self, request, response):
+        del request
+        if self.paused:
+            response.success = True
+            response.message = 'Execution is already paused.'
+        elif self._request_pause('Paused by operator'):
+            response.success = True
+            response.message = 'Pausing current segment; mission retained.'
+        else:
+            response.success = False
+            response.message = 'Nothing is executing.'
+        return response
+
+    def after_cancel_pause(self, future):
+        del future
+        self.current_goal_handle = None
+        self.goal_finished = True
+        self.goal_in_progress = False
+        self.cancel_in_progress = False
+        self.publish_status(MissionStatus.PAUSED, 'Paused; mission retained')
+
+    def resume_callback(self, request, response):
+        del request
+        if not self.paused or self.current_item is None:
+            response.success = False
+            response.message = 'No paused mission is available.'
+        elif not self.route_valid:
+            response.success = False
+            response.message = 'Route is invalid; replan before resuming.'
+        else:
+            response.success = True
+            response.message = 'Resuming current segment.'
+            self.send_current_path()
+        return response
 
     def stop_callback(self, request, response):
         # Clear the queue FIRST: a canceled goal reports status CANCELED, which
@@ -192,6 +323,8 @@ class FollowPathClient(Node):
         # replaces a running one). With the queue empty, cancel means full stop.
         dropped = len(self.path_queue)
         self.path_queue.clear()
+        self.paused = False
+        self.cancel_reason = 'abort'
         if self.current_goal_handle is not None and not self.goal_finished:
             if not self.cancel_in_progress:
                 self.cancel_in_progress = True
@@ -206,6 +339,8 @@ class FollowPathClient(Node):
             self.current_goal_handle = None
             response.success = True
             response.message = 'Nothing executing; cleared queue.'
+            self.current_item = None
+            self.publish_status(MissionStatus.ABORTED, 'Mission aborted by operator')
         self.get_logger().warn(response.message)
         return response
 
@@ -214,6 +349,8 @@ class FollowPathClient(Node):
         self.current_goal_handle = None
         self.goal_finished = True
         self.cancel_in_progress = False
+        self.current_item = None
+        self.publish_status(MissionStatus.ABORTED, 'Mission aborted by operator')
 
     def clear(self):
         self.get_logger().error('Cleared internal state of FollowPath client.')
@@ -221,6 +358,8 @@ class FollowPathClient(Node):
         self.goal_in_progress = False
         self.current_goal_handle = None
         self.goal_finished = True
+        self.current_item = None
+        self.paused = False
 
     def goal_response_callback(self, future):
         goal_handle = future.result()
@@ -229,6 +368,8 @@ class FollowPathClient(Node):
             self.goal_in_progress = False
             self.goal_finished = True
             self.clear()
+            self.publish_status(MissionStatus.FAILED, 'Controller rejected path',
+                                'FollowPath goal was rejected')
             return
 
         self.get_logger().info('FollowPath goal accepted.')
@@ -244,14 +385,21 @@ class FollowPathClient(Node):
         self.goal_in_progress = False
         self.current_goal_handle = None
 
-        if result.status in (2, 4):  # SUCCEEDED or CANCELED
+        if result.status == GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().info('Goal completed, sending next if available.')
+            self.current_item = None
             self.send_next_path()
-        elif result.status == 6:  # UNKNOWN
-            self.get_logger().warn('Received UNKNOWN status (6). Ignoring and waiting.')
+        elif result.status == GoalStatus.STATUS_CANCELED:
+            # Cancellation completion is handled by the callback that requested
+            # pause/replace/abort. Never advance the queue merely because a goal
+            # was canceled.
+            self.get_logger().info(f'Goal canceled ({self.cancel_reason or "unspecified"}).')
         else:
             self.get_logger().warn(f'Goal failed with status: {result.status}. Stopping.')
+            failure = ('FollowPath aborted' if result.status == GoalStatus.STATUS_ABORTED
+                       else f'FollowPath ended with status {result.status}')
             self.clear()
+            self.publish_status(MissionStatus.FAILED, 'Mission execution failed', failure)
 
 def main(args=None):
     rclpy.init(args=args)

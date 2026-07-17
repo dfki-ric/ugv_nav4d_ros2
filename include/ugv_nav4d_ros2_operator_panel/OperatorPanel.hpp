@@ -8,6 +8,9 @@
 
 #include "ugv_nav4d_ros2/srv/edit_waypoint.hpp"
 #include "ugv_nav4d_ros2/srv/delete_forbidden_zone.hpp"
+#include "ugv_nav4d_ros2/msg/mission_status.hpp"
+#include "ugv_nav4d_ros2/msg/route_risk.hpp"
+#include "ugv_nav4d_ros2/msg/system_health.hpp"
 
 #include <rviz_common/panel.hpp>
 
@@ -37,6 +40,9 @@ public:
 
 private Q_SLOTS:
     void onStopExecution();
+    void onPauseExecution();
+    void onResumeExecution();
+    void onReplanMission();
     void onExecutePath();
     void onDiscardPath();
     void onDeleteWaypoint();
@@ -50,14 +56,24 @@ private Q_SLOTS:
     void onSaveMap();
     void onRepublishMaps();
     void onRegenerateMaps();
+    void onSaveMission();
+    void onLoadMission();
 
 private:
     void callTrigger(const rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr& client,
                      const QString& actionName);
     void setStatusText(const QString& text);
+    void updateExecuteEnabled();
 
     QLabel* status_label_{nullptr};
+    QLabel* execution_label_{nullptr};
+    QLabel* risk_label_{nullptr};
+    QLabel* health_label_{nullptr};
+    QLabel* inspection_label_{nullptr};
     QPushButton* stop_button_{nullptr};
+    QPushButton* pause_button_{nullptr};
+    QPushButton* resume_button_{nullptr};
+    QPushButton* replan_button_{nullptr};
     QPushButton* execute_path_button_{nullptr};
     QPushButton* discard_path_button_{nullptr};
     QSpinBox* waypoint_index_spin_{nullptr};
@@ -73,10 +89,19 @@ private:
     QPushButton* save_map_button_{nullptr};
     QPushButton* republish_maps_button_{nullptr};
     QPushButton* regenerate_maps_button_{nullptr};
+    QPushButton* save_mission_button_{nullptr};
+    QPushButton* load_mission_button_{nullptr};
 
     rclcpp::Node::SharedPtr node_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr status_sub_;
+    rclcpp::Subscription<ugv_nav4d_ros2::msg::MissionStatus>::SharedPtr execution_status_sub_;
+    rclcpp::Subscription<ugv_nav4d_ros2::msg::RouteRisk>::SharedPtr route_risk_sub_;
+    rclcpp::Subscription<ugv_nav4d_ros2::msg::SystemHealth>::SharedPtr system_health_sub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr inspection_result_sub_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr stop_execution_client_;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr pause_execution_client_;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr resume_execution_client_;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr replan_mission_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr execute_path_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr discard_path_client_;
     rclcpp::Client<ugv_nav4d_ros2::srv::EditWaypoint>::SharedPtr edit_waypoint_client_;
@@ -90,6 +115,10 @@ private:
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr save_map_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr map_publish_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr regenerate_maps_client_;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr save_mission_client_;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr load_mission_client_;
+    bool health_ok_{false};
+    bool route_ready_{false};
 };
 
 } // namespace ugv_nav4d_ros2_operator_panel
