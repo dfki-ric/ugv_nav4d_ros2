@@ -42,6 +42,7 @@ private Q_SLOTS:
     void onStopExecution();
     void onPauseExecution();
     void onResumeExecution();
+    void onRecoverMission();
     void onReplanMission();
     void onExecutePath();
     void onDiscardPath();
@@ -64,6 +65,9 @@ private:
                      const QString& actionName);
     void setStatusText(const QString& text);
     void updateExecuteEnabled();
+    void waitForRecoveryStop(int attempts_remaining);
+    void requestNativeRecovery();
+    void finishRecovery(const QString& status);
 
     QLabel* status_label_{nullptr};
     QLabel* execution_label_{nullptr};
@@ -73,6 +77,7 @@ private:
     QPushButton* stop_button_{nullptr};
     QPushButton* pause_button_{nullptr};
     QPushButton* resume_button_{nullptr};
+    QPushButton* recover_button_{nullptr};
     QPushButton* replan_button_{nullptr};
     QPushButton* execute_path_button_{nullptr};
     QPushButton* discard_path_button_{nullptr};
@@ -102,6 +107,7 @@ private:
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr pause_execution_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr resume_execution_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr replan_mission_client_;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr native_recovery_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr execute_path_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr discard_path_client_;
     rclcpp::Client<ugv_nav4d_ros2::srv::EditWaypoint>::SharedPtr edit_waypoint_client_;
@@ -119,6 +125,9 @@ private:
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr load_mission_client_;
     bool health_ok_{false};
     bool route_ready_{false};
+    uint8_t execution_state_{ugv_nav4d_ros2::msg::MissionStatus::IDLE};
+    bool execution_can_resume_{false};
+    bool recovery_in_progress_{false};
 };
 
 } // namespace ugv_nav4d_ros2_operator_panel

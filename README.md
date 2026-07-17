@@ -7,7 +7,10 @@ This repository provides a ROS2 wrapper for the [ugv_nav4d](https://github.com/d
 - ROS2 integration of the ugv_nav4d library.
 - Visualization tools for MLS and TravMap3D in RViz.
 - Field-operator mission panel with preview/execute gating, pause, resume,
-  abort, replan-from-current-pose, return planning, and mission persistence.
+  abort, replan-from-current-pose, native out-of-obstacle recovery, return
+  planning, and mission persistence. Recovery waits for confirmed controller
+  cancellation, invokes `ugv_nav4d::Planner::findTrajectoryOutOfObstacle()`,
+  and never auto-executes the rescue preview.
 - Structured planner/execution status, route-risk summaries, and aggregated
   localization/map/controller/battery/communications health.
 - True-3D goals and waypoints, click-to-explain traversability inspection, and

@@ -150,6 +150,8 @@ void PathPlannerNode::setupSubscriptions()
             "/ugv_nav4d_ros2/inspect_traversability", std::bind(&PathPlannerNode::inspectTraversabilityCallback, this, std::placeholders::_1, std::placeholders::_2));
     replan_current_mission_service = this->create_service<std_srvs::srv::Trigger>(
             "/ugv_nav4d_ros2/replan_current_mission", std::bind(&PathPlannerNode::replanCurrentMissionCallback, this, std::placeholders::_1, std::placeholders::_2));
+    recover_out_of_obstacle_service = this->create_service<std_srvs::srv::Trigger>(
+            "/ugv_nav4d_ros2/recover_out_of_obstacle", std::bind(&PathPlannerNode::recoverOutOfObstacleCallback, this, std::placeholders::_1, std::placeholders::_2));
     save_mission_service = this->create_service<std_srvs::srv::Trigger>(
             "/ugv_nav4d_ros2/save_mission", std::bind(&PathPlannerNode::saveMissionCallback, this, std::placeholders::_1, std::placeholders::_2));
     load_mission_service = this->create_service<std_srvs::srv::Trigger>(
@@ -372,6 +374,7 @@ void PathPlannerNode::regenerateMapsCallback(
 
     has_pending_path = false;
     path_approved = false;
+    pending_path_is_recovery = false;
     std_msgs::msg::Bool route_valid;
     route_valid.data = false;
     route_valid_publisher->publish(route_valid);
@@ -905,6 +908,63 @@ void PathPlannerNode::replanCurrentMissionCallback(
     publishStatus(response->message);
 }
 
+void PathPlannerNode::recoverOutOfObstacleCallback(
+        const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+        std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    if (!got_map || !is_configured || !planner_ptr){
+        response->success = false;
+        response->message = "Cannot recover: planner or traversability map is unavailable.";
+        publishStatus(response->message);
+        return;
+    }
+    if (!get_parameter("read_pose_from_topic").as_bool() && !updatePoseFromTF()){
+        response->success = false;
+        response->message = "Cannot recover: current robot pose is unavailable.";
+        publishStatus(response->message);
+        return;
+    }
+
+    Eigen::Affine3d body_to_world(Eigen::Affine3d::Identity());
+    body_to_world.translation() = Eigen::Vector3d(
+        start_pose.pose.position.x, start_pose.pose.position.y, start_pose.pose.position.z);
+    const Eigen::Quaterniond body_orientation(
+        start_pose.pose.orientation.w, start_pose.pose.orientation.x,
+        start_pose.pose.orientation.y, start_pose.pose.orientation.z);
+    if (!body_orientation.coeffs().allFinite() || body_orientation.norm() < 1e-6){
+        response->success = false;
+        response->message = "Cannot recover: current robot orientation is invalid.";
+        publishStatus(response->message);
+        return;
+    }
+    body_to_world.linear() = body_orientation.normalized().toRotationMatrix();
+
+    // The native ugv_nav4d recovery API operates from the ground-contact pose
+    // and returns the trajectory in the body-height convention used elsewhere.
+    Eigen::Affine3d ground_to_body(Eigen::Affine3d::Identity());
+    ground_to_body.translation() = Eigen::Vector3d(
+        0.0, 0.0, -get_parameter("distToGround").as_double());
+    const Eigen::Affine3d ground_to_world = body_to_world * ground_to_body;
+    const double yaw = base::getYaw(body_orientation);
+
+    const auto rescue = planner_ptr->findTrajectoryOutOfObstacle(
+        ground_to_world.translation(), yaw, ground_to_body, false);
+    if (!rescue || rescue->posSpline.getEndParam() <= rescue->posSpline.getStartParam()){
+        response->success = false;
+        response->message = "Native recovery found no motion that ends outside obstacles/frontiers.";
+        publishPlannedPath({}, false);
+        publishStatus(response->message);
+        return;
+    }
+
+    latest_trajectory3D = {*rescue};
+    latest_trajectory2D.clear();
+    publishPlannedPath(latest_trajectory3D, true);
+    response->success = true;
+    response->message = "Native recovery trajectory is ready for review; press Execute path to send it.";
+    publishStatus(response->message);
+}
+
 void PathPlannerNode::saveMissionCallback(
         const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
         std::shared_ptr<std_srvs::srv::Trigger::Response> response){
@@ -1383,6 +1443,7 @@ void PathPlannerNode::onForbiddenZonesChanged(bool planning_graph_changed){
     } else if (has_pending_path){
         has_pending_path = false;
         path_approved = false;
+        pending_path_is_recovery = false;
         std_msgs::msg::Bool route_valid;
         route_valid.data = false;
         route_valid_publisher->publish(route_valid);
@@ -2121,13 +2182,24 @@ void PathPlannerNode::publishPlannedPath(const std::vector<trajectory_follower::
     std::string label_last;
     std::string label;
     bool first_segment = true;
+    const bool is_recovery_path = std::any_of(
+        trajectory3D.begin(), trajectory3D.end(),
+        [](const auto& trajectory){
+            return trajectory.kind == trajectory_follower::TRAJECTORY_KIND_RESCUE;
+        });
 
     if (found_solution) {
         for (size_t seg_idx = 0; seg_idx < trajectory3D.size(); ++seg_idx) {
             auto& trajectory = trajectory3D[seg_idx];
+            const bool is_rescue =
+                trajectory.kind == trajectory_follower::TRAJECTORY_KIND_RESCUE;
 
             // Assign label based on current segment
-            if (trajectory.driveMode == trajectory_follower::DriveMode::ModeAckermann && trajectory.speed > 0) {
+            if (is_rescue && trajectory.speed > 0) {
+                label = "Recovery forward";
+            } else if (is_rescue && trajectory.speed < 0) {
+                label = "Recovery backward";
+            } else if (trajectory.driveMode == trajectory_follower::DriveMode::ModeAckermann && trajectory.speed > 0) {
                 label = "Forward";
             } else if (trajectory.driveMode == trajectory_follower::DriveMode::ModeAckermann && trajectory.speed < 0) {
                 label = "Backward";
@@ -2174,14 +2246,19 @@ void PathPlannerNode::publishPlannedPath(const std::vector<trajectory_follower::
                 visualization_msgs::msg::Marker route_line;
                 route_line.header.frame_id = world_frame;
                 route_line.header.stamp = now;
-                route_line.ns = is_return_plan ? "return_route" : "outward_route";
+                route_line.ns = is_rescue ? "recovery_route" :
+                    (is_return_plan ? "return_route" : "outward_route");
                 route_line.id = static_cast<int>(2 * seg_idx);
                 route_line.type = visualization_msgs::msg::Marker::LINE_STRIP;
                 route_line.action = visualization_msgs::msg::Marker::ADD;
                 route_line.pose.orientation.w = 1.0;
                 route_line.scale.x = 0.22;
                 route_line.color.a = 0.65;
-                if (is_return_plan) {
+                if (is_rescue) {
+                    route_line.color.r = 0.75;
+                    route_line.color.g = 0.15;
+                    route_line.color.b = 1.0;
+                } else if (is_return_plan) {
                     route_line.color.r = 1.0;
                     route_line.color.g = 0.45;
                     route_line.color.b = 0.05;
@@ -2196,7 +2273,11 @@ void PathPlannerNode::publishPlannedPath(const std::vector<trajectory_follower::
                 motion_line.id = static_cast<int>(2 * seg_idx + 1);
                 motion_line.scale.x = 0.09;
                 motion_line.color.a = 1.0;
-                if (label == "Forward") {
+                if (is_rescue) {
+                    motion_line.color.r = 0.95;
+                    motion_line.color.g = 0.25;
+                    motion_line.color.b = 1.0;
+                } else if (label == "Forward") {
                     motion_line.color.r = 0.1;
                     motion_line.color.g = 1.0;
                     motion_line.color.b = 0.1;
@@ -2352,6 +2433,7 @@ void PathPlannerNode::publishPlannedPath(const std::vector<trajectory_follower::
     pending_labeled_path = labeled_path_message;
     has_pending_path = found_solution && !labeled_path_message.paths.empty();
     path_approved = false;
+    pending_path_is_recovery = has_pending_path && is_recovery_path;
     std_msgs::msg::Bool route_valid;
     // Preview paths are not resumable by the follower until explicitly approved.
     route_valid.data = false;
@@ -2488,8 +2570,18 @@ bool PathPlannerNode::validatePendingPath(){
     }
     const auto& map = traversability_generator_ptr->getTraversabilityMap();
     bool valid = true;
-    for (const auto& segment : pending_labeled_path.paths){
-        for (const auto& stamped_pose : segment.poses){
+    for (size_t segment_index = 0; segment_index < pending_labeled_path.paths.size(); ++segment_index){
+        const auto& segment = pending_labeled_path.paths[segment_index];
+        for (size_t pose_index = 0; pose_index < segment.poses.size(); ++pose_index){
+            // A native rescue motion is intentionally allowed to overlap the
+            // obstacle/frontier around the stuck robot. Its contract is that
+            // the endpoint is free, so map refreshes validate that endpoint.
+            if (pending_path_is_recovery &&
+                (segment_index + 1 != pending_labeled_path.paths.size() ||
+                 pose_index + 1 != segment.poses.size())){
+                continue;
+            }
+            const auto& stamped_pose = segment.poses[pose_index];
             const auto& p = stamped_pose.pose.position;
             maps::grid::Index index;
             if (!map.toGrid(Eigen::Vector3d(p.x, p.y, p.z), index)){
@@ -2516,6 +2608,7 @@ bool PathPlannerNode::validatePendingPath(){
     if (!valid){
         has_pending_path = false;
         path_approved = false;
+        pending_path_is_recovery = false;
         publishMissionStatus(ugv_nav4d_ros2::msg::MissionStatus::PAUSED,
                              "Remaining route is no longer traversable; replan required");
     }

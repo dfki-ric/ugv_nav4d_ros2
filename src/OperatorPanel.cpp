@@ -7,6 +7,7 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <rviz_common/display_context.hpp>
@@ -57,6 +58,11 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     auto* buttons = new QGridLayout;
     pause_button_ = new QPushButton("Pause");
     resume_button_ = new QPushButton("Resume");
+    recover_button_ = new QPushButton("Recover from obstacle");
+    recover_button_->setStyleSheet(
+        "QPushButton { font-weight: bold; background-color: #ef6c00; color: white; padding: 6px; }");
+    recover_button_->setToolTip(
+        "Safely pause active execution, then use ugv_nav4d's native out-of-obstacle recovery to create an approval-gated rescue trajectory.");
     replan_button_ = new QPushButton("Replan from robot");
     execute_path_button_ = new QPushButton("Execute path");
     execute_path_button_->setStyleSheet("QPushButton { font-weight: bold; background-color: #2e7d32; color: white; }");
@@ -70,20 +76,21 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     regenerate_maps_button_ = new QPushButton("Regenerate maps");
     buttons->addWidget(pause_button_, 0, 0);
     buttons->addWidget(resume_button_, 0, 1);
-    buttons->addWidget(replan_button_, 1, 0, 1, 2);
-    buttons->addWidget(execute_path_button_, 2, 0);
-    buttons->addWidget(discard_path_button_, 2, 1);
-    buttons->addWidget(clear_waypoints_button_, 3, 0);
-    buttons->addWidget(undo_waypoint_button_, 3, 1);
-    buttons->addWidget(clear_zones_button_, 4, 0);
-    buttons->addWidget(undo_zone_button_, 4, 1);
-    buttons->addWidget(save_map_button_, 5, 0);
-    buttons->addWidget(republish_maps_button_, 5, 1);
-    buttons->addWidget(regenerate_maps_button_, 6, 0, 1, 2);
+    buttons->addWidget(recover_button_, 1, 0, 1, 2);
+    buttons->addWidget(replan_button_, 2, 0, 1, 2);
+    buttons->addWidget(execute_path_button_, 3, 0);
+    buttons->addWidget(discard_path_button_, 3, 1);
+    buttons->addWidget(clear_waypoints_button_, 4, 0);
+    buttons->addWidget(undo_waypoint_button_, 4, 1);
+    buttons->addWidget(clear_zones_button_, 5, 0);
+    buttons->addWidget(undo_zone_button_, 5, 1);
+    buttons->addWidget(save_map_button_, 6, 0);
+    buttons->addWidget(republish_maps_button_, 6, 1);
+    buttons->addWidget(regenerate_maps_button_, 7, 0, 1, 2);
     save_mission_button_ = new QPushButton("Save mission");
     load_mission_button_ = new QPushButton("Load mission");
-    buttons->addWidget(save_mission_button_, 7, 0);
-    buttons->addWidget(load_mission_button_, 7, 1);
+    buttons->addWidget(save_mission_button_, 8, 0);
+    buttons->addWidget(load_mission_button_, 8, 1);
     plan_return_button_ = new QPushButton("Plan return");
     layout->addLayout(buttons);
 
@@ -122,6 +129,7 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     connect(stop_button_, &QPushButton::clicked, this, &OperatorPanel::onStopExecution);
     connect(pause_button_, &QPushButton::clicked, this, &OperatorPanel::onPauseExecution);
     connect(resume_button_, &QPushButton::clicked, this, &OperatorPanel::onResumeExecution);
+    connect(recover_button_, &QPushButton::clicked, this, &OperatorPanel::onRecoverMission);
     connect(replan_button_, &QPushButton::clicked, this, &OperatorPanel::onReplanMission);
     connect(execute_path_button_, &QPushButton::clicked, this, &OperatorPanel::onExecutePath);
     connect(discard_path_button_, &QPushButton::clicked, this, &OperatorPanel::onDiscardPath);
@@ -165,9 +173,12 @@ void OperatorPanel::onInitialize()
                 .arg(QString::fromStdString(msg->summary))
                 .arg(msg->current_segment).arg(msg->total_segments)
                 .arg(msg->distance_remaining, 0, 'f', 1);
-            QMetaObject::invokeMethod(execution_label_, [label = execution_label_, text]() {
-                label->setText(text);
-                label->setToolTip(text);
+            QMetaObject::invokeMethod(this, [this, text, state = msg->state,
+                                                   can_resume = msg->can_resume]() {
+                execution_label_->setText(text);
+                execution_label_->setToolTip(text);
+                execution_state_ = state;
+                execution_can_resume_ = can_resume;
             }, Qt::QueuedConnection);
         });
     route_risk_sub_ = node_->create_subscription<ugv_nav4d_ros2::msg::RouteRisk>(
@@ -210,6 +221,7 @@ void OperatorPanel::onInitialize()
     pause_execution_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/pause_execution");
     resume_execution_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/resume_execution");
     replan_mission_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/replan_current_mission");
+    native_recovery_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/recover_out_of_obstacle");
     execute_path_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/execute_path");
     discard_path_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/discard_path");
     edit_waypoint_client_ = node_->create_client<ugv_nav4d_ros2::srv::EditWaypoint>("/ugv_nav4d_ros2/edit_waypoint");
@@ -281,6 +293,11 @@ void OperatorPanel::callTrigger(const rclcpp::Client<std_srvs::srv::Trigger>::Sh
 
 void OperatorPanel::onStopExecution()
 {
+    if (recovery_in_progress_)
+    {
+        recovery_in_progress_ = false;
+        recover_button_->setEnabled(true);
+    }
     callTrigger(stop_execution_client_, "STOP");
 }
 
@@ -292,6 +309,136 @@ void OperatorPanel::onPauseExecution()
 void OperatorPanel::onResumeExecution()
 {
     callTrigger(resume_execution_client_, "Resume");
+}
+
+void OperatorPanel::onRecoverMission()
+{
+    if (recovery_in_progress_)
+    {
+        setStatusText("Recovery is already in progress.");
+        return;
+    }
+    if (!node_ || !native_recovery_client_ || !native_recovery_client_->service_is_ready())
+    {
+        setStatusText("Recovery unavailable: native recovery service is not ready.");
+        return;
+    }
+
+    recovery_in_progress_ = true;
+    recover_button_->setEnabled(false);
+    route_ready_ = false;
+    updateExecuteEnabled();
+
+    if (execution_state_ == ugv_nav4d_ros2::msg::MissionStatus::PAUSED &&
+        !execution_can_resume_)
+    {
+        setStatusText("Recovery: waiting for the controller to confirm the pending pause...");
+        waitForRecoveryStop(20);
+        return;
+    }
+    if (execution_state_ != ugv_nav4d_ros2::msg::MissionStatus::EXECUTING)
+    {
+        requestNativeRecovery();
+        return;
+    }
+    if (!pause_execution_client_ || !pause_execution_client_->service_is_ready())
+    {
+        finishRecovery("Recovery failed: pause service is unavailable; use STOP before replanning.");
+        return;
+    }
+
+    setStatusText("Recovery: requesting a controlled pause...");
+    auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+    pause_execution_client_->async_send_request(request,
+        [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future)
+        {
+            const auto response = future.get();
+            QMetaObject::invokeMethod(this, [this, success = response->success,
+                                                   message = response->message]()
+            {
+                if (!recovery_in_progress_)
+                {
+                    return;
+                }
+                if (!success)
+                {
+                    if (execution_state_ == ugv_nav4d_ros2::msg::MissionStatus::PAUSED &&
+                        !execution_can_resume_)
+                    {
+                        waitForRecoveryStop(20);
+                        return;
+                    }
+                    if (execution_state_ != ugv_nav4d_ros2::msg::MissionStatus::EXECUTING)
+                    {
+                        requestNativeRecovery();
+                        return;
+                    }
+                    finishRecovery("Recovery pause failed: " + QString::fromStdString(message));
+                    return;
+                }
+                setStatusText("Recovery: waiting for the controller to confirm pause...");
+                waitForRecoveryStop(20);  // 20 * 250 ms = 5 s maximum wait.
+            }, Qt::QueuedConnection);
+        });
+}
+
+void OperatorPanel::waitForRecoveryStop(int attempts_remaining)
+{
+    if (!recovery_in_progress_)
+    {
+        return;
+    }
+    if ((execution_state_ == ugv_nav4d_ros2::msg::MissionStatus::PAUSED &&
+         execution_can_resume_) ||
+        execution_state_ == ugv_nav4d_ros2::msg::MissionStatus::FAILED ||
+        execution_state_ == ugv_nav4d_ros2::msg::MissionStatus::ABORTED ||
+        execution_state_ == ugv_nav4d_ros2::msg::MissionStatus::COMPLETED)
+    {
+        requestNativeRecovery();
+        return;
+    }
+    if (attempts_remaining <= 0)
+    {
+        finishRecovery("Recovery stopped: controller did not confirm pause within 5 seconds; use STOP.");
+        return;
+    }
+    QTimer::singleShot(250, this,
+        [this, attempts_remaining]() { waitForRecoveryStop(attempts_remaining - 1); });
+}
+
+void OperatorPanel::requestNativeRecovery()
+{
+    if (!recovery_in_progress_ || !native_recovery_client_ ||
+        !native_recovery_client_->service_is_ready())
+    {
+        finishRecovery("Recovery failed: native recovery service became unavailable.");
+        return;
+    }
+    setStatusText("Recovery: finding a native out-of-obstacle trajectory...");
+    auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+    native_recovery_client_->async_send_request(request,
+        [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future)
+        {
+            const auto response = future.get();
+            QMetaObject::invokeMethod(this, [this, success = response->success,
+                                                   message = response->message]()
+            {
+                const QString detail = QString::fromStdString(message);
+                finishRecovery(success
+                    ? "Native recovery preview ready: " + detail
+                    : "Native recovery failed: " + detail);
+            }, Qt::QueuedConnection);
+        });
+}
+
+void OperatorPanel::finishRecovery(const QString& status)
+{
+    recovery_in_progress_ = false;
+    if (recover_button_)
+    {
+        recover_button_->setEnabled(true);
+    }
+    setStatusText(status);
 }
 
 void OperatorPanel::onReplanMission()

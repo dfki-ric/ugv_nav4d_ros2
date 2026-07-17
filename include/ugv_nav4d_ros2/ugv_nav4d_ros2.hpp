@@ -143,6 +143,8 @@ private:
         std::shared_ptr<ugv_nav4d_ros2::srv::InspectTraversability::Response> response);
     void replanCurrentMissionCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                                       std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+    void recoverOutOfObstacleCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                                      std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void saveMissionCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                              std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void loadMissionCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
@@ -242,6 +244,7 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr save_map_service;
     rclcpp::Service<ugv_nav4d_ros2::srv::InspectTraversability>::SharedPtr inspect_traversability_service;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr replan_current_mission_service;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr recover_out_of_obstacle_service;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr save_mission_service;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr load_mission_service;
 
@@ -252,6 +255,7 @@ private:
     ugv_nav4d_ros2::msg::LabeledPathArray pending_labeled_path;
     bool has_pending_path{false};
     bool path_approved{false};
+    bool pending_path_is_recovery{false};
 
     //forbidden zones (keep-out): applied to the trav map after every regeneration
     rclcpp::Subscription<ugv_nav4d_ros2::msg::ForbiddenZone>::SharedPtr sub_add_forbidden_zone;

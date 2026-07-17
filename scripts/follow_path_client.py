@@ -279,7 +279,10 @@ class FollowPathClient(Node):
             self.cancel_in_progress = True
             future = self.current_goal_handle.cancel_goal_async()
             future.add_done_callback(self.after_cancel_pause)
-        self.publish_status(MissionStatus.PAUSED, reason)
+        # Cancellation is asynchronous. Report PAUSED immediately for operator
+        # awareness, but do not advertise resumability until Nav2 confirms the
+        # cancellation callback below.
+        self.publish_status(MissionStatus.PAUSED, reason, can_resume=False)
         return True
 
     def pause_callback(self, request, response):
@@ -301,6 +304,7 @@ class FollowPathClient(Node):
         self.goal_finished = True
         self.goal_in_progress = False
         self.cancel_in_progress = False
+        self.current_speed = 0.0
         self.publish_status(MissionStatus.PAUSED, 'Paused; mission retained')
 
     def resume_callback(self, request, response):
