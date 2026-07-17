@@ -64,6 +64,7 @@ rosidl_generate_interfaces("ugv_nav4d_ros2_msgs"
   "msg/LabeledPathArray.msg"
   "msg/ForbiddenZone.msg"
   "srv/EditWaypoint.srv"
+  "srv/DeleteForbiddenZone.srv"
   "action/SaveMLSMap.action"
   DEPENDENCIES geometry_msgs std_msgs nav_msgs
   LIBRARY_NAME ${PROJECT_NAME}

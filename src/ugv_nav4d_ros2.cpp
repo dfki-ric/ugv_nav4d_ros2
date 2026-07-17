@@ -10,11 +10,13 @@
 #include <boost/archive/binary_oarchive.hpp>
 #include <boost/archive/binary_iarchive.hpp>
 
+#include <algorithm>
 #include <fstream>
 #include <cmath>
 #include <chrono>
 #include <deque>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <unordered_set>
 
@@ -55,6 +57,8 @@ PathPlannerNode::PathPlannerNode()
 
     combined_path_publisher = this->create_publisher<nav_msgs::msg::Path>("/ugv_nav4d_ros2/path", 10);
     labeled_path_publisher = this->create_publisher<ugv_nav4d_ros2::msg::LabeledPathArray>("/ugv_nav4d_ros2/labeled_path_segments", 10);
+    colored_path_publisher = this->create_publisher<visualization_msgs::msg::MarkerArray>(
+            "/ugv_nav4d_ros2/mission_path", rclcpp::QoS(1).transient_local());
     trav_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::TravMap>("/ugv_nav4d_ros2/trav_map", 10);
     mls_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::MLSMap>("/ugv_nav4d_ros2/mls_map", 10);
 
@@ -79,6 +83,8 @@ void PathPlannerNode::setupSubscriptions()
     // Map publisher trigger service
     map_publish_service = this->create_service<std_srvs::srv::Trigger>(
             "/ugv_nav4d_ros2/map_publish", std::bind(&PathPlannerNode::mapPublishCallback, this, std::placeholders::_1, std::placeholders::_2));
+    regenerate_maps_service = this->create_service<std_srvs::srv::Trigger>(
+            "/ugv_nav4d_ros2/regenerate_maps", std::bind(&PathPlannerNode::regenerateMapsCallback, this, std::placeholders::_1, std::placeholders::_2));
 
     sub_goal_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/goal_pose", 1,
             bind(&PathPlannerNode::processGoalRequest, this, std::placeholders::_1));
@@ -134,6 +140,16 @@ void PathPlannerNode::setupSubscriptions()
 
     forbidden_zone_marker_publisher = this->create_publisher<visualization_msgs::msg::MarkerArray>(
             "/ugv_nav4d_ros2/forbidden_zone_markers", rclcpp::QoS(1).transient_local());
+
+    delete_forbidden_zone_service = this->create_service<ugv_nav4d_ros2::srv::DeleteForbiddenZone>(
+            "/ugv_nav4d_ros2/delete_forbidden_zone", std::bind(&PathPlannerNode::deleteForbiddenZoneCallback, this, std::placeholders::_1, std::placeholders::_2));
+
+    // Plan back to where the last mission started, visiting the waypoints in
+    // reverse order.
+    plan_return_service = this->create_service<std_srvs::srv::Trigger>(
+            "/ugv_nav4d_ros2/plan_return", std::bind(&PathPlannerNode::planReturnCallback, this, std::placeholders::_1, std::placeholders::_2));
+    set_return_forward_service = this->create_service<std_srvs::srv::SetBool>(
+            "/ugv_nav4d_ros2/set_return_forward", std::bind(&PathPlannerNode::setReturnForwardCallback, this, std::placeholders::_1, std::placeholders::_2));
 
     sub_start_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/start_pose", 1, 
             bind(&PathPlannerNode::readStartPose, this, std::placeholders::_1));
@@ -200,6 +216,14 @@ rcl_interfaces::msg::SetParametersResult PathPlannerNode::parametersCallback(con
     {
         if (this->has_parameter(param.get_name()))
         {
+            // This is an operational return-path preference, not planner or
+            // traversability configuration. It is read directly when Plan
+            // Return is requested, so applying it must not rebuild the planner
+            // or regenerate the traversability map.
+            if (param.get_name() == "return_face_forward")
+            {
+                continue;
+            }
             if (param.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER)
             {
                 parameters_to_update.push_back(rclcpp::Parameter(param.get_name(), param.as_int()));
@@ -254,6 +278,63 @@ void PathPlannerNode::mapPublishCallback(
         response->message = "Failed to publish maps.";
         RCLCPP_ERROR(this->get_logger(), "Failed to publish maps.");
     }
+}
+
+void PathPlannerNode::regenerateMapsCallback(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+{
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    if (is_planning)
+    {
+        response->success = false;
+        response->message = "Cannot regenerate maps while planning is active.";
+        publishStatus(response->message);
+        return;
+    }
+
+    if (!get_parameter("read_pose_from_topic").as_bool() && !updatePoseFromTF())
+    {
+        response->success = false;
+        response->message = "Cannot regenerate maps: TF lookup of the robot pose failed.";
+        publishStatus(response->message);
+        return;
+    }
+
+    publishStatus("Regenerating MLS and traversability maps...");
+    if (get_parameter("load_mls_from_file").as_bool())
+    {
+        got_map = false;
+        initializeMLSMap();
+    }
+    else
+    {
+        if (!latest_pointcloud)
+        {
+            response->success = false;
+            response->message = "Cannot regenerate maps: no point cloud has been received.";
+            publishStatus(response->message);
+            return;
+        }
+        initializeMLSMap();
+        got_map = generateMLS();
+    }
+
+    if (!got_map || !mls_map_ptr)
+    {
+        response->success = false;
+        response->message = "MLS regeneration failed; check the configured map source.";
+        publishStatus(response->message);
+        return;
+    }
+
+    is_configured = false;
+    configurePlanner();
+    response->success = publishMLSMap() && publishTravMap();
+    response->message = response->success
+        ? "Regenerated and published MLS and traversability maps from the current robot pose."
+        : "Maps regenerated, but publishing failed.";
+    publishStatus(response->message);
 }
 
 void PathPlannerNode::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
@@ -499,7 +580,7 @@ void PathPlannerNode::publishWaypointMarkers(){
     waypoint_marker_publisher->publish(marker_array);
 }
 
-void PathPlannerNode::planThroughWaypoints(){
+void PathPlannerNode::planThroughWaypoints(bool record_mission){
     std::lock_guard<std::recursive_mutex> lock(planner_mutex);
 
     // Target sequence: the queued waypoints in click order, then the final goal.
@@ -516,6 +597,12 @@ void PathPlannerNode::planThroughWaypoints(){
     time.microseconds = (int64_t)(planner_config.maxTime * 1e6);
     const bool dumpOnError = get_parameter("dumpOnError").as_bool();
     const bool dumpOnSuccess = get_parameter("dumpOnSuccess").as_bool();
+
+    if (record_mission){
+        last_mission_start = start_pose_rbs;
+        last_mission_goal = goal_pose_rbs;
+        has_last_mission_start = true;
+    }
 
     RCLCPP_INFO_STREAM(this->get_logger(), "Planner state: Planning through "
                        << waypoint_queue.size() << " waypoint(s)");
@@ -758,6 +845,116 @@ void PathPlannerNode::applyForbiddenZones(){
                        << " forbidden zone(s): " << marked << " trav node(s) marked as obstacle.");
 }
 
+void PathPlannerNode::deleteForbiddenZoneCallback(const std::shared_ptr<ugv_nav4d_ros2::srv::DeleteForbiddenZone::Request> request,
+                                                  std::shared_ptr<ugv_nav4d_ros2::srv::DeleteForbiddenZone::Response> response){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    if (request->index == 0 || request->index > forbidden_zones.size()){
+        response->success = false;
+        response->message = "Forbidden zone " + std::to_string(request->index) + " does not exist ("
+                            + std::to_string(forbidden_zones.size()) + " active).";
+        publishStatus(response->message);
+        return;
+    }
+    forbidden_zones.erase(forbidden_zones.begin() + (request->index - 1));
+    onForbiddenZonesChanged();
+    response->success = true;
+    response->message = "Deleted forbidden zone " + std::to_string(request->index) + "; "
+                        + std::to_string(forbidden_zones.size()) + " remaining (renumbered).";
+    RCLCPP_INFO_STREAM(this->get_logger(), response->message);
+    publishStatus(response->message);
+}
+
+void PathPlannerNode::planReturnCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+                                         std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    if (!has_last_mission_start){
+        response->success = false;
+        response->message = "No previous mission start recorded; plan a mission first.";
+        publishStatus(response->message);
+        return;
+    }
+    if (!is_configured){
+        configurePlanner();
+    }
+    if (!got_map){
+        response->success = false;
+        response->message = "Cannot plan return: no map available.";
+        publishStatus(response->message);
+        return;
+    }
+    if (is_planning){
+        response->success = false;
+        response->message = "Cannot plan return: planner is busy.";
+        publishStatus(response->message);
+        return;
+    }
+
+    // Build the complete reverse mission, beginning at the outward mission's
+    // final goal. Using the live robot pose here could incorrectly omit the
+    // final-goal -> last-waypoint leg (for example, while the robot is still at
+    // the last waypoint).
+    start_pose_rbs = last_mission_goal;
+    goal_pose_rbs = last_mission_start;
+
+    const bool face_forward = get_parameter("return_face_forward").as_bool();
+    const Eigen::Quaterniond half_turn(Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitZ()));
+    if (face_forward){
+        // Keep the real orientation at the final goal as the planning start, so
+        // the path includes the turn-around instead of assuming it already
+        // happened. Reverse the heading requested at every return target.
+        goal_pose_rbs.orientation = (goal_pose_rbs.orientation * half_turn).normalized();
+    }
+
+    publishStatus(face_forward
+        ? "Planning forward-facing return to the last mission start..."
+        : "Planning return to the last mission start (reverse motion allowed)...");
+    is_return_plan = true;
+    struct ReturnPlanFlagGuard {
+        bool& flag;
+        ~ReturnPlanFlagGuard() { flag = false; }
+    } return_plan_flag_guard{is_return_plan};
+
+    if (waypoint_queue.empty()){
+        plan(false);
+    } else {
+        // Visit the waypoints in reverse order on the way back. The queue itself
+        // is restored afterwards (it is only emptied by clear_waypoints).
+        const auto outward_waypoints = waypoint_queue;
+        std::reverse(waypoint_queue.begin(), waypoint_queue.end());
+        if (face_forward){
+            for (auto& waypoint : waypoint_queue){
+                Eigen::Quaterniond orientation(
+                    waypoint.orientation.w, waypoint.orientation.x,
+                    waypoint.orientation.y, waypoint.orientation.z);
+                orientation = (orientation * half_turn).normalized();
+                waypoint.orientation.x = orientation.x();
+                waypoint.orientation.y = orientation.y();
+                waypoint.orientation.z = orientation.z();
+                waypoint.orientation.w = orientation.w();
+            }
+        }
+        planThroughWaypoints(false);
+        waypoint_queue = outward_waypoints;
+    }
+
+    response->success = (latest_planning_result == ugv_nav4d::Planner::FOUND_SOLUTION);
+    response->message = response->success
+        ? "Return path ready - review and Execute."
+        : std::string("Return planning failed: ") + planningResultToString(latest_planning_result);
+}
+
+void PathPlannerNode::setReturnForwardCallback(
+        const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
+        std::shared_ptr<std_srvs::srv::SetBool::Response> response){
+    const auto result = set_parameter(rclcpp::Parameter("return_face_forward", request->data));
+    response->success = result.successful;
+    response->message = result.successful
+        ? (request->data ? "Return mode: turn around and prefer forward driving."
+                         : "Return mode: preserve headings; reverse driving allowed.")
+        : "Could not change return mode: " + result.reason;
+    publishStatus(response->message);
+}
+
 void PathPlannerNode::publishForbiddenZoneMarkers(){
     visualization_msgs::msg::MarkerArray marker_array;
 
@@ -828,6 +1025,35 @@ void PathPlannerNode::publishForbiddenZoneMarkers(){
             wall.points.push_back(a_top);
         }
         marker_array.markers.push_back(wall);
+
+        // Zone number above the wall, for delete-by-number.
+        geometry_msgs::msg::Point centroid;
+        for (const auto& v : zone.vertices){
+            centroid.x += v.x;
+            centroid.y += v.y;
+            centroid.z += v.z;
+        }
+        centroid.x /= static_cast<double>(n_verts);
+        centroid.y /= static_cast<double>(n_verts);
+        centroid.z /= static_cast<double>(n_verts);
+
+        visualization_msgs::msg::Marker label;
+        label.header.frame_id = frame;
+        label.header.stamp = now;
+        label.ns = "forbidden_zone_labels";
+        label.id = static_cast<int>(i);
+        label.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+        label.action = visualization_msgs::msg::Marker::ADD;
+        label.pose.position = centroid;
+        label.pose.position.z += 2.4;
+        label.pose.orientation.w = 1.0;
+        label.scale.z = 0.8;
+        label.color.r = 1.0;
+        label.color.g = 0.3;
+        label.color.b = 0.3;
+        label.color.a = 1.0;
+        label.text = std::to_string(i + 1);
+        marker_array.markers.push_back(label);
     }
 
     forbidden_zone_marker_publisher->publish(marker_array);
@@ -1099,7 +1325,7 @@ void PathPlannerNode::actionSaveMapAccepted(const std::shared_ptr<rclcpp_action:
     }.detach();
 }
 
-void PathPlannerNode::plan(){
+void PathPlannerNode::plan(bool record_mission){
     std::lock_guard<std::recursive_mutex> lock(planner_mutex);
 
     std::vector<trajectory_follower::SubTrajectory> trajectory2D, trajectory3D;
@@ -1115,6 +1341,12 @@ void PathPlannerNode::plan(){
         std::atomic<bool>& flag;
         ~PlanningFlagGuard() { flag = false; }
     } planning_flag_guard{is_planning};
+
+    if (record_mission){
+        last_mission_start = start_pose_rbs;
+        last_mission_goal = goal_pose_rbs;
+        has_last_mission_start = true;
+    }
 
     RCLCPP_INFO_STREAM(this->get_logger(), "Planning: start (" << start_pose_rbs.position.transpose()
                        << ") -> goal (" << goal_pose_rbs.position.transpose()
@@ -1148,10 +1380,16 @@ void PathPlannerNode::plan(){
 void PathPlannerNode::publishPlannedPath(const std::vector<trajectory_follower::SubTrajectory>& trajectory3D, bool found_solution)
 {
     ugv_nav4d_ros2::msg::LabeledPathArray labeled_path_message;
+    visualization_msgs::msg::MarkerArray colored_path_message;
     auto now = this->get_clock()->now();
+    const std::string world_frame = get_parameter("world_frame").as_string();
+
+    visualization_msgs::msg::Marker clear_colored_path;
+    clear_colored_path.action = visualization_msgs::msg::Marker::DELETEALL;
+    colored_path_message.markers.push_back(clear_colored_path);
 
     nav_msgs::msg::Path path;
-    path.header.frame_id = get_parameter("world_frame").as_string();
+    path.header.frame_id = world_frame;
 
     nav_msgs::msg::Path path_segment;
     std::string label_last;
@@ -1187,7 +1425,7 @@ void PathPlannerNode::publishPlannedPath(const std::vector<trajectory_follower::
                 }
 
                 path_segment = nav_msgs::msg::Path();
-                path_segment.header.frame_id = get_parameter("world_frame").as_string();
+                path_segment.header.frame_id = world_frame;
                 label_last = label;
                 first_segment = false;
             }
@@ -1201,6 +1439,68 @@ void PathPlannerNode::publishPlannedPath(const std::vector<trajectory_follower::
                 RCLCPP_WARN_STREAM(this->get_logger(), "Spline sample size mismatch: "
                                    << parameters.size() << " params vs " << points.size() << " points.");
             }
+
+            // Draw two coincident lines: a wide, translucent mission-color
+            // underlay (blue outward / orange return), and a narrow motion-color
+            // overlay (green forward / red backward). This keeps both pieces of
+            // operator information visible at the same time.
+            if (!points.empty()) {
+                visualization_msgs::msg::Marker route_line;
+                route_line.header.frame_id = world_frame;
+                route_line.header.stamp = now;
+                route_line.ns = is_return_plan ? "return_route" : "outward_route";
+                route_line.id = static_cast<int>(2 * seg_idx);
+                route_line.type = visualization_msgs::msg::Marker::LINE_STRIP;
+                route_line.action = visualization_msgs::msg::Marker::ADD;
+                route_line.pose.orientation.w = 1.0;
+                route_line.scale.x = 0.22;
+                route_line.color.a = 0.65;
+                if (is_return_plan) {
+                    route_line.color.r = 1.0;
+                    route_line.color.g = 0.45;
+                    route_line.color.b = 0.05;
+                } else {
+                    route_line.color.r = 0.1;
+                    route_line.color.g = 0.35;
+                    route_line.color.b = 1.0;
+                }
+
+                visualization_msgs::msg::Marker motion_line = route_line;
+                motion_line.ns = "motion_direction";
+                motion_line.id = static_cast<int>(2 * seg_idx + 1);
+                motion_line.scale.x = 0.09;
+                motion_line.color.a = 1.0;
+                if (label == "Forward") {
+                    motion_line.color.r = 0.1;
+                    motion_line.color.g = 1.0;
+                    motion_line.color.b = 0.1;
+                } else if (label == "Backward") {
+                    motion_line.color.r = 1.0;
+                    motion_line.color.g = 0.05;
+                    motion_line.color.b = 0.05;
+                } else if (label == "PointTurn") {
+                    motion_line.color.r = 1.0;
+                    motion_line.color.g = 0.9;
+                    motion_line.color.b = 0.0;
+                } else {
+                    motion_line.color.r = 0.0;
+                    motion_line.color.g = 0.9;
+                    motion_line.color.b = 1.0;
+                }
+
+                for (const auto& point : points) {
+                    geometry_msgs::msg::Point marker_point;
+                    marker_point.x = point.x();
+                    marker_point.y = point.y();
+                    marker_point.z = point.z() + 0.05;
+                    route_line.points.push_back(marker_point);
+                    marker_point.z += 0.02;
+                    motion_line.points.push_back(marker_point);
+                }
+                colored_path_message.markers.push_back(route_line);
+                colored_path_message.markers.push_back(motion_line);
+            }
+
             for (size_t i = 0; i < parameters.size(); ++i) {
                 const double param = parameters[i];
 
@@ -1230,7 +1530,7 @@ void PathPlannerNode::publishPlannedPath(const std::vector<trajectory_follower::
                 tempPoint.pose.orientation.z = yaw.z();
                 tempPoint.pose.orientation.w = yaw.w();
                 tempPoint.header.stamp = now;
-                tempPoint.header.frame_id = get_parameter("world_frame").as_string();
+                tempPoint.header.frame_id = world_frame;
 
                 path.poses.push_back(tempPoint);
                 path_segment.poses.push_back(tempPoint);
@@ -1318,6 +1618,7 @@ void PathPlannerNode::publishPlannedPath(const std::vector<trajectory_follower::
     path.header.stamp = now;
     combined_path_publisher->publish(path);
     labeled_path_publisher->publish(labeled_path_message);
+    colored_path_publisher->publish(colored_path_message);
 
     // Hold the path for the execution gate. Anything that plans (or fails to)
     // replaces the pending path, so Execute always sends what RViz shows.
@@ -1387,6 +1688,7 @@ void PathPlannerNode::declareParameters(){
     
     declare_parameter("dumpOnError", false);
     declare_parameter("dumpOnSuccess", false);
+    declare_parameter("return_face_forward", true);
     declare_parameter("initialPatchRadius", 3.0);
     declare_parameter("grid_resolution", 0.3);
     declare_parameter("maxMotionCurveLength", 100.0);

@@ -17,6 +17,7 @@ ugv_nav4d_ros2:
     dist_min_z: -1000.0 # height (Z) crop lower bound in m
     dumpOnError: false
     dumpOnSuccess: false
+    return_face_forward: true # rotate return headings 180deg to prefer forward driving
     initialPatchRadius: 3.0
     #Mobility Parameters
     maxMotionCurveLength: 20.0

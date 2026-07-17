@@ -6,6 +6,7 @@ from rclpy.action import ActionClient
 
 from nav_msgs.msg import Path
 from nav2_msgs.action import FollowPath
+from std_srvs.srv import Trigger
 from ugv_nav4d_ros2.msg import LabeledPathArray
 
 import math
@@ -27,6 +28,11 @@ class FollowPathClient(Node):
         )
 
         self._action_client = ActionClient(self, FollowPath, '/follow_path')
+
+        # Operator stop: cancels the running FollowPath goal and drops all queued
+        # segments. Named under the planner namespace for the RViz operator panel.
+        self.stop_service = self.create_service(
+            Trigger, '/ugv_nav4d_ros2/stop_execution', self.stop_callback)
 
         self.path_queue = []
         self.goal_in_progress = False
@@ -165,11 +171,49 @@ class FollowPathClient(Node):
         goal_msg.controller_id = ''
         goal_msg.goal_checker_id = ''
 
+        # Never block indefinitely inside a callback: this node is single-threaded,
+        # so a missing /follow_path server would freeze ALL callbacks (including the
+        # stop service). Fail fast with a clear error instead.
+        if not self._action_client.wait_for_server(timeout_sec=2.0):
+            self.get_logger().error(
+                '/follow_path action server not available; dropping path. '
+                'Is the controller running?')
+            self.clear()
+            return
+
         self.goal_in_progress = True
         self.goal_finished = False
-        self._action_client.wait_for_server()
         future = self._action_client.send_goal_async(goal_msg)
         future.add_done_callback(self.goal_response_callback)
+
+    def stop_callback(self, request, response):
+        # Clear the queue FIRST: a canceled goal reports status CANCELED, which
+        # normally advances to the next queued segment (used when a new path
+        # replaces a running one). With the queue empty, cancel means full stop.
+        dropped = len(self.path_queue)
+        self.path_queue.clear()
+        if self.current_goal_handle is not None and not self.goal_finished:
+            if not self.cancel_in_progress:
+                self.cancel_in_progress = True
+                cancel_future = self.current_goal_handle.cancel_goal_async()
+                cancel_future.add_done_callback(self.after_cancel_stop)
+            response.success = True
+            response.message = (
+                f'Stopping: canceling current segment, dropped {dropped} queued segment(s).')
+        else:
+            self.goal_in_progress = False
+            self.goal_finished = True
+            self.current_goal_handle = None
+            response.success = True
+            response.message = 'Nothing executing; cleared queue.'
+        self.get_logger().warn(response.message)
+        return response
+
+    def after_cancel_stop(self, future):
+        self.get_logger().warn('Execution stopped by operator.')
+        self.current_goal_handle = None
+        self.goal_finished = True
+        self.cancel_in_progress = False
 
     def clear(self):
         self.get_logger().error('Cleared internal state of FollowPath client.')
