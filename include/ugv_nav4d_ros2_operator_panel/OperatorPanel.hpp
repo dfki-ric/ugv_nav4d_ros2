@@ -73,6 +73,7 @@ private:
     QLabel* execution_label_{nullptr};
     QLabel* risk_label_{nullptr};
     QLabel* health_label_{nullptr};
+    QLabel* readiness_label_{nullptr};
     QLabel* inspection_label_{nullptr};
     QPushButton* stop_button_{nullptr};
     QPushButton* pause_button_{nullptr};

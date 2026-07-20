@@ -241,7 +241,14 @@ class FollowPathClient(Node):
                 '/follow_path action server not available; dropping path. '
                 'Is the controller running?')
             self.clear()
-            self.publish_status(MissionStatus.FAILED, 'Controller unavailable',
+            # send_next_path() selects and numbers the first segment before the
+            # controller availability check. No segment was actually submitted,
+            # so report the mission as not started instead of misleadingly
+            # displaying segment 1/N.
+            self.current_segment = 0
+            self.distance_remaining = 0.0
+            self.current_speed = 0.0
+            self.publish_status(MissionStatus.FAILED, 'Controller unavailable; mission not started',
                                 '/follow_path action server is unavailable')
             return
 

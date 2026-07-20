@@ -20,3 +20,7 @@ float32 cpu_load_percentage
 float32 cpu_temperature
 float32 disk_free_gb
 string[] warnings
+bool ready_to_execute
+string[] readiness_names
+uint8[] readiness_levels
+string[] readiness_messages

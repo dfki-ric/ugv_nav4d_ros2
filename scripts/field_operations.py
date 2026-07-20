@@ -9,14 +9,22 @@ import shutil
 
 import rclpy
 from rclpy.node import Node
+from rclpy.action import ActionClient
 from sensor_msgs.msg import BatteryState
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Empty, Float32
 from std_srvs.srv import Trigger
 from nav2_msgs.msg import SpeedLimit
+from nav2_msgs.action import FollowPath
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus
 
-from ugv_nav4d_ros2.msg import MissionStatus, SystemHealth, TravMap
+from ugv_nav4d_ros2.msg import (
+    MissionStatus,
+    OperationalZoneArray,
+    RouteRisk,
+    SystemHealth,
+    TravMap,
+)
 
 
 class FieldOperations(Node):
@@ -48,9 +56,16 @@ class FieldOperations(Node):
         self.create_subscription(
             MissionStatus, '/ugv_nav4d_ros2/execution_status', self.execution_cb, 10)
         self.create_subscription(
+            MissionStatus, '/ugv_nav4d_ros2/planner_status', self.planner_status_cb, 10)
+        self.create_subscription(
+            RouteRisk, '/ugv_nav4d_ros2/route_risk', self.route_risk_cb, 10)
+        self.create_subscription(
+            OperationalZoneArray, '/ugv_nav4d_ros2/operational_zones', self.zones_cb, 10)
+        self.create_subscription(
             Float32, '/ugv_nav4d_ros2/zone_speed_limit', self.zone_speed_limit_cb, 10)
         self.create_subscription(DiagnosticArray, '/diagnostics', self.diagnostics_cb, 10)
         self.speed_limit_pub = self.create_publisher(SpeedLimit, '/speed_limit', 10)
+        self.follow_path_client = ActionClient(self, FollowPath, '/follow_path')
 
         self.pause_client = self.create_client(
             Trigger, '/ugv_nav4d_ros2/pause_execution')
@@ -62,6 +77,9 @@ class FieldOperations(Node):
         self.last_map = None
         self.last_heartbeat = now
         self.last_execution = None
+        self.last_planner_status = None
+        self.last_route_risk = None
+        self.last_zone_count = 0
         self.battery = None
         self.last_zone_speed_limit = 0.0
         self.diagnostic_errors = []
@@ -95,6 +113,15 @@ class FieldOperations(Node):
                 'total_segments': msg.total_segments,
                 'distance_remaining': msg.distance_remaining,
             })
+
+    def planner_status_cb(self, msg):
+        self.last_planner_status = msg
+
+    def route_risk_cb(self, msg):
+        self.last_route_risk = msg
+
+    def zones_cb(self, msg):
+        self.last_zone_count = len(msg.zones)
 
     def write_audit(self, event, data):
         record = {
@@ -164,6 +191,11 @@ class FieldOperations(Node):
             # Planning remains preview-gated: a human must still approve Execute.
             self.return_client.call_async(Trigger.Request())
 
+    def add_readiness(self, msg, name, level, detail):
+        msg.readiness_names.append(name)
+        msg.readiness_levels.append(level)
+        msg.readiness_messages.append(detail)
+
     def tick(self):
         pose_age = self.age(self.last_pose)
         map_age = self.age(self.last_map)
@@ -178,7 +210,7 @@ class FieldOperations(Node):
         msg = SystemHealth()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.planner_available = self.last_map is not None
-        msg.controller_available = self.last_execution is not None
+        msg.controller_available = self.follow_path_client.server_is_ready()
         msg.localization_fresh = pose_age <= pose_timeout
         msg.map_fresh = (
             self.last_map is not None and
@@ -233,8 +265,65 @@ class FieldOperations(Node):
             msg.warnings.append('Disk space is low')
 
         msg.level = SystemHealth.ERROR if (
-            not msg.localization_fresh or not msg.communications_fresh or not msg.diagnostics_ok
+            not msg.localization_fresh or not msg.communications_fresh or
+            not msg.diagnostics_ok or not msg.controller_available
         ) else (SystemHealth.WARN if msg.warnings else SystemHealth.OK)
+        route_valid = self.last_route_risk is not None and self.last_route_risk.valid
+        self.add_readiness(
+            msg, 'Pose',
+            SystemHealth.OK if msg.localization_fresh else SystemHealth.ERROR,
+            f'fresh ({pose_age:.1f} s old)' if msg.localization_fresh else 'stale or unavailable')
+        self.add_readiness(
+            msg, 'Traversability map',
+            SystemHealth.OK if msg.map_fresh else SystemHealth.ERROR,
+            'loaded' if msg.map_fresh else 'unavailable or stale')
+        self.add_readiness(
+            msg, 'Planner',
+            SystemHealth.OK if msg.planner_available else SystemHealth.ERROR,
+            self.last_planner_status.summary if self.last_planner_status else 'waiting for planner')
+        self.add_readiness(
+            msg, 'Route preview',
+            SystemHealth.OK if route_valid else SystemHealth.WARN,
+            self.last_route_risk.summary if self.last_route_risk else 'no approved preview yet')
+        self.add_readiness(
+            msg, 'Controller',
+            SystemHealth.OK if msg.controller_available else SystemHealth.ERROR,
+            '/follow_path ready' if msg.controller_available else '/follow_path action server unavailable')
+        self.add_readiness(
+            msg, 'Speed limit relay',
+            SystemHealth.OK,
+            f'active, current limit {self.last_zone_speed_limit:.2f} m/s'
+            if self.last_zone_speed_limit > 0.0 else 'active, unrestricted')
+        self.add_readiness(
+            msg, 'Operational zones',
+            SystemHealth.OK,
+            f'{self.last_zone_count} active')
+        self.add_readiness(
+            msg, 'Diagnostics',
+            SystemHealth.OK if msg.diagnostics_ok else SystemHealth.ERROR,
+            'OK' if msg.diagnostics_ok else '; '.join(self.diagnostic_errors[:2]))
+        self.add_readiness(
+            msg, 'Battery',
+            SystemHealth.OK if msg.battery_available else SystemHealth.WARN,
+            f'{100.0 * msg.battery_percentage:.0f}%, {msg.battery_voltage:.1f} V'
+            if msg.battery_available else 'not reported')
+        self.add_readiness(
+            msg, 'Operator heartbeat',
+            SystemHealth.OK if msg.communications_fresh else SystemHealth.ERROR,
+            'not required' if not heartbeat_required else
+            ('fresh' if msg.communications_fresh else f'lost ({comm_age:.1f} s old)'))
+        self.add_readiness(
+            msg, 'Host resources',
+            SystemHealth.WARN if (
+                msg.cpu_load_percentage >= float(self.get_parameter('cpu_load_warning').value) or
+                (msg.cpu_temperature >= 0.0 and msg.cpu_temperature >= float(
+                    self.get_parameter('cpu_temperature_warning').value)) or
+                msg.disk_free_gb <= float(self.get_parameter('disk_free_warning_gb').value)
+            ) else SystemHealth.OK,
+            f'CPU {msg.cpu_load_percentage:.0f}%, temp {msg.cpu_temperature:.0f} C, disk {msg.disk_free_gb:.1f} GB')
+        msg.ready_to_execute = (
+            msg.localization_fresh and msg.map_fresh and msg.communications_fresh and
+            msg.diagnostics_ok and msg.controller_available and route_valid)
         msg.summary = ('OK' if msg.level == SystemHealth.OK else '; '.join(msg.warnings))
         self.health_pub.publish(msg)
 

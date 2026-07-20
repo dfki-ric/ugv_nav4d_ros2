@@ -1,11 +1,14 @@
 #include "OperatorPanel.hpp"
 
+#include <algorithm>
+
 #include <QGridLayout>
 #include <QComboBox>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QStringList>
 #include <QSpinBox>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -46,6 +49,10 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     health_label_ = new QLabel("System health: waiting");
     health_label_->setWordWrap(true);
     health_label_->setMaximumHeight(60);
+    readiness_label_ = new QLabel("Readiness: waiting");
+    readiness_label_->setWordWrap(true);
+    readiness_label_->setMaximumHeight(180);
+    readiness_label_->setStyleSheet("QLabel { font-family: monospace; }");
     inspection_label_ = new QLabel("Inspection: select Inspect Traversability and click a map patch");
     inspection_label_->setWordWrap(true);
     inspection_label_->setMaximumHeight(60);
@@ -53,6 +60,7 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     layout->addWidget(execution_label_);
     layout->addWidget(risk_label_);
     layout->addWidget(health_label_);
+    layout->addWidget(readiness_label_);
     layout->addWidget(inspection_label_);
 
     auto* buttons = new QGridLayout;
@@ -168,10 +176,16 @@ void OperatorPanel::onInitialize()
         "/ugv_nav4d_ros2/execution_status", 10,
         [this](const ugv_nav4d_ros2::msg::MissionStatus::SharedPtr msg)
         {
-            const QString text = QString("Execution: %1 — %2 [%3/%4], %5 m remaining")
+            const QString segment_status =
+                msg->current_segment == 0 && msg->total_segments > 0
+                    ? QString("Not started — %1 segment%2")
+                        .arg(msg->total_segments)
+                        .arg(msg->total_segments == 1 ? "" : "s")
+                    : QString("%1/%2").arg(msg->current_segment).arg(msg->total_segments);
+            const QString text = QString("Execution: %1 — %2 [%3], %4 m remaining")
                 .arg(QString::fromStdString(msg->state_name))
                 .arg(QString::fromStdString(msg->summary))
-                .arg(msg->current_segment).arg(msg->total_segments)
+                .arg(segment_status)
                 .arg(msg->distance_remaining, 0, 'f', 1);
             QMetaObject::invokeMethod(this, [this, text, state = msg->state,
                                                    can_resume = msg->can_resume]() {
@@ -198,11 +212,44 @@ void OperatorPanel::onInitialize()
         [this](const ugv_nav4d_ros2::msg::SystemHealth::SharedPtr msg)
         {
             const QString text = "System health: " + QString::fromStdString(msg->summary);
-            QMetaObject::invokeMethod(this, [this, text, level = msg->level]() {
+            QStringList rows;
+            QStringList tooltip_rows;
+            const size_t count = std::min({
+                msg->readiness_names.size(),
+                msg->readiness_levels.size(),
+                msg->readiness_messages.size()});
+            for (size_t i = 0; i < count; ++i) {
+                const uint8_t item_level = msg->readiness_levels[i];
+                const QString badge =
+                    item_level == ugv_nav4d_ros2::msg::SystemHealth::OK ? "OK  " :
+                    item_level == ugv_nav4d_ros2::msg::SystemHealth::WARN ? "WARN" : "ERR ";
+                const QString name = QString::fromStdString(msg->readiness_names[i]);
+                const QString detail = QString::fromStdString(msg->readiness_messages[i]);
+                rows << QString("%1  %2").arg(badge, name);
+                tooltip_rows << QString("%1  %2: %3").arg(badge, name, detail);
+            }
+            const QString readiness_text = rows.isEmpty()
+                ? QString("Readiness: waiting")
+                : QString("Readiness: %1\n%2")
+                    .arg(msg->ready_to_execute ? "ready" : "not ready")
+                    .arg(rows.join('\n'));
+            const QString readiness_tooltip = tooltip_rows.isEmpty()
+                ? readiness_text
+                : QString("Ready to execute: %1\n%2")
+                    .arg(msg->ready_to_execute ? "yes" : "no")
+                    .arg(tooltip_rows.join('\n'));
+            QMetaObject::invokeMethod(this, [this, text, level = msg->level,
+                                             readiness_text, readiness_tooltip,
+                                             ready = msg->ready_to_execute]() {
                 health_label_->setText(text);
                 health_label_->setToolTip(text);
                 health_label_->setStyleSheet(level == ugv_nav4d_ros2::msg::SystemHealth::OK
                     ? "QLabel { color: #2e7d32; }" : "QLabel { color: #c62828; font-weight: bold; }");
+                readiness_label_->setText(readiness_text);
+                readiness_label_->setToolTip(readiness_tooltip);
+                readiness_label_->setStyleSheet(ready
+                    ? "QLabel { color: #2e7d32; font-family: monospace; }"
+                    : "QLabel { color: #c62828; font-family: monospace; }");
                 health_ok_ = level != ugv_nav4d_ros2::msg::SystemHealth::ERROR;
                 updateExecuteEnabled();
             }, Qt::QueuedConnection);
