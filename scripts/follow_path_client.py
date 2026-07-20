@@ -3,6 +3,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from rclpy.qos import QoSProfile, DurabilityPolicy
 from action_msgs.msg import GoalStatus
 
 from nav_msgs.msg import Path
@@ -39,8 +40,12 @@ class FollowPathClient(Node):
             Trigger, '/ugv_nav4d_ros2/pause_execution', self.pause_callback)
         self.resume_service = self.create_service(
             Trigger, '/ugv_nav4d_ros2/resume_execution', self.resume_callback)
+        # Latched so a freshly opened operator panel immediately learns the
+        # current state (e.g. PAUSED publishes nothing until resumed).
+        latched_qos = QoSProfile(
+            depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.status_pub = self.create_publisher(
-            MissionStatus, '/ugv_nav4d_ros2/execution_status', 10)
+            MissionStatus, '/ugv_nav4d_ros2/execution_status', latched_qos)
         self.route_valid_sub = self.create_subscription(
             Bool, '/ugv_nav4d_ros2/route_valid', self.route_valid_callback, 10)
 
@@ -218,14 +223,55 @@ class FollowPathClient(Node):
 
         self.current_item = self.path_queue.pop(0)
         self.current_segment += 1
+        # Feedback from the previous segment must not leak into the resume
+        # trimming of this one before the first feedback of this goal arrives.
+        self.distance_remaining = 0.0
         self.send_current_path()
 
-    def send_current_path(self):
+    def trimmed_current_path(self):
+        """Return the current segment trimmed to the not-yet-driven remainder.
+
+        Resume sends a brand-new FollowPath goal, and the controller searches
+        for the robot only within max_robot_pose_search_dist of the path
+        start. Re-sending the full segment makes it latch onto a pose behind
+        the robot and briefly drive backwards. The last action feedback's
+        distance_to_goal is the remaining path length, so keep only that much
+        (plus a short tail so a slightly stale value still overlaps the
+        robot). Falls back to the full path if no feedback arrived yet.
+        """
+        path, label = self.current_item
+        remaining = float(self.distance_remaining)
+        if remaining <= 0.0 or len(path.poses) < 3:
+            return path
+
+        keep = remaining + 0.5
+        accumulated = 0.0
+        start_idx = 0
+        for i in range(len(path.poses) - 1, 0, -1):
+            accumulated += self.pose_distance(path.poses[i - 1], path.poses[i])
+            if accumulated >= keep:
+                start_idx = i - 1
+                break
+        if start_idx == 0:
+            return path
+
+        trimmed = Path()
+        trimmed.header = path.header
+        trimmed.poses = path.poses[start_idx:]
+        self.get_logger().info(
+            f'Resume: trimmed already-driven part of segment "{label}", '
+            f'keeping the last {keep:.1f} m '
+            f'({len(trimmed.poses)}/{len(path.poses)} poses).')
+        return trimmed
+
+    def send_current_path(self, path_override=None):
         if self.current_item is None:
             self.publish_status(MissionStatus.FAILED, 'No segment available to resume',
                                 'Internal execution queue is empty')
             return
         path, label = self.current_item
+        if path_override is not None:
+            path = path_override
         self.get_logger().info(f'Sending path labeled "{label}" with {len(path.poses)} poses.')
 
         goal_msg = FollowPath.Goal()
@@ -325,7 +371,7 @@ class FollowPathClient(Node):
         else:
             response.success = True
             response.message = 'Resuming current segment.'
-            self.send_current_path()
+            self.send_current_path(self.trimmed_current_path())
         return response
 
     def stop_callback(self, request, response):

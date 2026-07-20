@@ -173,7 +173,7 @@ void OperatorPanel::onInitialize()
             setStatusText(QString::fromStdString(msg->data));
         });
     execution_status_sub_ = node_->create_subscription<ugv_nav4d_ros2::msg::MissionStatus>(
-        "/ugv_nav4d_ros2/execution_status", 10,
+        "/ugv_nav4d_ros2/execution_status", rclcpp::QoS(1).transient_local(),
         [this](const ugv_nav4d_ros2::msg::MissionStatus::SharedPtr msg)
         {
             const QString segment_status =
@@ -193,6 +193,7 @@ void OperatorPanel::onInitialize()
                 execution_label_->setToolTip(text);
                 execution_state_ = state;
                 execution_can_resume_ = can_resume;
+                updateExecuteEnabled();
             }, Qt::QueuedConnection);
         });
     route_risk_sub_ = node_->create_subscription<ugv_nav4d_ros2::msg::RouteRisk>(
@@ -300,10 +301,33 @@ void OperatorPanel::setStatusText(const QString& text)
 
 void OperatorPanel::updateExecuteEnabled()
 {
-    execute_path_button_->setEnabled(health_ok_ && route_ready_);
-    execute_path_button_->setToolTip(health_ok_ && route_ready_
-        ? "Send the reviewed path to the controller."
-        : "Execution requires a valid route and non-error system health.");
+    const bool executing =
+        execution_state_ == ugv_nav4d_ros2::msg::MissionStatus::EXECUTING;
+    const bool paused =
+        execution_state_ == ugv_nav4d_ros2::msg::MissionStatus::PAUSED;
+
+    // Execute stays available while PAUSED: the replan/recovery flows produce
+    // a new pending path that the operator confirms with Execute.
+    const bool execute_ok = health_ok_ && route_ready_ && !executing;
+    execute_path_button_->setEnabled(execute_ok);
+    execute_path_button_->setToolTip(
+        executing
+            ? "A mission is already executing; pause or stop it first."
+            : execute_ok
+                ? "Send the reviewed path to the controller."
+                : "Execution requires a valid route and non-error system health.");
+
+    pause_button_->setEnabled(executing);
+    pause_button_->setToolTip(executing
+        ? "Pause the running mission; the remaining route is kept."
+        : "Nothing is executing.");
+    resume_button_->setEnabled(paused && execution_can_resume_);
+    resume_button_->setToolTip(
+        paused && execution_can_resume_
+            ? "Continue the paused mission from the robot's position."
+            : paused
+                ? "Waiting for the controller to confirm the pause..."
+                : "No paused mission.");
 }
 
 void OperatorPanel::callTrigger(const rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr& client,
