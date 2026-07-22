@@ -20,7 +20,10 @@ def generate_launch_description():
     declared_arguments.append(
 	DeclareLaunchArgument(
             'use_sim_time',
-            default_value='false',
+            # Default true: this launch is normally used against the Gazebo sim.
+            # The real-robot bringup (arter_bringup/ugv_nav4d.launch.xml) passes
+            # use_sim_time:=false explicitly, so it is unaffected.
+            default_value='true',
         )
     )
 
@@ -41,7 +44,7 @@ def generate_launch_description():
     declared_arguments.append(
         DeclareLaunchArgument(
             'pointcloud_topic',
-            default_value='/ugv_nav4d_ros2/pointcloud',
+            default_value='/map',
             description='Topic name of the pointcloud used to generate MLS map'
         )
     )

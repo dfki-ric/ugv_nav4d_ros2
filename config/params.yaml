@@ -4,7 +4,8 @@ ugv_nav4d_ros2:
     load_mls_from_file: false
     mls_file_type: "bin" #Options: bin, ply
     mls_file_path: '/path/to/my_map.bin'
-    mls_gap_size: 0.1
+    load_mls_from_file: true
+    mls_gap_size: 0.4
     ply_downsample_leaf_size: 0.0 # voxel leaf size (m) for PLY downsampling; 0 = disabled
     robot_frame: arter/base_link
     world_frame: map
@@ -62,7 +63,7 @@ ugv_nav4d_ros2:
     #Motion Primitive Parameters:
     cellSkipFactor: 1.0
     destinationCircleRadius: 10
-    generateBackwardMotions: false
+    generateBackwardMotions: true
     generateForwardMotions: true
     generateLateralMotions: false
     generatePointTurnMotions: false

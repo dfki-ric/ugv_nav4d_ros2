@@ -164,7 +164,18 @@ private:
                                          std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void publishForbiddenZoneMarkers();
     void applyForbiddenZones();
-    void onForbiddenZonesChanged(bool planning_graph_changed);
+    /** Flood-fill one zone onto the (already expanded) traversability map.
+     *  KEEP_OUT nodes marked OBSTACLE are appended to @p keep_out_nodes so the
+     *  caller can inflate a safety margin around them. Returns marked count. */
+    size_t applyZoneToTravMap(const ugv_nav4d_ros2::msg::ForbiddenZone& zone,
+                              std::vector<traversability_generator3d::TravGenNode*>* keep_out_nodes);
+    /** Hard safety margin around zone obstacle cells, mirroring the radius logic
+     *  of TraversabilityGenerator3d::inflateObstacles(). Returns inflated count. */
+    size_t inflateZoneObstacles(const std::vector<traversability_generator3d::TravGenNode*>& seeds);
+    /** @p added_zone enables the incremental fast path: a newly added zone is
+     *  painted onto the existing map without the full configurePlanner rebuild. */
+    void onForbiddenZonesChanged(bool planning_graph_changed,
+                                 const ugv_nav4d_ros2::msg::ForbiddenZone* added_zone = nullptr);
     void deleteForbiddenZoneCallback(const std::shared_ptr<ugv_nav4d_ros2::srv::DeleteForbiddenZone::Request> request,
                                      std::shared_ptr<ugv_nav4d_ros2::srv::DeleteForbiddenZone::Response> response);
     void planReturnCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,

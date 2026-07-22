@@ -15,6 +15,13 @@ from ugv_nav4d_ros2.msg import LabeledPathArray, MissionStatus
 import math
 
 class FollowPathClient(Node):
+    # A controller "success" with more than this much path length remaining is
+    # treated as a false goal-checker trigger (drive-by near the goal pose) and
+    # execution continues with the trimmed remainder.
+    FALSE_SUCCESS_REMAINING_M = 5.0
+    # Safety valve so a pathological mission cannot re-send forever.
+    MAX_AUTO_CONTINUES = 10
+
     def __init__(self):
         super().__init__('follow_path_client')
 
@@ -63,6 +70,7 @@ class FollowPathClient(Node):
         self.total_segments = 0
         self.distance_remaining = 0.0
         self.current_speed = 0.0
+        self.auto_continue_count = 0
 
         self.get_logger().info('LabeledPath FollowPathClient ready.')
         self.publish_status(MissionStatus.READY, 'Follower ready')
@@ -209,6 +217,7 @@ class FollowPathClient(Node):
         self.current_item = None
         self.total_segments = len(self.path_queue)
         self.current_segment = 0
+        self.auto_continue_count = 0
         self.send_next_path()
 
     def send_next_path(self):
@@ -443,6 +452,22 @@ class FollowPathClient(Node):
         self.current_goal_handle = None
 
         if result.status == GoalStatus.STATUS_SUCCEEDED:
+            # Nav2's goal checker only compares the robot pose against the final
+            # goal pose; it fires on any drive-by near the goal (e.g. loop or
+            # self-crossing routes) with most of the path still ahead. The action
+            # feedback's distance_to_goal is remaining PATH LENGTH, so a success
+            # with substantial length left is a false trigger: continue with the
+            # trimmed remainder instead of completing the mission.
+            if (self.current_item is not None and
+                    self.distance_remaining > self.FALSE_SUCCESS_REMAINING_M and
+                    self.auto_continue_count < self.MAX_AUTO_CONTINUES):
+                self.auto_continue_count += 1
+                self.get_logger().warn(
+                    f'Controller reported success with {self.distance_remaining:.1f} m of '
+                    f'path remaining; continuing the segment '
+                    f'(auto-continue {self.auto_continue_count}/{self.MAX_AUTO_CONTINUES}).')
+                self.send_current_path(self.trimmed_current_path())
+                return
             self.get_logger().info('Goal completed, sending next if available.')
             self.current_item = None
             self.send_next_path()

@@ -1385,7 +1385,7 @@ void PathPlannerNode::addForbiddenZoneCallback(const ugv_nav4d_ros2::msg::Forbid
     forbidden_zones.push_back(*msg);
     RCLCPP_INFO_STREAM(this->get_logger(), "Added operational zone " << forbidden_zones.size()
                        << " with " << msg->vertices.size() << " vertices.");
-    onForbiddenZonesChanged(zoneAffectsPlanning(*msg));
+    onForbiddenZonesChanged(zoneAffectsPlanning(*msg), &forbidden_zones.back());
     publishStatus(std::to_string(forbidden_zones.size()) + " operational zone(s) active");
 }
 
@@ -1426,11 +1426,31 @@ void PathPlannerNode::removeLastForbiddenZoneCallback(const std::shared_ptr<std_
     publishStatus("Removed last operational zone; " + response->message);
 }
 
-void PathPlannerNode::onForbiddenZonesChanged(bool planning_graph_changed){
+void PathPlannerNode::onForbiddenZonesChanged(bool planning_graph_changed,
+                                              const ugv_nav4d_ros2::msg::ForbiddenZone* added_zone){
     publishForbiddenZoneMarkers();
     if (!planning_graph_changed){
         rebuildSpeedZoneCache();
         publishZoneSpeedLimit(start_pose.pose.position);
+        return;
+    }
+    // Fast path for ADDING a zone: zones are only painted onto the already-expanded
+    // trav map (applyForbiddenZones runs after expandAll), so a new zone can be
+    // applied in place -- no expandAll, no planner/environment rebuild. PREFERRED
+    // zones are excluded: they interact with the map-wide baseline cost that
+    // applyForbiddenZones computes over the full zone set.
+    if (added_zone && is_configured && got_map && planner_ptr && traversability_generator_ptr &&
+        added_zone->zone_type != ugv_nav4d_ros2::msg::ForbiddenZone::PREFERRED){
+        std::vector<traversability_generator3d::TravGenNode*> keep_out_nodes;
+        const size_t marked = applyZoneToTravMap(*added_zone, &keep_out_nodes);
+        const size_t inflated = inflateZoneObstacles(keep_out_nodes);
+        planner_ptr->updateMap(traversability_generator_ptr->getTraversabilityMap());
+        rebuildSpeedZoneCache();
+        RCLCPP_INFO_STREAM(this->get_logger(), "Applied new zone incrementally to " << marked
+                           << " node(s) (+" << inflated
+                           << " inflated margin cells); skipped the full map rebuild.");
+        publishTravMap();
+        validatePendingPath();
         return;
     }
     // Zones are baked into the trav map during generation, so a change requires a
@@ -1489,6 +1509,7 @@ void PathPlannerNode::applyForbiddenZones(){
         }
     }
 
+    std::vector<traversability_generator3d::TravGenNode*> keep_out_nodes;
     for (const auto& zone : forbidden_zones)
     {
         if ((zone.expires_at.sec != 0 || zone.expires_at.nanosec != 0) &&
@@ -1501,86 +1522,152 @@ void PathPlannerNode::applyForbiddenZones(){
             // change graph connectivity.
             continue;
         }
-        // Flood-fill the connected surface the polygon was drawn on: seed at the
-        // patches nearest to the clicked vertices, then grow along the trav
-        // graph's neighbor connections while staying inside the polygon. Other
-        // storeys are separate connected components, so they are never touched --
-        // no height band or margin needed.
-        std::deque<traversability_generator3d::TravGenNode*> queue;
-        std::unordered_set<traversability_generator3d::TravGenNode*> visited;
+        marked += applyZoneToTravMap(zone, &keep_out_nodes);
+    }
 
-        for (const auto& v : zone.vertices)
-        {
-            maps::grid::Index idx;
-            if (!trav_map_3d.toGrid(Eigen::Vector3d(v.x, v.y, v.z), idx)){
-                continue;
-            }
-            traversability_generator3d::TravGenNode* seed = nullptr;
-            double best_dz = std::numeric_limits<double>::max();
-            for (traversability_generator3d::TravGenNode* n : trav_map_3d.at(idx))
-            {
-                const double dz = std::abs(n->getHeight() - v.z);
-                if (dz < best_dz){
-                    best_dz = dz;
-                    seed = n;
-                }
-            }
-            if (seed && visited.insert(seed).second){
-                queue.push_back(seed);
-            }
-        }
+    const size_t inflated = inflateZoneObstacles(keep_out_nodes);
+    RCLCPP_INFO_STREAM(this->get_logger(), "Applied " << forbidden_zones.size()
+                       << " operational zone(s) to " << marked << " traversability node(s) (+"
+                       << inflated << " inflated margin cells).");
+}
 
-        if (queue.empty()){
-            RCLCPP_WARN_STREAM(this->get_logger(), "Forbidden zone with " << zone.vertices.size()
-                               << " vertices matched no traversability patches; zone has no effect.");
+size_t PathPlannerNode::applyZoneToTravMap(const ugv_nav4d_ros2::msg::ForbiddenZone& zone,
+        std::vector<traversability_generator3d::TravGenNode*>* keep_out_nodes){
+    const auto& trav_map_3d = traversability_generator_ptr->getTraversabilityMap();
+
+    // Flood-fill the connected surface the polygon was drawn on: seed at the
+    // patches nearest to the clicked vertices, then grow along the trav
+    // graph's neighbor connections while staying inside the polygon. Other
+    // storeys are separate connected components, so they are never touched --
+    // no height band or margin needed.
+    std::deque<traversability_generator3d::TravGenNode*> queue;
+    std::unordered_set<traversability_generator3d::TravGenNode*> visited;
+
+    for (const auto& v : zone.vertices)
+    {
+        maps::grid::Index idx;
+        if (!trav_map_3d.toGrid(Eigen::Vector3d(v.x, v.y, v.z), idx)){
             continue;
         }
-
-        while (!queue.empty())
+        traversability_generator3d::TravGenNode* seed = nullptr;
+        double best_dz = std::numeric_limits<double>::max();
+        for (traversability_generator3d::TravGenNode* n : trav_map_3d.at(idx))
         {
-            traversability_generator3d::TravGenNode* node = queue.front();
-            queue.pop_front();
-
-            auto& data = node->getUserData();
-            if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::KEEP_OUT){
-                // Same marking travgen uses for real obstacles, so all planner
-                // checks (goal validity, expansions, obstacle checks) respect it.
-                node->setType(maps::grid::TraversabilityNodeBase::OBSTACLE);
-                data.nodeType = traversability_generator3d::NodeType::OBSTACLE;
-            } else if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::CAUTION){
-                const double multiplier = std::max(1.0f, zone.cost_multiplier);
-                data.cost += static_cast<int>(1000.0 * multiplier);
-            } else if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::PREFERRED){
-                const double divisor = std::max(1.0f, zone.cost_multiplier);
-                data.cost = static_cast<int>(data.cost / divisor);
-            } else if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::DIRECTION_RESTRICTED){
-                data.allowedOrientations.clear();
-                constexpr double width = M_PI / 3.0; // +/- 30 degrees
-                data.allowedOrientations.emplace_back(
-                    base::Angle::fromRad(zone.preferred_heading - width / 2.0), width);
-                data.nodeType = traversability_generator3d::NodeType::PARTIALLY_TRAVERSABLE;
+            const double dz = std::abs(n->getHeight() - v.z);
+            if (dz < best_dz){
+                best_dz = dz;
+                seed = n;
             }
-            ++marked;
-
-            for (maps::grid::TraversabilityNodeBase* nb : node->getConnections())
-            {
-                auto* neighbor = static_cast<traversability_generator3d::TravGenNode*>(nb);
-                if (visited.count(neighbor)){
-                    continue;
-                }
-                Eigen::Vector3d position;
-                trav_map_3d.fromGrid(neighbor->getIndex(), position, neighbor->getHeight(), false);
-                if (!pointInPolygonXY(position.x(), position.y(), zone.vertices)){
-                    continue;
-                }
-                visited.insert(neighbor);
-                queue.push_back(neighbor);
-            }
+        }
+        if (seed && visited.insert(seed).second){
+            queue.push_back(seed);
         }
     }
 
-    RCLCPP_INFO_STREAM(this->get_logger(), "Applied " << forbidden_zones.size()
-                       << " operational zone(s) to " << marked << " traversability node(s).");
+    if (queue.empty()){
+        RCLCPP_WARN_STREAM(this->get_logger(), "Forbidden zone with " << zone.vertices.size()
+                           << " vertices matched no traversability patches; zone has no effect.");
+        return 0;
+    }
+
+    size_t marked = 0;
+    while (!queue.empty())
+    {
+        traversability_generator3d::TravGenNode* node = queue.front();
+        queue.pop_front();
+
+        auto& data = node->getUserData();
+        if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::KEEP_OUT){
+            // Same marking travgen uses for real obstacles, so all planner
+            // checks (goal validity, expansions, obstacle checks) respect it.
+            node->setType(maps::grid::TraversabilityNodeBase::OBSTACLE);
+            data.nodeType = traversability_generator3d::NodeType::OBSTACLE;
+            if (keep_out_nodes){
+                keep_out_nodes->push_back(node);
+            }
+        } else if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::CAUTION){
+            const double multiplier = std::max(1.0f, zone.cost_multiplier);
+            data.cost += static_cast<int>(1000.0 * multiplier);
+        } else if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::PREFERRED){
+            const double divisor = std::max(1.0f, zone.cost_multiplier);
+            data.cost = static_cast<int>(data.cost / divisor);
+        } else if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::DIRECTION_RESTRICTED){
+            data.allowedOrientations.clear();
+            constexpr double width = M_PI / 3.0; // +/- 30 degrees
+            data.allowedOrientations.emplace_back(
+                base::Angle::fromRad(zone.preferred_heading - width / 2.0), width);
+            data.nodeType = traversability_generator3d::NodeType::PARTIALLY_TRAVERSABLE;
+        }
+        ++marked;
+
+        for (maps::grid::TraversabilityNodeBase* nb : node->getConnections())
+        {
+            auto* neighbor = static_cast<traversability_generator3d::TravGenNode*>(nb);
+            if (visited.count(neighbor)){
+                continue;
+            }
+            Eigen::Vector3d position;
+            trav_map_3d.fromGrid(neighbor->getIndex(), position, neighbor->getHeight(), false);
+            if (!pointInPolygonXY(position.x(), position.y(), zone.vertices)){
+                continue;
+            }
+            visited.insert(neighbor);
+            queue.push_back(neighbor);
+        }
+    }
+    return marked;
+}
+
+size_t PathPlannerNode::inflateZoneObstacles(
+        const std::vector<traversability_generator3d::TravGenNode*>& seeds){
+    if (seeds.empty()){
+        return 0;
+    }
+    // Mirror the inflation radius of TraversabilityGenerator3d::inflateObstacles():
+    // the gap between the AABB footprint boundary and the rotation-safe circle,
+    // scaled by obstacleInflationMultiplier (>= 1.0), at least one grid cell.
+    const double half_x = traversability_config.robotSizeX / 2.0;
+    const double half_y = traversability_config.robotSizeY / 2.0;
+    const double half_diagonal = std::hypot(half_x, half_y);
+    const double infl_gap = half_diagonal - std::min(half_x, half_y) / 2.0;
+    const double multiplier = std::max(1.0, traversability_config.obstacleInflationMultiplier);
+    const double infl_radius = multiplier *
+        std::max(infl_gap, traversability_config.gridResolution * 1.1) + 1e-5;
+
+    // Unlike travgen's inflateObstacles(), the margin cells become hard obstacles
+    // instead of orientation-restricted (partially traversable) rims: zone cells
+    // sit on plain terrain, so "safe orientations" would only re-derive the
+    // distance to the zone itself. An operator keep-out margin must be absolute.
+    // INFLATED_OBSTACLE keeps the ring distinguishable from the drawn zone.
+    size_t inflated = 0;
+    std::unordered_set<traversability_generator3d::TravGenNode*> evaluated;
+    for (traversability_generator3d::TravGenNode* seed : seeds){
+        const maps::grid::Index seed_idx = seed->getIndex();
+        seed->eachConnectedNode(
+            [&](maps::grid::TraversabilityNodeBase* nb, bool& expandNode, bool& /*stop*/)
+        {
+            auto* node = static_cast<traversability_generator3d::TravGenNode*>(nb);
+            // 2D (XY) cell distance, matching travgen: inflation is a horizontal
+            // clearance concept, independent of patch height.
+            const maps::grid::Index diff = node->getIndex() - seed_idx;
+            const double dist_2d =
+                diff.matrix().cast<double>().norm() * traversability_config.gridResolution;
+            if (dist_2d >= infl_radius){
+                return;
+            }
+            expandNode = true;
+            if (node->getType() == maps::grid::TraversabilityNodeBase::OBSTACLE){
+                return; // zone interior or a real obstacle; nothing to add
+            }
+            if (evaluated.insert(node).second){
+                node->setType(maps::grid::TraversabilityNodeBase::OBSTACLE);
+                node->getUserData().nodeType =
+                    traversability_generator3d::NodeType::INFLATED_OBSTACLE;
+                ++inflated;
+            }
+        });
+    }
+    return inflated;
 }
 
 void PathPlannerNode::deleteForbiddenZoneCallback(const std::shared_ptr<ugv_nav4d_ros2::srv::DeleteForbiddenZone::Request> request,
