@@ -20,10 +20,10 @@ def generate_launch_description():
     declared_arguments.append(
 	DeclareLaunchArgument(
             'use_sim_time',
-            # Default true: this launch is normally used against the Gazebo sim.
-            # The real-robot bringup (arter_bringup/ugv_nav4d.launch.xml) passes
-            # use_sim_time:=false explicitly, so it is unaffected.
-            default_value='true',
+            # Pass use_sim_time:=true when launching against the Gazebo sim;
+            # forgetting it produces wall-clock path stamps that the (sim-time)
+            # TF tree rejects as "Transform data too old".
+            default_value='false',
         )
     )
 
