@@ -55,6 +55,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
   rviz_rendering
   pluginlib
   std_srvs
+  controller_manager_msgs
 )
 
 foreach(Dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})

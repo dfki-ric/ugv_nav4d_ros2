@@ -5,6 +5,8 @@
 #include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <std_srvs/srv/set_bool.hpp>
+#include <controller_manager_msgs/srv/list_controllers.hpp>
+#include <controller_manager_msgs/srv/switch_controller.hpp>
 
 #include "ugv_nav4d_ros2/srv/edit_waypoint.hpp"
 #include "ugv_nav4d_ros2/srv/delete_forbidden_zone.hpp"
@@ -14,6 +16,14 @@
 
 #include <rviz_common/panel.hpp>
 
+#include <QMap>
+#include <QPair>
+#include <QStringList>
+#include <QVector>
+
+class QCheckBox;
+class QGridLayout;
+class QGroupBox;
 class QLabel;
 class QComboBox;
 class QPushButton;
@@ -37,6 +47,10 @@ public:
     ~OperatorPanel() override;
 
     void onInitialize() override;
+
+    // Persists the per-check execute-gating selection in the RViz config.
+    void save(rviz_common::Config config) const override;
+    void load(const rviz_common::Config& config) override;
 
 private Q_SLOTS:
     void onStopExecution();
@@ -65,6 +79,12 @@ private:
                      const QString& actionName);
     void setStatusText(const QString& text);
     void updateExecuteEnabled();
+    QCheckBox* ensureReadinessCheckbox(const QString& name);
+    bool checkedReadinessOk(QString* blocking_check) const;
+    void refreshControllers();
+    void applyControllerStates(const QVector<QPair<QString, QString>>& states);
+    void switchControllers(const QStringList& activate, const QStringList& deactivate,
+                           const QString& actionName);
     void waitForRecoveryStop(int attempts_remaining);
     void requestNativeRecovery();
     void finishRecovery(const QString& status);
@@ -97,6 +117,19 @@ private:
     QPushButton* regenerate_maps_button_{nullptr};
     QPushButton* save_mission_button_{nullptr};
     QPushButton* load_mission_button_{nullptr};
+    QGroupBox* checks_group_{nullptr};
+    QGridLayout* checks_layout_{nullptr};
+    QGroupBox* controllers_group_{nullptr};
+    QGridLayout* controllers_layout_{nullptr};
+    QLabel* controllers_status_label_{nullptr};
+    QPushButton* refresh_controllers_button_{nullptr};
+    QPushButton* nav_controllers_button_{nullptr};
+    QMap<QString, QCheckBox*> controller_checks_;
+    QMap<QString, QCheckBox*> readiness_checks_;
+    QMap<QString, quint8> readiness_levels_;
+    // Checkbox states restored from the RViz config before the checkboxes
+    // exist (they are created lazily from the first SystemHealth message).
+    QMap<QString, bool> saved_check_states_;
 
     rclcpp::Node::SharedPtr node_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr status_sub_;
@@ -124,7 +157,9 @@ private:
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr regenerate_maps_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr save_mission_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr load_mission_client_;
-    bool health_ok_{false};
+    rclcpp::Client<controller_manager_msgs::srv::ListControllers>::SharedPtr list_controllers_client_;
+    rclcpp::Client<controller_manager_msgs::srv::SwitchController>::SharedPtr switch_controller_client_;
+    bool health_received_{false};
     bool route_ready_{false};
     uint8_t execution_state_{ugv_nav4d_ros2::msg::MissionStatus::IDLE};
     bool execution_can_resume_{false};

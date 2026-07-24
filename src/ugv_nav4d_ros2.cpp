@@ -79,7 +79,11 @@ PathPlannerNode::PathPlannerNode()
     labeled_path_publisher = this->create_publisher<ugv_nav4d_ros2::msg::LabeledPathArray>("/ugv_nav4d_ros2/labeled_path_segments", 10);
     colored_path_publisher = this->create_publisher<visualization_msgs::msg::MarkerArray>(
             "/ugv_nav4d_ros2/mission_path", rclcpp::QoS(1).transient_local());
-    trav_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::TravMap>("/ugv_nav4d_ros2/trav_map", 10);
+    // Latched: the map is published only on discrete events (load, regenerate,
+    // zone edits), so late-joining subscribers (field_operations readiness,
+    // RViz) must still receive the last map without a manual republish.
+    trav_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::TravMap>(
+            "/ugv_nav4d_ros2/trav_map", rclcpp::QoS(1).transient_local());
     mls_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::MLSMap>("/ugv_nav4d_ros2/mls_map", 10);
     robot_pose_publisher = this->create_publisher<geometry_msgs::msg::PoseStamped>(
             "/ugv_nav4d_ros2/robot_pose", 10);

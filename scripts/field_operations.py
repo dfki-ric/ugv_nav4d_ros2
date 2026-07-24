@@ -10,6 +10,7 @@ import shutil
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from rclpy.qos import QoSProfile, DurabilityPolicy
 from sensor_msgs.msg import BatteryState
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Empty, Float32
@@ -51,7 +52,13 @@ class FieldOperations(Node):
             SystemHealth, '/ugv_nav4d_ros2/system_health', 10)
         self.create_subscription(BatteryState, '/battery_state', self.battery_cb, 10)
         self.create_subscription(PoseStamped, '/ugv_nav4d_ros2/robot_pose', self.pose_cb, 10)
-        self.create_subscription(TravMap, '/ugv_nav4d_ros2/trav_map', self.map_cb, 10)
+        # Transient-local to match the latched trav_map publisher: the map is
+        # published once per load/regenerate event, and this node must see it
+        # even when it starts (or restarts) after that event.
+        latched_map_qos = QoSProfile(
+            depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(
+            TravMap, '/ugv_nav4d_ros2/trav_map', self.map_cb, latched_map_qos)
         self.create_subscription(Empty, '/operator_heartbeat', self.heartbeat_cb, 10)
         self.create_subscription(
             MissionStatus, '/ugv_nav4d_ros2/execution_status', self.execution_cb, 10)

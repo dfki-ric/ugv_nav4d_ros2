@@ -26,6 +26,7 @@
     <depend>rviz_common</depend>
     <depend>rviz_rendering</depend>
     <depend>std_srvs</depend>
+    <depend>controller_manager_msgs</depend>
     <exec_depend>nav2_msgs</exec_depend>
     <exec_depend>action_msgs</exec_depend>
     <exec_depend>diagnostic_msgs</exec_depend>

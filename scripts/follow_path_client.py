@@ -4,7 +4,9 @@ import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, DurabilityPolicy
+from rclpy.time import Time
 from action_msgs.msg import GoalStatus
+from tf2_ros import Buffer, TransformListener
 
 from nav_msgs.msg import Path
 from nav2_msgs.action import FollowPath
@@ -21,6 +23,18 @@ class FollowPathClient(Node):
     FALSE_SUCCESS_REMAINING_M = 5.0
     # Safety valve so a pathological mission cannot re-send forever.
     MAX_AUTO_CONTINUES = 10
+    # Nav2's RPP controller never aborts on cross-track error (it keeps
+    # steering toward the carrot however far the robot drifts), and the
+    # SimpleProgressChecker only fires when the robot stops moving — so a
+    # diverging robot drives away unchecked. This watchdog pauses execution
+    # (cancel + zero velocity, mission retained) once the robot is farther
+    # than this from the current segment.
+    MAX_PATH_DEVIATION_M = 2.0
+    # Consecutive breached checks (at DEVIATION_CHECK_PERIOD_S) required
+    # before pausing, so a single localization jump cannot stop a mission.
+    DEVIATION_BREACHES_TO_PAUSE = 2
+    DEVIATION_CHECK_PERIOD_S = 0.5
+    ROBOT_FRAME = 'arter/base_link'
 
     def __init__(self):
         super().__init__('follow_path_client')
@@ -71,6 +85,12 @@ class FollowPathClient(Node):
         self.distance_remaining = 0.0
         self.current_speed = 0.0
         self.auto_continue_count = 0
+
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.deviation_breaches = 0
+        self.deviation_timer = self.create_timer(
+            self.DEVIATION_CHECK_PERIOD_S, self.check_path_deviation)
 
         self.get_logger().info('LabeledPath FollowPathClient ready.')
         self.publish_status(MissionStatus.READY, 'Follower ready')
@@ -184,6 +204,8 @@ class FollowPathClient(Node):
             self.replace_queue_and_send(msg)
 
     def after_cancel_new_paths(self, future):
+        if not self.cancel_in_progress:
+            return  # already finalized via the goal result
         self.get_logger().info("Previous goal canceled.")
         self.current_goal_handle = None
         self.goal_finished = True
@@ -332,6 +354,44 @@ class FollowPathClient(Node):
             self.get_logger().error('Remaining route invalidated; pausing execution.')
             self._request_pause('Route invalidated by a map or operational-zone change')
 
+    def check_path_deviation(self):
+        if (self.current_item is None or self.goal_finished or self.paused
+                or self.cancel_in_progress or self.current_goal_handle is None):
+            self.deviation_breaches = 0
+            return
+
+        path, label = self.current_item
+        if not path.poses or not path.header.frame_id:
+            return
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                path.header.frame_id, self.ROBOT_FRAME, Time())
+        except Exception:
+            # No localization yet; readiness monitoring reports that separately.
+            return
+
+        # XY only: path z carries the body-frame ground-clearance convention,
+        # which would inflate a 3D distance without any real divergence.
+        rx = tf.transform.translation.x
+        ry = tf.transform.translation.y
+        deviation = math.sqrt(min(
+            (p.pose.position.x - rx) ** 2 + (p.pose.position.y - ry) ** 2
+            for p in path.poses))
+
+        if deviation <= self.MAX_PATH_DEVIATION_M:
+            self.deviation_breaches = 0
+            return
+        self.deviation_breaches += 1
+        if self.deviation_breaches < self.DEVIATION_BREACHES_TO_PAUSE:
+            return
+        self.deviation_breaches = 0
+        self.get_logger().error(
+            f'Robot is {deviation:.1f} m from segment "{label}" '
+            f'(limit {self.MAX_PATH_DEVIATION_M} m); pausing execution.')
+        self._request_pause(
+            f'Robot diverged {deviation:.1f} m from the path '
+            f'(limit {self.MAX_PATH_DEVIATION_M} m); replan from the robot position')
+
     def _request_pause(self, reason):
         if self.current_goal_handle is None or self.goal_finished:
             return False
@@ -362,6 +422,8 @@ class FollowPathClient(Node):
 
     def after_cancel_pause(self, future):
         del future
+        if not self.cancel_in_progress:
+            return  # already finalized via the goal result
         self.current_goal_handle = None
         self.goal_finished = True
         self.goal_in_progress = False
@@ -411,6 +473,8 @@ class FollowPathClient(Node):
         return response
 
     def after_cancel_stop(self, future):
+        if not self.cancel_in_progress:
+            return  # already finalized via the goal result
         self.get_logger().warn('Execution stopped by operator.')
         self.current_goal_handle = None
         self.goal_finished = True
@@ -472,11 +536,40 @@ class FollowPathClient(Node):
             self.current_item = None
             self.send_next_path()
         elif result.status == GoalStatus.STATUS_CANCELED:
-            # Cancellation completion is handled by the callback that requested
-            # pause/replace/abort. Never advance the queue merely because a goal
-            # was canceled.
-            self.get_logger().info(f'Goal canceled ({self.cancel_reason or "unspecified"}).')
+            # Cancellation completion is normally handled by the after_cancel_*
+            # callback of whoever requested pause/replace/abort — but that
+            # callback is driven by the cancel-SERVICE response, which can be
+            # delayed or lost (seen in the field over the zenoh bridge: robot
+            # stopped, yet Resume stayed disabled because can_resume=True was
+            # never published). The goal RESULT is the authoritative signal
+            # that the controller stopped, so finalize the cancellation here
+            # as well; cancel_in_progress makes both paths run-once.
+            reason = self.cancel_reason or 'unspecified'
+            self.get_logger().info(f'Goal canceled ({reason}).')
+            if self.cancel_in_progress:
+                self.cancel_in_progress = False
+                self.current_speed = 0.0
+                if self.pending_labeled_path_msg is not None:
+                    pending = self.pending_labeled_path_msg
+                    self.pending_labeled_path_msg = None
+                    self.replace_queue_and_send(pending)
+                elif self.paused:
+                    self.publish_status(MissionStatus.PAUSED, 'Paused; mission retained')
+                elif reason == 'abort':
+                    self.current_item = None
+                    self.publish_status(MissionStatus.ABORTED, 'Mission aborted by operator')
         else:
+            if self.paused and self.current_item is not None:
+                # A requested pause can race the controller into ABORTED
+                # instead of CANCELED; the robot is stopped and the segment is
+                # retained, so this is a completed pause, not a lost mission.
+                self.cancel_in_progress = False
+                self.current_speed = 0.0
+                self.get_logger().warn(
+                    f'Goal ended with status {result.status} while a pause was '
+                    'pending; treating it as paused.')
+                self.publish_status(MissionStatus.PAUSED, 'Paused; mission retained')
+                return
             self.get_logger().warn(f'Goal failed with status: {result.status}. Stopping.')
             failure = ('FollowPath aborted' if result.status == GoalStatus.STATUS_ABORTED
                        else f'FollowPath ended with status {result.status}')

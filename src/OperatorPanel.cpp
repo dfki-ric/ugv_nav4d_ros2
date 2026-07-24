@@ -2,8 +2,12 @@
 
 #include <algorithm>
 
+#include <QCheckBox>
 #include <QGridLayout>
 #include <QComboBox>
+#include <QPair>
+#include <QScrollArea>
+#include <QVector>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -26,12 +30,12 @@ OperatorPanel::OperatorPanel(QWidget* parent)
 {
     auto* layout = new QVBoxLayout;
 
-    // Safety-critical control stays above all variable-height status text so
-    // long planner/health messages can never push it out of the panel viewport.
+    // Safety-critical control: created here but added to the OUTER layout at
+    // the bottom of this constructor, pinned above the scroll area so it can
+    // never be scrolled out of reach.
     stop_button_ = new QPushButton("STOP");
     stop_button_->setMinimumHeight(44);
     stop_button_->setStyleSheet("QPushButton { font-weight: bold; font-size: 16px; background-color: #b71c1c; color: white; padding: 6px; }");
-    layout->addWidget(stop_button_);
 
     status_label_ = new QLabel("(waiting for planner status)");
     status_label_->setWordWrap(true);
@@ -63,6 +67,40 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     layout->addWidget(readiness_label_);
     layout->addWidget(inspection_label_);
 
+    // One checkbox per readiness item (created lazily from SystemHealth
+    // messages): only CHECKED items may block the Execute button, so the
+    // operator can exempt e.g. flaky diagnostics without editing code.
+    checks_group_ = new QGroupBox("Execute gating checks");
+    checks_group_->setToolTip(
+        "Only checked readiness items can block Execute. Unchecked items are "
+        "still shown in the readiness list but ignored for gating.");
+    checks_layout_ = new QGridLayout;
+    checks_group_->setLayout(checks_layout_);
+    layout->addWidget(checks_group_);
+
+    // ros2_control controllers of /arter/ros_control/controller_manager:
+    // checked = active. Toggling a box activates/deactivates that controller
+    // (BEST_EFFORT), replacing the switch_controllers shell script for the
+    // common field cases.
+    controllers_group_ = new QGroupBox("ros2_control controllers");
+    auto* controllers_box = new QVBoxLayout;
+    controllers_status_label_ = new QLabel("(waiting for controller_manager)");
+    controllers_status_label_->setWordWrap(true);
+    controllers_box->addWidget(controllers_status_label_);
+    controllers_layout_ = new QGridLayout;
+    controllers_box->addLayout(controllers_layout_);
+    auto* controllers_buttons = new QHBoxLayout;
+    refresh_controllers_button_ = new QPushButton("Refresh");
+    nav_controllers_button_ = new QPushButton("Enable navigation set");
+    nav_controllers_button_->setToolTip(
+        "Activate steer_position_controller, wheel_velocity_controller and "
+        "steering_mode_controller in one switch.");
+    controllers_buttons->addWidget(refresh_controllers_button_);
+    controllers_buttons->addWidget(nav_controllers_button_);
+    controllers_box->addLayout(controllers_buttons);
+    controllers_group_->setLayout(controllers_box);
+    layout->addWidget(controllers_group_);
+
     auto* buttons = new QGridLayout;
     pause_button_ = new QPushButton("Pause");
     resume_button_ = new QPushButton("Resume");
@@ -73,7 +111,11 @@ OperatorPanel::OperatorPanel(QWidget* parent)
         "Safely pause active execution, then use ugv_nav4d's native out-of-obstacle recovery to create an approval-gated rescue trajectory.");
     replan_button_ = new QPushButton("Replan from robot");
     execute_path_button_ = new QPushButton("Execute path");
-    execute_path_button_->setStyleSheet("QPushButton { font-weight: bold; background-color: #2e7d32; color: white; }");
+    // The unconditional green made the button look actionable even while
+    // setEnabled(false); the :disabled state must override the background.
+    execute_path_button_->setStyleSheet(
+        "QPushButton { font-weight: bold; background-color: #2e7d32; color: white; }"
+        "QPushButton:disabled { background-color: #55605a; color: #b0b0b0; }");
     discard_path_button_ = new QPushButton("Discard path");
     clear_waypoints_button_ = new QPushButton("Clear waypoints");
     undo_waypoint_button_ = new QPushButton("Undo last waypoint");
@@ -132,7 +174,22 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     layout->addLayout(wp_row);
 
     layout->addStretch();
-    setLayout(layout);
+
+    // The content outgrew typical screen heights, which also stopped RViz
+    // from shrinking the panel (a panel's minimum size bounds the window).
+    // Everything except STOP lives in a scroll area, so the panel can be
+    // resized down to roughly the STOP button alone.
+    auto* content = new QWidget;
+    content->setLayout(layout);
+    auto* scroll = new QScrollArea;
+    scroll->setWidget(content);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    auto* outer = new QVBoxLayout;
+    outer->setContentsMargins(0, 0, 0, 0);
+    outer->addWidget(stop_button_);
+    outer->addWidget(scroll);
+    setLayout(outer);
 
     connect(stop_button_, &QPushButton::clicked, this, &OperatorPanel::onStopExecution);
     connect(pause_button_, &QPushButton::clicked, this, &OperatorPanel::onPauseExecution);
@@ -155,6 +212,13 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     connect(regenerate_maps_button_, &QPushButton::clicked, this, &OperatorPanel::onRegenerateMaps);
     connect(save_mission_button_, &QPushButton::clicked, this, &OperatorPanel::onSaveMission);
     connect(load_mission_button_, &QPushButton::clicked, this, &OperatorPanel::onLoadMission);
+    connect(refresh_controllers_button_, &QPushButton::clicked, this,
+            &OperatorPanel::refreshControllers);
+    connect(nav_controllers_button_, &QPushButton::clicked, this, [this]() {
+        switchControllers({"steer_position_controller", "wheel_velocity_controller",
+                           "steering_mode_controller"},
+                          {}, "Enable navigation controllers");
+    });
     updateExecuteEnabled();
 }
 
@@ -215,12 +279,14 @@ void OperatorPanel::onInitialize()
             const QString text = "System health: " + QString::fromStdString(msg->summary);
             QStringList rows;
             QStringList tooltip_rows;
+            QVector<QPair<QString, quint8>> items;
             const size_t count = std::min({
                 msg->readiness_names.size(),
                 msg->readiness_levels.size(),
                 msg->readiness_messages.size()});
             for (size_t i = 0; i < count; ++i) {
                 const uint8_t item_level = msg->readiness_levels[i];
+                items.append({QString::fromStdString(msg->readiness_names[i]), item_level});
                 const QString badge =
                     item_level == ugv_nav4d_ros2::msg::SystemHealth::OK ? "OK  " :
                     item_level == ugv_nav4d_ros2::msg::SystemHealth::WARN ? "WARN" : "ERR ";
@@ -241,6 +307,7 @@ void OperatorPanel::onInitialize()
                     .arg(tooltip_rows.join('\n'));
             QMetaObject::invokeMethod(this, [this, text, level = msg->level,
                                              readiness_text, readiness_tooltip,
+                                             items,
                                              ready = msg->ready_to_execute]() {
                 health_label_->setText(text);
                 health_label_->setToolTip(text);
@@ -251,7 +318,11 @@ void OperatorPanel::onInitialize()
                 readiness_label_->setStyleSheet(ready
                     ? "QLabel { color: #2e7d32; font-family: monospace; }"
                     : "QLabel { color: #c62828; font-family: monospace; }");
-                health_ok_ = level != ugv_nav4d_ros2::msg::SystemHealth::ERROR;
+                for (const auto& item : items) {
+                    ensureReadinessCheckbox(item.first);
+                    readiness_levels_[item.first] = item.second;
+                }
+                health_received_ = true;
                 updateExecuteEnabled();
             }, Qt::QueuedConnection);
         });
@@ -286,6 +357,14 @@ void OperatorPanel::onInitialize()
     save_mission_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/save_mission");
     load_mission_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/load_mission");
 
+    list_controllers_client_ = node_->create_client<controller_manager_msgs::srv::ListControllers>(
+        "/arter/ros_control/controller_manager/list_controllers");
+    switch_controller_client_ = node_->create_client<controller_manager_msgs::srv::SwitchController>(
+        "/arter/ros_control/controller_manager/switch_controller");
+    auto* controllers_timer = new QTimer(this);
+    connect(controllers_timer, &QTimer::timeout, this, &OperatorPanel::refreshControllers);
+    controllers_timer->start(3000);
+    refreshControllers();
 }
 
 void OperatorPanel::setStatusText(const QString& text)
@@ -299,6 +378,180 @@ void OperatorPanel::setStatusText(const QString& text)
     }, Qt::QueuedConnection);
 }
 
+QCheckBox* OperatorPanel::ensureReadinessCheckbox(const QString& name)
+{
+    const auto existing = readiness_checks_.find(name);
+    if (existing != readiness_checks_.end())
+    {
+        return existing.value();
+    }
+    auto* box = new QCheckBox(name);
+    box->setChecked(saved_check_states_.value(name, true));
+    box->setToolTip(QString("Checked: an ERROR on \"%1\" blocks Execute. "
+                            "Unchecked: this check is ignored for gating.").arg(name));
+    const int position = readiness_checks_.size();
+    checks_layout_->addWidget(box, position / 2, position % 2);
+    readiness_checks_.insert(name, box);
+    connect(box, &QCheckBox::toggled, this, [this](bool) {
+        updateExecuteEnabled();
+        Q_EMIT configChanged();
+    });
+    return box;
+}
+
+bool OperatorPanel::checkedReadinessOk(QString* blocking_check) const
+{
+    for (auto it = readiness_levels_.cbegin(); it != readiness_levels_.cend(); ++it)
+    {
+        if (it.value() != ugv_nav4d_ros2::msg::SystemHealth::ERROR)
+        {
+            continue;
+        }
+        const auto box = readiness_checks_.find(it.key());
+        if (box != readiness_checks_.cend() && !box.value()->isChecked())
+        {
+            continue;
+        }
+        if (blocking_check)
+        {
+            *blocking_check = it.key();
+        }
+        return false;
+    }
+    return true;
+}
+
+void OperatorPanel::refreshControllers()
+{
+    if (!list_controllers_client_)
+    {
+        return;
+    }
+    if (!list_controllers_client_->service_is_ready())
+    {
+        controllers_status_label_->setText(
+            "controller_manager unavailable (/arter/ros_control/controller_manager)");
+        for (auto it = controller_checks_.cbegin(); it != controller_checks_.cend(); ++it)
+        {
+            it.value()->setEnabled(false);
+        }
+        return;
+    }
+    auto request = std::make_shared<controller_manager_msgs::srv::ListControllers::Request>();
+    list_controllers_client_->async_send_request(request,
+        [this](rclcpp::Client<controller_manager_msgs::srv::ListControllers>::SharedFuture future)
+        {
+            const auto& response = future.get();
+            QVector<QPair<QString, QString>> states;
+            for (const auto& controller : response->controller)
+            {
+                states.append({QString::fromStdString(controller.name),
+                               QString::fromStdString(controller.state)});
+            }
+            QMetaObject::invokeMethod(this, [this, states]() {
+                applyControllerStates(states);
+            }, Qt::QueuedConnection);
+        });
+}
+
+void OperatorPanel::applyControllerStates(const QVector<QPair<QString, QString>>& states)
+{
+    int active = 0;
+    for (const auto& state : states)
+    {
+        auto it = controller_checks_.find(state.first);
+        if (it == controller_checks_.end())
+        {
+            auto* box = new QCheckBox;
+            const int position = controller_checks_.size();
+            controllers_layout_->addWidget(box, position / 2, position % 2);
+            it = controller_checks_.insert(state.first, box);
+            connect(box, &QCheckBox::clicked, this, [this, name = state.first](bool checked) {
+                switchControllers(checked ? QStringList{name} : QStringList{},
+                                  checked ? QStringList{} : QStringList{name},
+                                  (checked ? "Activate " : "Deactivate ") + name);
+            });
+        }
+        QCheckBox* box = it.value();
+        // clicked (not toggled) drives the switch, so programmatic state
+        // updates here cannot echo back into switch_controller requests.
+        box->setChecked(state.second == "active");
+        box->setText(QString("%1 [%2]").arg(state.first, state.second));
+        // Activation requires the controller to be at least configured;
+        // unconfigured/finalized ones need `ros2 control` on the console.
+        box->setEnabled(state.second == "active" || state.second == "inactive");
+        box->setToolTip(state.second == "unconfigured"
+            ? "Unconfigured: load/configure it first (ros2 control set_controller_state)."
+            : "Checked = active. Toggle to activate/deactivate via controller_manager.");
+        if (state.second == "active")
+        {
+            ++active;
+        }
+    }
+    controllers_status_label_->setText(
+        QString("%1 controller%2, %3 active")
+            .arg(states.size()).arg(states.size() == 1 ? "" : "s").arg(active));
+}
+
+void OperatorPanel::switchControllers(const QStringList& activate, const QStringList& deactivate,
+                                      const QString& actionName)
+{
+    if (!switch_controller_client_ || !switch_controller_client_->service_is_ready())
+    {
+        setStatusText(actionName + ": controller_manager unavailable.");
+        refreshControllers();
+        return;
+    }
+    auto request = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
+    for (const auto& name : activate)
+    {
+        request->activate_controllers.push_back(name.toStdString());
+    }
+    for (const auto& name : deactivate)
+    {
+        request->deactivate_controllers.push_back(name.toStdString());
+    }
+    request->strictness = controller_manager_msgs::srv::SwitchController::Request::BEST_EFFORT;
+    setStatusText(actionName + " requested...");
+    switch_controller_client_->async_send_request(request,
+        [this, actionName](rclcpp::Client<controller_manager_msgs::srv::SwitchController>::SharedFuture future)
+        {
+            const bool ok = future.get()->ok;
+            setStatusText(actionName + (ok ? " done." : " failed (see controller_manager log)."));
+            QMetaObject::invokeMethod(this, [this]() { refreshControllers(); },
+                                      Qt::QueuedConnection);
+        });
+}
+
+void OperatorPanel::save(rviz_common::Config config) const
+{
+    rviz_common::Panel::save(config);
+    rviz_common::Config checks = config.mapMakeChild("gating_checks");
+    for (auto it = readiness_checks_.cbegin(); it != readiness_checks_.cend(); ++it)
+    {
+        checks.mapSetValue(it.key(), it.value()->isChecked());
+    }
+}
+
+void OperatorPanel::load(const rviz_common::Config& config)
+{
+    rviz_common::Panel::load(config);
+    const rviz_common::Config checks = config.mapGetChild("gating_checks");
+    if (!checks.isValid())
+    {
+        return;
+    }
+    for (auto it = checks.mapIterator(); it.isValid(); it.advance())
+    {
+        saved_check_states_.insert(it.currentKey(), it.currentChild().getValue().toBool());
+    }
+    for (auto it = readiness_checks_.cbegin(); it != readiness_checks_.cend(); ++it)
+    {
+        it.value()->setChecked(saved_check_states_.value(it.key(), it.value()->isChecked()));
+    }
+    updateExecuteEnabled();
+}
+
 void OperatorPanel::updateExecuteEnabled()
 {
     const bool executing =
@@ -308,14 +561,21 @@ void OperatorPanel::updateExecuteEnabled()
 
     // Execute stays available while PAUSED: the replan/recovery flows produce
     // a new pending path that the operator confirms with Execute.
-    const bool execute_ok = health_ok_ && route_ready_ && !executing;
+    QString blocking_check;
+    const bool health_ok = health_received_ && checkedReadinessOk(&blocking_check);
+    const bool execute_ok = health_ok && route_ready_ && !executing;
     execute_path_button_->setEnabled(execute_ok);
     execute_path_button_->setToolTip(
         executing
             ? "A mission is already executing; pause or stop it first."
             : execute_ok
                 ? "Send the reviewed path to the controller."
-                : "Execution requires a valid route and non-error system health.");
+                : !health_received_
+                    ? "Waiting for the first system-health report."
+                    : !blocking_check.isEmpty()
+                        ? QString("Blocked by readiness check \"%1\" — fix it or "
+                                  "uncheck it under Execute gating checks.").arg(blocking_check)
+                        : "Execution requires an approved route preview.");
 
     pause_button_->setEnabled(executing);
     pause_button_->setToolTip(executing
