@@ -81,6 +81,7 @@ private:
     void updateExecuteEnabled();
     QCheckBox* ensureReadinessCheckbox(const QString& name);
     bool checkedReadinessOk(QString* blocking_check) const;
+    void rebuildReadinessLabel();
     void refreshControllers();
     void applyControllerStates(const QVector<QPair<QString, QString>>& states);
     void switchControllers(const QStringList& activate, const QStringList& deactivate,
@@ -125,8 +126,18 @@ private:
     QPushButton* refresh_controllers_button_{nullptr};
     QPushButton* nav_controllers_button_{nullptr};
     QMap<QString, QCheckBox*> controller_checks_;
+    struct ReadinessItem
+    {
+        QString name;
+        quint8 level;
+        QString message;
+    };
     QMap<QString, QCheckBox*> readiness_checks_;
-    QMap<QString, quint8> readiness_levels_;
+    // Last SystemHealth readiness list in message order; the labels and the
+    // execute gating are all derived from this filtered by the checkboxes.
+    QVector<ReadinessItem> readiness_items_;
+    // Unfiltered node-side summary, shown only in the health tooltip.
+    QString health_node_summary_;
     // Checkbox states restored from the RViz config before the checkboxes
     // exist (they are created lazily from the first SystemHealth message).
     QMap<QString, bool> saved_check_states_;

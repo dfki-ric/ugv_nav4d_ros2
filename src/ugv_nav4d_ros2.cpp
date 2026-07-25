@@ -423,7 +423,12 @@ void PathPlannerNode::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedP
 {
     std::lock_guard<std::recursive_mutex> lock(planner_mutex);
     latest_pointcloud = msg;
+    const auto t_mls = std::chrono::steady_clock::now();
     got_map = generateMLS();
+    RCLCPP_INFO_STREAM(this->get_logger(), "Timing: MLS merge of "
+        << msg->width * msg->height << " points took "
+        << std::chrono::duration<double>(std::chrono::steady_clock::now() - t_mls).count()
+        << " s.");
 
     if (got_map){
 
@@ -468,11 +473,23 @@ void PathPlannerNode::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedP
             }
 
             auto startPosition = ground2Mls.translation();
+            const auto t_expand = std::chrono::steady_clock::now();
             traversability_generator_ptr->expandAll(startPosition);
+            RCLCPP_INFO_STREAM(this->get_logger(), "Timing: trav-map expansion took "
+                << std::chrono::duration<double>(std::chrono::steady_clock::now() - t_expand).count()
+                << " s.");
             applyForbiddenZones();
             rebuildSpeedZoneCache();
             auto travMap = traversability_generator_ptr->getTraversabilityMap();
+            const bool first_env_build = !planner_ptr->isEnvironmentInitialized();
+            const auto t_env = std::chrono::steady_clock::now();
             planner_ptr->updateMap(travMap);
+            RCLCPP_INFO_STREAM(this->get_logger(), "Timing: "
+                << (first_env_build
+                    ? "environment build (incl. motion-primitive generation) took "
+                    : "planner map update took ")
+                << std::chrono::duration<double>(std::chrono::steady_clock::now() - t_env).count()
+                << " s.");
             validatePendingPath();
             RCLCPP_INFO(this->get_logger(), "Planner state: Ready");
             publishStatus("Ready");
@@ -3051,11 +3068,22 @@ void PathPlannerNode::configurePlanner(){
         Eigen::Affine3d ground2Mls(body2MLS * body2Ground);
 
         auto startPosition = ground2Mls.translation();
+        const auto t_expand = std::chrono::steady_clock::now();
         traversability_generator_ptr->expandAll(startPosition);
+        RCLCPP_INFO_STREAM(this->get_logger(), "Timing: trav-map expansion took "
+            << std::chrono::duration<double>(std::chrono::steady_clock::now() - t_expand).count()
+            << " s.");
         applyForbiddenZones();
         rebuildSpeedZoneCache();
         auto travMap = traversability_generator_ptr->getTraversabilityMap();
+        // planner_ptr was reset above, so this updateMap always rebuilds the
+        // environment and regenerates the motion primitives.
+        const auto t_env = std::chrono::steady_clock::now();
         planner_ptr->updateMap(travMap);
+        RCLCPP_INFO_STREAM(this->get_logger(),
+            "Timing: environment build (incl. motion-primitive generation) took "
+            << std::chrono::duration<double>(std::chrono::steady_clock::now() - t_env).count()
+            << " s.");
         RCLCPP_INFO(this->get_logger(), "Planner state: Ready");
         publishStatus("Ready");
         if (map_update_callback) {
@@ -3149,7 +3177,8 @@ bool PathPlannerNode::publishMLSMap(){
 }
 
 bool PathPlannerNode::publishTravMap(){
-    const auto& trav_map_3d = traversability_generator_ptr->getTraversabilityMap(); 
+    const auto t_publish = std::chrono::steady_clock::now();
+    const auto& trav_map_3d = traversability_generator_ptr->getTraversabilityMap();
     ugv_nav4d_ros2::msg::TravMap map_msg;
     map_msg.width = 1;
     map_msg.height = 1;
@@ -3258,6 +3287,10 @@ bool PathPlannerNode::publishTravMap(){
     }
 
     trav_map_publisher->publish(map_msg);
+    RCLCPP_INFO_STREAM(this->get_logger(), "Timing: trav-map message build+publish ("
+        << map_msg.patches.size() << " patches) took "
+        << std::chrono::duration<double>(std::chrono::steady_clock::now() - t_publish).count()
+        << " s.");
     return true;
 }
 

@@ -76,7 +76,6 @@ OperatorPanel::OperatorPanel(QWidget* parent)
         "still shown in the readiness list but ignored for gating.");
     checks_layout_ = new QGridLayout;
     checks_group_->setLayout(checks_layout_);
-    layout->addWidget(checks_group_);
 
     // ros2_control controllers of /arter/ros_control/controller_manager:
     // checked = active. Toggling a box activates/deactivates that controller
@@ -99,7 +98,6 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     controllers_buttons->addWidget(nav_controllers_button_);
     controllers_box->addLayout(controllers_buttons);
     controllers_group_->setLayout(controllers_box);
-    layout->addWidget(controllers_group_);
 
     auto* buttons = new QGridLayout;
     pause_button_ = new QPushButton("Pause");
@@ -172,6 +170,11 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     delete_zone_button_ = new QPushButton("Delete zone");
     wp_row->addWidget(delete_zone_button_);
     layout->addLayout(wp_row);
+
+    // Configuration-style groups (rarely touched mid-mission) sit below all
+    // mission controls, at the end of the scrollable content.
+    layout->addWidget(checks_group_);
+    layout->addWidget(controllers_group_);
 
     layout->addStretch();
 
@@ -277,52 +280,27 @@ void OperatorPanel::onInitialize()
         [this](const ugv_nav4d_ros2::msg::SystemHealth::SharedPtr msg)
         {
             const QString text = "System health: " + QString::fromStdString(msg->summary);
-            QStringList rows;
-            QStringList tooltip_rows;
-            QVector<QPair<QString, quint8>> items;
+            QVector<ReadinessItem> items;
             const size_t count = std::min({
                 msg->readiness_names.size(),
                 msg->readiness_levels.size(),
                 msg->readiness_messages.size()});
             for (size_t i = 0; i < count; ++i) {
-                const uint8_t item_level = msg->readiness_levels[i];
-                items.append({QString::fromStdString(msg->readiness_names[i]), item_level});
-                const QString badge =
-                    item_level == ugv_nav4d_ros2::msg::SystemHealth::OK ? "OK  " :
-                    item_level == ugv_nav4d_ros2::msg::SystemHealth::WARN ? "WARN" : "ERR ";
-                const QString name = QString::fromStdString(msg->readiness_names[i]);
-                const QString detail = QString::fromStdString(msg->readiness_messages[i]);
-                rows << QString("%1  %2").arg(badge, name);
-                tooltip_rows << QString("%1  %2: %3").arg(badge, name, detail);
+                items.append({QString::fromStdString(msg->readiness_names[i]),
+                              msg->readiness_levels[i],
+                              QString::fromStdString(msg->readiness_messages[i])});
             }
-            const QString readiness_text = rows.isEmpty()
-                ? QString("Readiness: waiting")
-                : QString("Readiness: %1\n%2")
-                    .arg(msg->ready_to_execute ? "ready" : "not ready")
-                    .arg(rows.join('\n'));
-            const QString readiness_tooltip = tooltip_rows.isEmpty()
-                ? readiness_text
-                : QString("Ready to execute: %1\n%2")
-                    .arg(msg->ready_to_execute ? "yes" : "no")
-                    .arg(tooltip_rows.join('\n'));
-            QMetaObject::invokeMethod(this, [this, text, level = msg->level,
-                                             readiness_text, readiness_tooltip,
-                                             items,
-                                             ready = msg->ready_to_execute]() {
-                health_label_->setText(text);
-                health_label_->setToolTip(text);
-                health_label_->setStyleSheet(level == ugv_nav4d_ros2::msg::SystemHealth::OK
-                    ? "QLabel { color: #2e7d32; }" : "QLabel { color: #c62828; font-weight: bold; }");
-                readiness_label_->setText(readiness_text);
-                readiness_label_->setToolTip(readiness_tooltip);
-                readiness_label_->setStyleSheet(ready
-                    ? "QLabel { color: #2e7d32; font-family: monospace; }"
-                    : "QLabel { color: #c62828; font-family: monospace; }");
+            QMetaObject::invokeMethod(this, [this, text, items]() {
+                // The label itself is rebuilt from the CHECKED readiness items
+                // in rebuildReadinessLabel(); the unfiltered node-side summary
+                // is kept for the tooltip only.
+                health_node_summary_ = text;
                 for (const auto& item : items) {
-                    ensureReadinessCheckbox(item.first);
-                    readiness_levels_[item.first] = item.second;
+                    ensureReadinessCheckbox(item.name);
                 }
+                readiness_items_ = items;
                 health_received_ = true;
+                rebuildReadinessLabel();
                 updateExecuteEnabled();
             }, Qt::QueuedConnection);
         });
@@ -393,6 +371,7 @@ QCheckBox* OperatorPanel::ensureReadinessCheckbox(const QString& name)
     checks_layout_->addWidget(box, position / 2, position % 2);
     readiness_checks_.insert(name, box);
     connect(box, &QCheckBox::toggled, this, [this](bool) {
+        rebuildReadinessLabel();
         updateExecuteEnabled();
         Q_EMIT configChanged();
     });
@@ -401,24 +380,85 @@ QCheckBox* OperatorPanel::ensureReadinessCheckbox(const QString& name)
 
 bool OperatorPanel::checkedReadinessOk(QString* blocking_check) const
 {
-    for (auto it = readiness_levels_.cbegin(); it != readiness_levels_.cend(); ++it)
+    for (const auto& item : readiness_items_)
     {
-        if (it.value() != ugv_nav4d_ros2::msg::SystemHealth::ERROR)
+        if (item.level != ugv_nav4d_ros2::msg::SystemHealth::ERROR)
         {
             continue;
         }
-        const auto box = readiness_checks_.find(it.key());
+        const auto box = readiness_checks_.constFind(item.name);
         if (box != readiness_checks_.cend() && !box.value()->isChecked())
         {
             continue;
         }
         if (blocking_check)
         {
-            *blocking_check = it.key();
+            *blocking_check = item.name;
         }
         return false;
     }
     return true;
+}
+
+void OperatorPanel::rebuildReadinessLabel()
+{
+    if (!health_received_)
+    {
+        readiness_label_->setText("Readiness: waiting");
+        readiness_label_->setToolTip("Waiting for the first system-health report.");
+        readiness_label_->setStyleSheet("QLabel { font-family: monospace; }");
+        return;
+    }
+    QStringList rows;
+    QStringList tooltip_rows;
+    QStringList entries;
+    bool any_error = false;
+    bool any_warn = false;
+    int ignored = 0;
+    for (const auto& item : readiness_items_)
+    {
+        const auto box = readiness_checks_.constFind(item.name);
+        if (box != readiness_checks_.cend() && !box.value()->isChecked())
+        {
+            ++ignored;
+            continue;
+        }
+        const QString badge =
+            item.level == ugv_nav4d_ros2::msg::SystemHealth::OK ? "OK  " :
+            item.level == ugv_nav4d_ros2::msg::SystemHealth::WARN ? "WARN" : "ERR ";
+        rows << QString("%1  %2").arg(badge, item.name);
+        tooltip_rows << QString("%1  %2: %3").arg(badge, item.name, item.message);
+        // Every checked item is listed, healthy or not; unchecked ones are
+        // omitted entirely.
+        entries << QString("%1: %2").arg(item.name, item.message);
+        any_error = any_error || item.level == ugv_nav4d_ros2::msg::SystemHealth::ERROR;
+        any_warn = any_warn || item.level == ugv_nav4d_ros2::msg::SystemHealth::WARN;
+    }
+    health_label_->setText(entries.isEmpty()
+        ? QString("System health: no checks selected")
+        : "System health: " + entries.join("; "));
+    health_label_->setToolTip("All checks (node-side): " + health_node_summary_);
+    health_label_->setStyleSheet(any_error
+        ? "QLabel { color: #c62828; font-weight: bold; }"
+        : any_warn
+            ? "QLabel { color: #ef6c00; }"
+            : "QLabel { color: #2e7d32; }");
+    // "ready" mirrors the health part of the Execute gate: no ERROR among the
+    // CHECKED items. Unchecked items are hidden here; the gating-checks group
+    // below remains the full inventory.
+    const bool ready = !any_error;
+    QString header = QString("Readiness: %1").arg(ready ? "ready" : "not ready");
+    if (ignored > 0)
+    {
+        header += QString(" (%1 unchecked hidden)").arg(ignored);
+    }
+    const QString text = rows.isEmpty() ? header : header + '\n' + rows.join('\n');
+    readiness_label_->setText(text);
+    readiness_label_->setToolTip(
+        tooltip_rows.isEmpty() ? text : header + '\n' + tooltip_rows.join('\n'));
+    readiness_label_->setStyleSheet(ready
+        ? "QLabel { color: #2e7d32; font-family: monospace; }"
+        : "QLabel { color: #c62828; font-family: monospace; }");
 }
 
 void OperatorPanel::refreshControllers()
@@ -549,6 +589,7 @@ void OperatorPanel::load(const rviz_common::Config& config)
     {
         it.value()->setChecked(saved_check_states_.value(it.key(), it.value()->isChecked()));
     }
+    rebuildReadinessLabel();
     updateExecuteEnabled();
 }
 
