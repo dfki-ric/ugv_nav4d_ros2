@@ -116,6 +116,7 @@ private:
     QPushButton* save_map_button_{nullptr};
     QPushButton* republish_maps_button_{nullptr};
     QPushButton* regenerate_maps_button_{nullptr};
+    QPushButton* update_footprint_button_{nullptr};
     QPushButton* save_mission_button_{nullptr};
     QPushButton* load_mission_button_{nullptr};
     QGroupBox* checks_group_{nullptr};
@@ -166,6 +167,7 @@ private:
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr save_map_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr map_publish_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr regenerate_maps_client_;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr update_footprint_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr save_mission_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr load_mission_client_;
     rclcpp::Client<controller_manager_msgs::srv::ListControllers>::SharedPtr list_controllers_client_;

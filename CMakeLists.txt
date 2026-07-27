@@ -284,6 +284,8 @@ install(PROGRAMS
   scripts/visualize_path.py
   scripts/follow_path_client.py
   scripts/field_operations.py
+  scripts/test_footprint_adaptation.py
+  scripts/posture_publisher.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

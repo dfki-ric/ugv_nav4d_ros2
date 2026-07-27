@@ -89,6 +89,18 @@ PathPlannerNode::PathPlannerNode()
             "/ugv_nav4d_ros2/robot_pose", 10);
     zone_speed_limit_publisher = this->create_publisher<std_msgs::msg::Float32>(
             "/ugv_nav4d_ros2/zone_speed_limit", 10);
+    wheelbase_publisher = this->create_publisher<std_msgs::msg::Float32>(
+            "/ugv_nav4d_ros2/wheelbase", 10);
+    footprint_marker_publisher = this->create_publisher<visualization_msgs::msg::MarkerArray>(
+            "/ugv_nav4d_ros2/footprint_marker", 10);
+    footprint_polygon_publisher = this->create_publisher<geometry_msgs::msg::PolygonStamped>(
+            "/ugv_nav4d_ros2/footprint_polygon", 10);
+    const double footprint_publish_period = get_parameter("footprint_publish_period").as_double();
+    if (footprint_publish_period > 0.0){
+        wheelbase_status_timer = this->create_wall_timer(
+                std::chrono::duration<double>(footprint_publish_period),
+                std::bind(&PathPlannerNode::publishWheelbaseStatus, this));
+    }
     last_zone_speed_limit_match = this->get_clock()->now();
 
     setupSubscriptions();
@@ -198,6 +210,8 @@ void PathPlannerNode::setupSubscriptions()
             "/ugv_nav4d_ros2/plan_return", std::bind(&PathPlannerNode::planReturnCallback, this, std::placeholders::_1, std::placeholders::_2));
     plan_return_current_service = this->create_service<std_srvs::srv::Trigger>(
             "/ugv_nav4d_ros2/plan_return_current", std::bind(&PathPlannerNode::planReturnCurrentCallback, this, std::placeholders::_1, std::placeholders::_2));
+    update_footprint_service = this->create_service<std_srvs::srv::Trigger>(
+            "/ugv_nav4d_ros2/update_footprint", std::bind(&PathPlannerNode::updateFootprintCallback, this, std::placeholders::_1, std::placeholders::_2));
     set_return_forward_service = this->create_service<std_srvs::srv::SetBool>(
             "/ugv_nav4d_ros2/set_return_forward", std::bind(&PathPlannerNode::setReturnForwardCallback, this, std::placeholders::_1, std::placeholders::_2));
 
@@ -296,6 +310,12 @@ rcl_interfaces::msg::SetParametersResult PathPlannerNode::parametersCallback(con
             // Return is requested, so applying it must not rebuild the planner
             // or regenerate the traversability map.
             if (param.get_name() == "return_face_forward")
+            {
+                continue;
+            }
+            // Footprint-update settings are only read when the service runs;
+            // tuning them must not trigger a full planner rebuild by itself.
+            if (param.get_name().rfind("footprint_", 0) == 0)
             {
                 continue;
             }
@@ -1647,10 +1667,14 @@ size_t PathPlannerNode::inflateZoneObstacles(
     // Mirror the inflation radius of TraversabilityGenerator3d::inflateObstacles():
     // the gap between the AABB footprint boundary and the rotation-safe circle,
     // scaled by obstacleInflationMultiplier (>= 1.0), at least one grid cell.
+    // Offset-aware like travgen: an off-center footprint extends the swept
+    // circle and shrinks the guaranteed origin-centered core.
     const double half_x = traversability_config.robotSizeX / 2.0;
     const double half_y = traversability_config.robotSizeY / 2.0;
-    const double half_diagonal = std::hypot(half_x, half_y);
-    const double infl_gap = half_diagonal - std::min(half_x, half_y) / 2.0;
+    const double abs_off = std::abs(traversability_config.footprintOffsetX);
+    const double half_diagonal = std::hypot(half_x + abs_off, half_y);
+    const double min_half_extent = std::max(0.0, std::min(half_x - abs_off, half_y));
+    const double infl_gap = half_diagonal - min_half_extent / 2.0;
     const double multiplier = std::max(1.0, traversability_config.obstacleInflationMultiplier);
     const double infl_radius = multiplier *
         std::max(infl_gap, traversability_config.gridResolution * 1.1) + 1e-5;
@@ -1789,6 +1813,242 @@ void PathPlannerNode::planReturnCallback(const std::shared_ptr<std_srvs::srv::Tr
     response->message = response->success
         ? "Return path ready - review and Execute."
         : std::string("Return planning failed: ") + planningResultToString(latest_planning_result);
+}
+
+bool PathPlannerNode::measureFootprintEnvelope(FootprintEnvelope& envelope, std::string* error){
+    const std::string robot_frame = get_parameter("robot_frame").as_string();
+    const auto wheel_frames = get_parameter("footprint_wheel_frames").as_string_array();
+    if (wheel_frames.empty()){
+        if (error){
+            *error = "footprint_wheel_frames is empty";
+        }
+        return false;
+    }
+    const auto lookup = [&](const std::string& frame, double& x, double& y) -> bool {
+        geometry_msgs::msg::TransformStamped tf;
+        try {
+            tf = tf_buffer_ptr->lookupTransform(robot_frame, frame, tf2::TimePointZero);
+        } catch (const tf2::TransformException& ex){
+            if (error){
+                *error = "TF " + robot_frame + " <- " + frame + ": " + ex.what();
+            }
+            return false;
+        }
+        x = tf.transform.translation.x;
+        y = tf.transform.translation.y;
+        return true;
+    };
+
+    envelope.wheel_min_x = std::numeric_limits<double>::max();
+    envelope.wheel_max_x = std::numeric_limits<double>::lowest();
+    envelope.max_abs_y = 0.0;
+    for (const auto& wheel_frame : wheel_frames){
+        double x = 0.0;
+        double y = 0.0;
+        if (!lookup(wheel_frame, x, y)){
+            return false;
+        }
+        envelope.wheel_min_x = std::min(envelope.wheel_min_x, x);
+        envelope.wheel_max_x = std::max(envelope.wheel_max_x, x);
+        envelope.max_abs_y = std::max(envelope.max_abs_y, std::abs(y));
+    }
+    envelope.min_x = envelope.wheel_min_x;
+    envelope.max_x = envelope.wheel_max_x;
+    // Copy: as_string_array() returns a reference into the TEMPORARY returned
+    // by get_parameter(); iterating it directly is use-after-free.
+    const auto extra_frames = get_parameter("footprint_extra_frames").as_string_array();
+    for (const auto& extra_frame : extra_frames){
+        double x = 0.0;
+        double y = 0.0;
+        if (!lookup(extra_frame, x, y)){
+            return false;
+        }
+        envelope.min_x = std::min(envelope.min_x, x);
+        envelope.max_x = std::max(envelope.max_x, x);
+        envelope.max_abs_y = std::max(envelope.max_abs_y, std::abs(y));
+    }
+    return true;
+}
+
+void PathPlannerNode::updateFootprintCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+                                              std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    FootprintEnvelope envelope;
+    std::string error;
+    if (!measureFootprintEnvelope(envelope, &error)){
+        response->success = false;
+        response->message = "Footprint update failed: " + error;
+        publishStatus(response->message);
+        return;
+    }
+    // The footprint box supports an x offset (footprintOffsetX), so the
+    // measured asymmetric envelope maps exactly: per-side margins extend the
+    // envelope, the box center is the midpoint of the result. Y stays centered.
+    const double front_x = envelope.max_x + get_parameter("footprint_margin_front").as_double();
+    const double rear_x = envelope.min_x - get_parameter("footprint_margin_rear").as_double();
+    const double new_size_x = front_x - rear_x;
+    const double new_offset_x = (front_x + rear_x) / 2.0;
+    const double new_size_y = 2.0 * (envelope.max_abs_y + get_parameter("footprint_margin_y").as_double());
+    const double old_size_x = get_parameter("robotSizeX").as_double();
+    const double old_size_y = get_parameter("robotSizeY").as_double();
+    const double old_offset_x = get_parameter("footprintOffsetX").as_double();
+
+    std::ostringstream summary;
+    summary.setf(std::ios::fixed);
+    summary.precision(2);
+    summary << "footprint " << old_size_x << " x " << old_size_y
+            << " m @ x" << (old_offset_x >= 0 ? "+" : "") << old_offset_x
+            << " -> " << new_size_x << " x " << new_size_y << " m @ x"
+            << (new_offset_x >= 0 ? "+" : "") << new_offset_x
+            << " (envelope incl. tool: x [" << envelope.min_x << ", " << envelope.max_x
+            << "], |y| " << envelope.max_abs_y << " m)";
+
+    if (std::abs(new_size_x - old_size_x) < 0.01 &&
+        std::abs(new_size_y - old_size_y) < 0.01 &&
+        std::abs(new_offset_x - old_offset_x) < 0.01){
+        response->success = true;
+        response->message = "Footprint unchanged: " + summary.str() + "; no rebuild needed.";
+        publishStatus(response->message);
+        return;
+    }
+
+    // parametersCallback marks these dirty; parameterUpdateTimerCallback then
+    // reconfigures the planner (trav-map regeneration + environment rebuild).
+    set_parameters({rclcpp::Parameter("robotSizeX", new_size_x),
+                    rclcpp::Parameter("robotSizeY", new_size_y),
+                    rclcpp::Parameter("footprintOffsetX", new_offset_x)});
+    response->success = true;
+    response->message = "Footprint updated: " + summary.str() + "; planner reconfigures with the next tick.";
+    RCLCPP_INFO_STREAM(this->get_logger(), response->message);
+    publishStatus(response->message);
+}
+
+void PathPlannerNode::publishWheelbaseStatus(){
+    FootprintEnvelope envelope;
+    std::string error;
+    if (!measureFootprintEnvelope(envelope, &error)){
+        RCLCPP_WARN_STREAM_THROTTLE(this->get_logger(), *this->get_clock(), 30000,
+            "Wheelbase status unavailable: " << error);
+        return;
+    }
+    const double wheelbase = envelope.wheel_max_x - envelope.wheel_min_x;
+
+    std_msgs::msg::Float32 wheelbase_msg;
+    wheelbase_msg.data = static_cast<float>(wheelbase);
+    wheelbase_publisher->publish(wheelbase_msg);
+
+    const std::string robot_frame = get_parameter("robot_frame").as_string();
+    const double half_x = get_parameter("robotSizeX").as_double() / 2.0;
+    const double half_y = get_parameter("robotSizeY").as_double() / 2.0;
+    const double box_offset_x = get_parameter("footprintOffsetX").as_double();
+    // Zero stamp = "latest available transform" in RViz. Stamping with now()
+    // raced the localization TF (a few ms older, especially with sim time)
+    // and produced "extrapolation into the future" errors on every publish.
+    const rclcpp::Time stamp(0, 0, this->get_clock()->get_clock_type());
+    // Persistent markers (lifetime 0): an expiry tied to the publish period
+    // made the box flicker whenever a long callback (replanning, map rebuild)
+    // blocked the executor past the lifetime, while the polygon display kept
+    // its last message. Each publish overwrites the previous by ns/id anyway.
+    const rclcpp::Duration lifetime = rclcpp::Duration::from_seconds(0.0);
+
+    // Same convention as Nav2's published_footprint: the TRUE asymmetric
+    // envelope (wheels + tool + per-side margins), matching what the
+    // update_footprint service would apply.
+    const double margin_y = get_parameter("footprint_margin_y").as_double();
+    const double front_x = envelope.max_x + get_parameter("footprint_margin_front").as_double();
+    const double rear_x = envelope.min_x - get_parameter("footprint_margin_rear").as_double();
+    const double side_y = envelope.max_abs_y + margin_y;
+    geometry_msgs::msg::PolygonStamped polygon;
+    polygon.header.frame_id = robot_frame;
+    polygon.header.stamp = stamp;
+    const double polygon_corners[4][2] = {
+        {front_x, side_y}, {front_x, -side_y}, {rear_x, -side_y}, {rear_x, side_y}};
+    for (const auto& corner : polygon_corners){
+        geometry_msgs::msg::Point32 p;
+        p.x = static_cast<float>(corner[0]);
+        p.y = static_cast<float>(corner[1]);
+        polygon.polygon.points.push_back(p);
+    }
+    footprint_polygon_publisher->publish(polygon);
+
+    visualization_msgs::msg::MarkerArray markers;
+
+    // Planner footprint box (robotSizeX/Y, centered on the robot frame).
+    visualization_msgs::msg::Marker box;
+    box.header.frame_id = robot_frame;
+    box.header.stamp = stamp;
+    box.ns = "footprint";
+    box.id = 0;
+    box.type = visualization_msgs::msg::Marker::LINE_STRIP;
+    box.action = visualization_msgs::msg::Marker::ADD;
+    box.pose.orientation.w = 1.0;
+    box.scale.x = 0.05;
+    box.color.r = 0.1f;
+    box.color.g = 0.8f;
+    box.color.b = 0.2f;
+    box.color.a = 1.0f;
+    box.lifetime = lifetime;
+    const double corners[5][2] = {
+        {box_offset_x + half_x, half_y}, {box_offset_x + half_x, -half_y},
+        {box_offset_x - half_x, -half_y}, {box_offset_x - half_x, half_y},
+        {box_offset_x + half_x, half_y}};
+    for (const auto& corner : corners){
+        geometry_msgs::msg::Point p;
+        p.x = corner[0];
+        p.y = corner[1];
+        p.z = 0.1;
+        box.points.push_back(p);
+    }
+    markers.markers.push_back(box);
+
+    // Measured axle span (the actual wheelbase between wheel centers).
+    visualization_msgs::msg::Marker axle;
+    axle.header = box.header;
+    axle.ns = "wheelbase";
+    axle.id = 1;
+    axle.type = visualization_msgs::msg::Marker::LINE_STRIP;
+    axle.action = visualization_msgs::msg::Marker::ADD;
+    axle.pose.orientation.w = 1.0;
+    axle.scale.x = 0.08;
+    axle.color.r = 0.2f;
+    axle.color.g = 0.4f;
+    axle.color.b = 1.0f;
+    axle.color.a = 1.0f;
+    axle.lifetime = lifetime;
+    geometry_msgs::msg::Point rear;
+    rear.x = envelope.wheel_min_x;
+    rear.z = 0.1;
+    geometry_msgs::msg::Point front;
+    front.x = envelope.wheel_max_x;
+    front.z = 0.1;
+    axle.points.push_back(rear);
+    axle.points.push_back(front);
+    markers.markers.push_back(axle);
+
+    visualization_msgs::msg::Marker text;
+    text.header = box.header;
+    text.ns = "wheelbase";
+    text.id = 2;
+    text.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+    text.action = visualization_msgs::msg::Marker::ADD;
+    text.pose.orientation.w = 1.0;
+    text.pose.position.z = 2.0;
+    text.scale.z = 0.5;
+    text.color.r = 1.0f;
+    text.color.g = 1.0f;
+    text.color.b = 1.0f;
+    text.color.a = 1.0f;
+    text.lifetime = lifetime;
+    std::ostringstream label;
+    label.setf(std::ios::fixed);
+    label.precision(2);
+    label << "wheelbase " << wheelbase << " m | footprint "
+          << 2.0 * half_x << " x " << 2.0 * half_y << " m @ x"
+          << (box_offset_x >= 0 ? "+" : "") << box_offset_x;
+    text.text = label.str();
+    markers.markers.push_back(text);
+
+    footprint_marker_publisher->publish(markers);
 }
 
 void PathPlannerNode::setReturnForwardCallback(
@@ -2658,8 +2918,9 @@ void PathPlannerNode::publishRouteRisk(
     if (risk.unknown_percentage > 0.0)
         risk.warnings.push_back("Route crosses unknown terrain");
     if (risk.minimum_clearance >= 0.0 &&
-        risk.minimum_clearance < std::hypot(traversability_config.robotSizeX,
-                                            traversability_config.robotSizeY) / 2.0)
+        risk.minimum_clearance < std::hypot(
+            traversability_config.robotSizeX + 2.0 * std::abs(traversability_config.footprintOffsetX),
+            traversability_config.robotSizeY) / 2.0)
         risk.warnings.push_back("Route has low obstacle clearance");
     risk.high_risk_sections = static_cast<uint32_t>(risk.warnings.size());
     risk.valid = true;
@@ -2849,13 +3110,42 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("robotHeight", 1.7);
     declare_parameter("robotSizeX", 0.80);
     declare_parameter("robotSizeY", 0.80);
+    // Forward offset of the footprint-box center from the robot frame (m):
+    // base_link is not at the machine center (tool side is longer). 0 =
+    // legacy centered box. NOTE: no "footprint_" underscore prefix on
+    // purpose -- changing it must trigger a planner rebuild.
+    declare_parameter("footprintOffsetX", 0.0);
     declare_parameter("slopeMetric", "NONE"); // Options: NONE, AVG_SLOPE, MAX_SLOPE, TRIANGLE_SLOPE
     declare_parameter("slopeMetricScale", 1.0);
     declare_parameter("obstacleInflationMultiplier", 1.0);
     declare_parameter("partiallyTraversableMultiplier", 2.0);
     declare_parameter("numYawSamples", 12); // yaw samples over [0,180) for partial-cell orientations
-    declare_parameter("extend_trajectory", false);    
-    declare_parameter("extension_distance", 0.0);    
+    declare_parameter("extend_trajectory", false);
+    declare_parameter("extension_distance", 0.0);
+
+    // Footprint update from the live robot geometry (variable wheelbase):
+    // the update_footprint service measures the wheel-link envelope via TF
+    // and applies robotSize = 2 * (max wheel offset + margin) per axis. The
+    // margins cover the body/tool overhang beyond the wheel centers and the
+    // wheel dimensions themselves; calibrate them so the result matches the
+    // measured machine at a known wheelbase.
+    declare_parameter("footprint_wheel_frames", std::vector<std::string>{
+        "arter/wheel_fl_link", "arter/wheel_fr_link",
+        "arter/wheel_rl_link", "arter/wheel_rr_link"});
+    // Additional frames included in the footprint envelope but not in the
+    // wheelbase: the tool mount covers the manipulator/shovel at its LIVE
+    // pose. All tools attach under tool_link (see attach_tool.xacro).
+    declare_parameter("footprint_extra_frames", std::vector<std::string>{
+        "arter/tool_link"});
+    // Margins beyond the measured frames, per side: front = shovel/tool extent
+    // beyond tool_link, rear = body extent beyond the rear wheel centers.
+    // Calibrate so the published polygon hugs the real machine.
+    declare_parameter("footprint_margin_front", 1.1);
+    declare_parameter("footprint_margin_rear", 0.6);
+    declare_parameter("footprint_margin_y", 0.65);
+    // Period [s] for publishing the measured wheelbase (Float32), the
+    // footprint polygon and the RViz markers; <= 0 disables the publisher.
+    declare_parameter("footprint_publish_period", 0.1);
 }
 
 void PathPlannerNode::updateParameters(){
@@ -2893,6 +3183,7 @@ void PathPlannerNode::updateParameters(){
     traversability_config.maxSlope                  = get_parameter("maxSlope").as_double();
     traversability_config.maxStepHeight             = get_parameter("maxStepHeight").as_double();
     traversability_config.robotSizeX                = get_parameter("robotSizeX").as_double();
+    traversability_config.footprintOffsetX          = get_parameter("footprintOffsetX").as_double();
     traversability_config.robotSizeY                = get_parameter("robotSizeY").as_double();
     traversability_config.robotHeight               = get_parameter("robotHeight").as_double();
     traversability_config.slopeMetricScale          = get_parameter("slopeMetricScale").as_double();
@@ -2986,6 +3277,7 @@ void PathPlannerNode::updateParametersFromConfigs(
         rclcpp::Parameter("maxStepHeight", trav.maxStepHeight),
         rclcpp::Parameter("robotSizeX", trav.robotSizeX),
         rclcpp::Parameter("robotSizeY", trav.robotSizeY),
+        rclcpp::Parameter("footprintOffsetX", trav.footprintOffsetX),
         rclcpp::Parameter("robotHeight", trav.robotHeight),
         rclcpp::Parameter("slopeMetricScale", trav.slopeMetricScale),
         rclcpp::Parameter("slopeMetric", slope_metric),

@@ -16,6 +16,7 @@
 #include <std_srvs/srv/set_bool.hpp>
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/polygon_stamped.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
@@ -184,6 +185,25 @@ private:
                                    std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void setReturnForwardCallback(const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
                                   std::shared_ptr<std_srvs::srv::SetBool::Response> response);
+    /** Measure the current wheel envelope from TF (the wheelbase is variable)
+     *  and apply it as robotSizeX/robotSizeY plus configured body margins. */
+    void updateFootprintCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                                 std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+    struct FootprintEnvelope
+    {
+        double wheel_min_x{0.0};   //!< wheel centers only: defines the wheelbase
+        double wheel_max_x{0.0};
+        double min_x{0.0};         //!< wheels + extra frames (tool/shovel)
+        double max_x{0.0};
+        double max_abs_y{0.0};
+    };
+    /** Measure wheel links and footprint_extra_frames (e.g. the tool mount)
+     *  in the robot frame via TF. Returns false (with optional reason) when
+     *  any transform is unavailable. */
+    bool measureFootprintEnvelope(FootprintEnvelope& envelope, std::string* error = nullptr);
+    /** Periodic: publish the measured wheelbase (Float32), the footprint
+     *  polygon (like Nav2's published_footprint) and RViz markers. */
+    void publishWheelbaseStatus();
     void publishPlannedPath(const std::vector<trajectory_follower::SubTrajectory>& trajectory3D, bool found_solution);
     static const char* planningResultToString(ugv_nav4d::Planner::PLANNING_RESULT res);
     void initializeMLSMap();
@@ -238,6 +258,11 @@ private:
     //services
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_publish_service;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr regenerate_maps_service;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr update_footprint_service;
+    rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr wheelbase_publisher;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr footprint_marker_publisher;
+    rclcpp::Publisher<geometry_msgs::msg::PolygonStamped>::SharedPtr footprint_polygon_publisher;
+    rclcpp::TimerBase::SharedPtr wheelbase_status_timer;
 
     //waypoints
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_add_waypoint;

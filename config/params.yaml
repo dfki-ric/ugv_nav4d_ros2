@@ -83,8 +83,37 @@ ugv_nav4d_ros2:
     maxStepHeight: 0.45
     minTraversablePercentage: 0.4
     robotHeight: 0.5
-    robotSizeX: 1.2
-    robotSizeY: 1.2
+    # Matches the Nav2 local-costmap footprint [[-3.0,2.215],[6.0,2.215],
+    # [6.0,-2.215],[-3.0,-2.215]] (9.0 x 4.43 m): size 9.0 with the box center
+    # shifted +1.5 m forward gives exactly [-3.0, +6.0] around base_link.
+    # The "Update footprint" panel button re-measures size AND offset from TF.
+    robotSizeX: 9.0
+    robotSizeY: 4.43
+    footprintOffsetX: 1.5
+    # The wheelbase is variable: the update_footprint service (panel button
+    # "Update footprint") measures the wheel-link envelope via TF and sets
+    # robotSize = 2 * (max wheel offset + margin) per axis. Margins cover the
+    # body/tool overhang beyond the wheel centers; calibrate them so the
+    # result matches the machine at a known wheelbase.
+    # Frames beyond the wheels included in the envelope (not in the wheelbase):
+    # all tools (shovels, grippers) attach under tool_link, so the live
+    # manipulator pose is covered. footprint_margin_x then only needs to span
+    # the tool/body extent BEYOND these frames.
+    footprint_extra_frames: ["arter/tool_link"]
+    # Per-side margins beyond the measured frames: front = shovel extent past
+    # tool_link, rear = body past the rear wheel centers, y = half-width past
+    # the widest wheel/tool |y|. Calibrate until the published polygon hugs
+    # the real machine (defaults derived from the 9.0 x 4.43 @ +1.5 footprint
+    # at 4.86 m wheelbase).
+    footprint_margin_front: 1.1
+    footprint_margin_rear: 0.6
+    footprint_margin_y: 0.65
+    # Publish the measured wheelbase (/ugv_nav4d_ros2/wheelbase, Float32), the
+    # TRUE asymmetric footprint polygon incl. tool (/ugv_nav4d_ros2/
+    # footprint_polygon, like Nav2's published_footprint) and RViz markers
+    # (/ugv_nav4d_ros2/footprint_marker; green box = the planner's centered
+    # robotSize model) every N seconds; <= 0 disables. 0.1 = costmap cadence.
+    footprint_publish_period: 0.1
     slopeMetric: "NONE"
     slopeMetricScale: 1.0
     obstacleInflationMultiplier: 1.0

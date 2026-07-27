@@ -122,6 +122,11 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     save_map_button_ = new QPushButton("Save MLS map");
     republish_maps_button_ = new QPushButton("Republish maps");
     regenerate_maps_button_ = new QPushButton("Regenerate maps");
+    update_footprint_button_ = new QPushButton("Update footprint");
+    update_footprint_button_->setToolTip(
+        "Measure the current wheel positions via TF (the wheelbase is variable) "
+        "and apply the resulting footprint to the planner. Triggers a trav-map "
+        "and planner rebuild when the size changed.");
     buttons->addWidget(pause_button_, 0, 0);
     buttons->addWidget(resume_button_, 0, 1);
     buttons->addWidget(recover_button_, 1, 0, 1, 2);
@@ -134,7 +139,8 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     buttons->addWidget(undo_zone_button_, 5, 1);
     buttons->addWidget(save_map_button_, 6, 0);
     buttons->addWidget(republish_maps_button_, 6, 1);
-    buttons->addWidget(regenerate_maps_button_, 7, 0, 1, 2);
+    buttons->addWidget(regenerate_maps_button_, 7, 0);
+    buttons->addWidget(update_footprint_button_, 7, 1);
     save_mission_button_ = new QPushButton("Save mission");
     load_mission_button_ = new QPushButton("Load mission");
     buttons->addWidget(save_mission_button_, 8, 0);
@@ -213,6 +219,9 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     connect(save_map_button_, &QPushButton::clicked, this, &OperatorPanel::onSaveMap);
     connect(republish_maps_button_, &QPushButton::clicked, this, &OperatorPanel::onRepublishMaps);
     connect(regenerate_maps_button_, &QPushButton::clicked, this, &OperatorPanel::onRegenerateMaps);
+    connect(update_footprint_button_, &QPushButton::clicked, this, [this]() {
+        callTrigger(update_footprint_client_, "Update footprint");
+    });
     connect(save_mission_button_, &QPushButton::clicked, this, &OperatorPanel::onSaveMission);
     connect(load_mission_button_, &QPushButton::clicked, this, &OperatorPanel::onLoadMission);
     connect(refresh_controllers_button_, &QPushButton::clicked, this,
@@ -332,6 +341,7 @@ void OperatorPanel::onInitialize()
     save_map_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/save_mls_map");
     map_publish_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/map_publish");
     regenerate_maps_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/regenerate_maps");
+    update_footprint_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/update_footprint");
     save_mission_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/save_mission");
     load_mission_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/load_mission");
 
