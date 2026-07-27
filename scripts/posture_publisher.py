@@ -20,6 +20,7 @@ import math
 
 import rclpy
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rcl_interfaces.msg import FloatingPointRange, ParameterDescriptor
 
 from geometry_msgs.msg import TransformStamped
@@ -61,12 +62,33 @@ class PosturePublisher(Node):
         self.get_logger().info(
             'Publishing fake posture TF; use rqt_reconfigure sliders to move the links.')
 
+    POSTURE_PARAMS = ('wheelbase', 'track_width', 'wheelbase_center_x',
+                      'tool_x', 'tool_y', 'robot_x', 'robot_y', 'robot_yaw')
+
+    def snapped_params(self):
+        """Read all posture parameters rounded to mm, and write the rounded
+        value BACK for any that carry rqt-slider float noise (0.01 steps are
+        not binary-representable). rqt_reconfigure refreshes its display from
+        /parameter_events, so the spinbox shows the clean value too. Rounding
+        is idempotent, so this converges after a single write-back."""
+        values = {}
+        writebacks = []
+        for name in self.POSTURE_PARAMS:
+            raw = self.get_parameter(name).value
+            values[name] = round(raw, 3)
+            if raw != values[name]:
+                writebacks.append(Parameter(name, value=values[name]))
+        if writebacks:
+            self.set_parameters(writebacks)
+        return values
+
     def tick(self):
-        wheelbase = self.get_parameter('wheelbase').value
-        track = self.get_parameter('track_width').value
-        center = self.get_parameter('wheelbase_center_x').value
-        tool_x = self.get_parameter('tool_x').value
-        tool_y = self.get_parameter('tool_y').value
+        values = self.snapped_params()
+        wheelbase = values['wheelbase']
+        track = values['track_width']
+        center = values['wheelbase_center_x']
+        tool_x = values['tool_x']
+        tool_y = values['tool_y']
 
         frames = {
             'arter/wheel_fl_link': (center + wheelbase / 2.0, track / 2.0),
@@ -90,9 +112,9 @@ class PosturePublisher(Node):
         pose.header.stamp = now
         pose.header.frame_id = 'map'
         pose.child_frame_id = BASE
-        pose.transform.translation.x = float(self.get_parameter('robot_x').value)
-        pose.transform.translation.y = float(self.get_parameter('robot_y').value)
-        yaw = float(self.get_parameter('robot_yaw').value)
+        pose.transform.translation.x = float(values['robot_x'])
+        pose.transform.translation.y = float(values['robot_y'])
+        yaw = float(values['robot_yaw'])
         pose.transform.rotation.z = math.sin(yaw / 2.0)
         pose.transform.rotation.w = math.cos(yaw / 2.0)
         self.tf_broadcaster.sendTransform(pose)
