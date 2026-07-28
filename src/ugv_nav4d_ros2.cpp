@@ -750,12 +750,52 @@ void PathPlannerNode::planThroughWaypoints(bool record_mission){
         if (res != ugv_nav4d::Planner::FOUND_SOLUTION){
             // Abort the whole mission and clear any stale path: a partial path up to a
             // failed segment must not be executed. The queue is kept so the operator can
-            // fix the offending waypoint and retry.
-            RCLCPP_ERROR_STREAM(this->get_logger(), "Waypoint leg " << (k + 1) << "/"
-                                << targets.size() << " failed: " << planningResultToString(res)
-                                << ". Mission aborted; waypoint queue kept for correction.");
-            publishStatus(std::string("Waypoint leg ") + std::to_string(k + 1) + "/" +
-                          std::to_string(targets.size()) + " failed: " + planningResultToString(res));
+            // fix the offending waypoint and retry. The status text names the offending
+            // POSE and the likely cause: e.g. leg 4's start is waypoint 3, which can be
+            // a valid goal (generous goal margins) yet an invalid start (exact heading
+            // must be allowed on that cell).
+            const std::string start_name = (k == 0)
+                ? std::string("the robot's current pose")
+                : "waypoint " + std::to_string(k);
+            std::ostringstream why;
+            why.setf(std::ios::fixed);
+            why.precision(1);
+            why << "Waypoint leg " << (k + 1) << "/" << targets.size() << " failed ("
+                << planningResultToString(res) << "): ";
+            switch (res){
+            case ugv_nav4d::Planner::START_INVALID:
+                why << start_name << " at (" << segment_start.position.x() << ", "
+                    << segment_start.position.y() << ") is not a valid START: no traversable "
+                    << "cell within " << get_parameter("searchRadius").as_double()
+                    << " m allows its exact heading (obstacle, disallowed orientation on a "
+                    << "partially traversable cell, or height mismatch). "
+                    << (k == 0
+                        ? std::string("Replan after moving the robot to open ground, or regenerate the map.")
+                        : "Move or rotate waypoint " + std::to_string(k)
+                          + " onto open ground (check it with Inspect Traversability), then replan.");
+                break;
+            case ugv_nav4d::Planner::GOAL_INVALID:
+                why << "waypoint " << (k + 1) << " at (" << targets[k].position.x() << ", "
+                    << targets[k].position.y() << ") is not a valid GOAL even within the goal "
+                    << "margins. Move or rotate waypoint " << (k + 1)
+                    << " onto traversable ground, then replan.";
+                break;
+            case ugv_nav4d::Planner::NO_SOLUTION:
+                why << "no path found from " << start_name << " to waypoint " << (k + 1)
+                    << " with the current map and footprint (blocked or too-narrow corridor, "
+                    << "or maxTime too low). Check the trav map between them.";
+                break;
+            case ugv_nav4d::Planner::NO_MAP:
+                why << "no traversability map is available; load or regenerate the map first.";
+                break;
+            default:
+                why << "internal planner error between " << start_name << " and waypoint "
+                    << (k + 1) << "; see the planner log.";
+                break;
+            }
+            why << " Mission aborted; the waypoint queue is kept for correction.";
+            RCLCPP_ERROR_STREAM(this->get_logger(), why.str());
+            publishStatus(why.str());
             latest_trajectory2D.clear();
             latest_trajectory3D.clear();
             latest_planning_result = res;
@@ -765,7 +805,30 @@ void PathPlannerNode::planThroughWaypoints(bool record_mission){
 
         combined2D.insert(combined2D.end(), trajectory2D.begin(), trajectory2D.end());
         combined3D.insert(combined3D.end(), trajectory3D.begin(), trajectory3D.end());
-        segment_start = targets[k];
+        // Chain the next leg from where this leg ACTUALLY ends, not from the
+        // ideal waypoint pose: plan() is allowed to stop anywhere within
+        // goalDistanceMargin/goalOrientationMargin of the waypoint, so
+        // restarting at the waypoint itself produced visible (and driven)
+        // jumps of up to those margins at every waypoint. The achieved end
+        // pose is also a validated planner state, so it is always a legal
+        // start (the ideal waypoint pose sometimes was not -> START_INVALID).
+        if (!trajectory3D.empty()){
+            const auto& leg_end = trajectory3D.back();
+            double end_yaw = leg_end.goalPose.orientation;
+            // Ackermann spline headings follow the travel direction; a leg
+            // that ends reversing has the body facing the opposite way.
+            if (leg_end.driveMode == trajectory_follower::DriveMode::ModeAckermann &&
+                leg_end.speed < 0){
+                end_yaw += M_PI;
+            }
+            segment_start = targets[k];  // keeps the waypoint's body-frame z
+            segment_start.position.x() = leg_end.goalPose.position.x();
+            segment_start.position.y() = leg_end.goalPose.position.y();
+            segment_start.orientation = Eigen::Quaterniond(
+                Eigen::AngleAxisd(end_yaw, Eigen::Vector3d::UnitZ()));
+        } else {
+            segment_start = targets[k];
+        }
     }
 
     latest_trajectory2D = combined2D;
