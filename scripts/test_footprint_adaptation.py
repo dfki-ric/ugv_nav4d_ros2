@@ -57,7 +57,7 @@ class FootprintTester(Node):
         self.wheelbase = None
         self.polygon = None
         self.create_subscription(Float32, PLANNER + '/wheelbase', self.wheelbase_cb, 10)
-        self.create_subscription(PolygonStamped, PLANNER + '/footprint_polygon', self.polygon_cb, 10)
+        self.create_subscription(PolygonStamped, PLANNER + '/footprint_real', self.polygon_cb, 10)
         self.update_client = self.create_client(Trigger, PLANNER + '/update_footprint')
         self.param_client = AsyncParameterClient(self, PLANNER.lstrip('/'))
 

@@ -110,8 +110,8 @@ ugv_nav4d_ros2:
     footprint_margin_y: 0.65
     # Publish the measured wheelbase (/ugv_nav4d_ros2/wheelbase, Float32), the
     # TRUE asymmetric footprint polygon incl. tool (/ugv_nav4d_ros2/
-    # footprint_polygon, like Nav2's published_footprint) and RViz markers
-    # (/ugv_nav4d_ros2/footprint_marker; green box = the planner's centered
+    # footprint_real, like Nav2's published_footprint) and RViz markers
+    # (/ugv_nav4d_ros2/footprint_planner; green box = the planner's centered
     # robotSize model) every N seconds; <= 0 disables. 0.1 = costmap cadence.
     footprint_publish_period: 0.1
     slopeMetric: "NONE"

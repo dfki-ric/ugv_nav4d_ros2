@@ -8,7 +8,7 @@ node parameters with ranges -- open rqt_reconfigure and you get SLIDERS to
     ros2 run ugv_nav4d_ros2 posture_publisher.py
     ros2 run rqt_reconfigure rqt_reconfigure   # select footprint_posture_publisher
 
-Then watch /ugv_nav4d_ros2/footprint_polygon + wheelbase markers in RViz
+Then watch /ugv_nav4d_ros2/footprint_real + wheelbase markers in RViz
 follow the sliders, and press "Update footprint" in the operator panel to
 make the planner adopt the pose.
 

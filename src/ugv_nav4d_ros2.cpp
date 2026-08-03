@@ -91,10 +91,15 @@ PathPlannerNode::PathPlannerNode()
             "/ugv_nav4d_ros2/zone_speed_limit", 10);
     wheelbase_publisher = this->create_publisher<std_msgs::msg::Float32>(
             "/ugv_nav4d_ros2/wheelbase", 10);
+    // footprint_planner = the footprint the PLANNER is configured with
+    // (robotSizeX/Y @ footprintOffsetX, plus axle line and label markers);
+    // footprint_real = the TRUE envelope measured live from TF (wheels + tool
+    // + margins), i.e. what the update_footprint service would apply. The
+    // operator compares the two in RViz to spot stale planner config.
     footprint_marker_publisher = this->create_publisher<visualization_msgs::msg::MarkerArray>(
-            "/ugv_nav4d_ros2/footprint_marker", 10);
+            "/ugv_nav4d_ros2/footprint_planner", 10);
     footprint_polygon_publisher = this->create_publisher<geometry_msgs::msg::PolygonStamped>(
-            "/ugv_nav4d_ros2/footprint_polygon", 10);
+            "/ugv_nav4d_ros2/footprint_real", 10);
     const double footprint_publish_period = get_parameter("footprint_publish_period").as_double();
     if (footprint_publish_period > 0.0){
         wheelbase_status_timer = this->create_wall_timer(
