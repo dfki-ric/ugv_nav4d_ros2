@@ -6,6 +6,7 @@ from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, DurabilityPolicy
 from rclpy.time import Time
 from action_msgs.msg import GoalStatus
+from action_msgs.srv import CancelGoal
 from tf2_ros import Buffer, TransformListener
 
 from nav_msgs.msg import Path
@@ -52,6 +53,11 @@ class FollowPathClient(Node):
         )
 
         self._action_client = ActionClient(self, FollowPath, '/follow_path')
+        # Backstop for the operator Stop button: a zeroed CancelGoal request on
+        # the action's cancel service cancels ALL goals the controller holds,
+        # even one this client lost track of.
+        self.cancel_all_client = self.create_client(
+            CancelGoal, '/follow_path/_action/cancel_goal')
 
         # Operator stop: cancels the running FollowPath goal and drops all queued
         # segments. Named under the planner namespace for the RViz operator panel.
@@ -85,6 +91,11 @@ class FollowPathClient(Node):
         self.distance_remaining = 0.0
         self.current_speed = 0.0
         self.auto_continue_count = 0
+        # Incremented on every goal send. Nav2 terminates a preempted goal as
+        # ABORTED (not CANCELED), and that late result must not clobber the
+        # state of the replacement goal that is already executing — otherwise
+        # Stop sees "nothing executing" while the robot keeps driving.
+        self.goal_generation = 0
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -336,9 +347,11 @@ class FollowPathClient(Node):
         self.publish_status(
             MissionStatus.EXECUTING,
             f'Executing segment {self.current_segment}/{self.total_segments}: {label}')
+        self.goal_generation += 1
         future = self._action_client.send_goal_async(
             goal_msg, feedback_callback=self.feedback_callback)
-        future.add_done_callback(self.goal_response_callback)
+        future.add_done_callback(
+            lambda f, gen=self.goal_generation: self.goal_response_callback(f, gen))
 
     def feedback_callback(self, feedback_msg):
         feedback = feedback_msg.feedback
@@ -468,6 +481,10 @@ class FollowPathClient(Node):
             response.success = True
             response.message = 'Nothing executing; cleared queue.'
             self.current_item = None
+            # Stop must stop the robot even if this client believes nothing is
+            # running: cancel every goal the controller holds.
+            if self.cancel_all_client.service_is_ready():
+                self.cancel_all_client.call_async(CancelGoal.Request())
             self.publish_status(MissionStatus.ABORTED, 'Mission aborted by operator')
         self.get_logger().warn(response.message)
         return response
@@ -491,8 +508,16 @@ class FollowPathClient(Node):
         self.current_item = None
         self.paused = False
 
-    def goal_response_callback(self, future):
+    def goal_response_callback(self, future, generation):
         goal_handle = future.result()
+        if generation != self.goal_generation:
+            # A newer path was sent before this acceptance came back. Never
+            # adopt the handle, but make sure the controller drops the goal.
+            if goal_handle.accepted:
+                self.get_logger().info(
+                    'Canceling goal that was superseded before acceptance.')
+                goal_handle.cancel_goal_async()
+            return
         if not goal_handle.accepted:
             self.get_logger().error('FollowPath goal was rejected.')
             self.goal_in_progress = False
@@ -505,10 +530,18 @@ class FollowPathClient(Node):
         self.get_logger().info('FollowPath goal accepted.')
         self.current_goal_handle = goal_handle
         result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(self.get_result_callback)
+        result_future.add_done_callback(
+            lambda f, gen=generation: self.get_result_callback(f, gen))
 
-    def get_result_callback(self, future):
+    def get_result_callback(self, future, generation):
         result = future.result()
+        if generation != self.goal_generation:
+            # Late result of a goal that was already replaced (Nav2 reports a
+            # preempted goal as ABORTED). The replacement is executing; wiping
+            # state here is what used to break the Stop button.
+            self.get_logger().info(
+                f'Ignoring stale result (status {result.status}) from a superseded goal.')
+            return
         self.get_logger().info(f"Goal finished with status code: {result.status}")
 
         self.goal_finished = True
@@ -569,6 +602,16 @@ class FollowPathClient(Node):
                     f'Goal ended with status {result.status} while a pause was '
                     'pending; treating it as paused.')
                 self.publish_status(MissionStatus.PAUSED, 'Paused; mission retained')
+                return
+            if self.cancel_in_progress and self.pending_labeled_path_msg is not None:
+                # A replace-cancel can likewise race into ABORTED instead of
+                # CANCELED; the new mission is already pending, so hand over
+                # to it instead of declaring the mission failed.
+                self.cancel_in_progress = False
+                self.current_speed = 0.0
+                pending = self.pending_labeled_path_msg
+                self.pending_labeled_path_msg = None
+                self.replace_queue_and_send(pending)
                 return
             self.get_logger().warn(f'Goal failed with status: {result.status}. Stopping.')
             failure = ('FollowPath aborted' if result.status == GoalStatus.STATUS_ABORTED
