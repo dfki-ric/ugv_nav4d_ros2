@@ -509,6 +509,17 @@ class FollowPathClient(Node):
         self.paused = False
 
     def goal_response_callback(self, future, generation):
+        # An exception escaping this callback would kill the follower node (and
+        # the operator's Stop service with it) while the robot may be driving.
+        try:
+            self._goal_response(future, generation)
+        except Exception as e:  # noqa: BLE001 — last-resort containment
+            self.get_logger().error(f'goal_response_callback failed: {e}')
+            self.clear()
+            self.publish_status(MissionStatus.FAILED, 'Mission execution failed',
+                                f'Internal error in goal response handling: {e}')
+
+    def _goal_response(self, future, generation):
         goal_handle = future.result()
         if generation != self.goal_generation:
             # A newer path was sent before this acceptance came back. Never
@@ -534,6 +545,16 @@ class FollowPathClient(Node):
             lambda f, gen=generation: self.get_result_callback(f, gen))
 
     def get_result_callback(self, future, generation):
+        # See goal_response_callback: never let an exception escape into rclpy.
+        try:
+            self._goal_result(future, generation)
+        except Exception as e:  # noqa: BLE001 — last-resort containment
+            self.get_logger().error(f'get_result_callback failed: {e}')
+            self.clear()
+            self.publish_status(MissionStatus.FAILED, 'Mission execution failed',
+                                f'Internal error in goal result handling: {e}')
+
+    def _goal_result(self, future, generation):
         result = future.result()
         if generation != self.goal_generation:
             # Late result of a goal that was already replaced (Nav2 reports a

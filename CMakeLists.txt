@@ -24,10 +24,9 @@ find_package(Boost REQUIRED COMPONENTS system filesystem serialization)
 find_package(rosidl_default_generators REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ugv_nav4d REQUIRED IMPORTED_TARGET ugv_nav4d)
-pkg_check_modules(ugv_nav4d_gui REQUIRED IMPORTED_TARGET ugv_nav4d_gui-qt5)
 
 # Strip conflicting C++ standard flags exported by the Rock dependencies
-foreach(pkg_target IN ITEMS PkgConfig::ugv_nav4d PkgConfig::ugv_nav4d_gui)
+foreach(pkg_target IN ITEMS PkgConfig::ugv_nav4d)
   if (TARGET ${pkg_target})
     get_target_property(pkg_opts ${pkg_target} INTERFACE_COMPILE_OPTIONS)
     if (pkg_opts)
@@ -209,26 +208,6 @@ target_link_libraries(ugv_nav4d_ros2_node PRIVATE
   ${PROJECT_NAME}
 )
 
-add_executable(ugv_nav4d_ros2_gui_node
-	src/ugv_nav4d_ros2_gui_node.cpp
-)
-
-target_link_libraries(ugv_nav4d_ros2_gui_node
-  ${PROJECT_NAME}
-  PkgConfig::ugv_nav4d_gui
-  Qt5::Core
-  Qt5::Widgets
-)
-
-ament_target_dependencies(ugv_nav4d_ros2_gui_node ${THIS_PACKAGE_INCLUDE_DEPENDS})
-
-set_target_properties(ugv_nav4d_ros2_gui_node PROPERTIES
-  CXX_STANDARD 17
-  CXX_STANDARD_REQUIRED ON
-)
-
-target_compile_options(ugv_nav4d_ros2_gui_node PRIVATE -std=c++17)
-
 install(TARGETS ${PROJECT_NAME}
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -270,10 +249,6 @@ install(TARGETS ugv_nav4d_ros2_inspect_tool
   RUNTIME DESTINATION bin)
 
 install(TARGETS ugv_nav4d_ros2_node 
-	DESTINATION lib/${PROJECT_NAME}
-)
-
-install(TARGETS ugv_nav4d_ros2_gui_node 
 	DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -3,7 +3,6 @@ from launch_ros.actions import Node, SetParameter
 from launch.substitutions import LaunchConfiguration
 from ament_index_python.packages import get_package_share_directory
 from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
-from launch.conditions import IfCondition, UnlessCondition
 
 import os
 
@@ -65,14 +64,6 @@ def generate_launch_description():
         )
     )    
 
-    declared_arguments.append(
-        DeclareLaunchArgument(
-            'use_gui',
-            default_value='false',
-            description='Whether to run the planner with the integrated Qt GUI'
-        )
-    )
-
     # 1. Headless planner node
     declared_arguments.append(
         Node(
@@ -80,24 +71,6 @@ def generate_launch_description():
         executable="ugv_nav4d_ros2_node",
         name="ugv_nav4d_ros2",
         output="screen",
-        condition=UnlessCondition(LaunchConfiguration("use_gui")),
-        remappings=[
-                ("/ugv_nav4d_ros2/pointcloud", LaunchConfiguration("pointcloud_topic")),
-                ("/ugv_nav4d_ros2/goal_pose", LaunchConfiguration("goal_topic")),
-                ("/ugv_nav4d_ros2/start_pose", LaunchConfiguration("pose_samples_topic")),
-            ],
-        parameters=[LaunchConfiguration("main_param_file")],
-        )
-    )
-
-    # 2. Integrated GUI planner node
-    declared_arguments.append(
-        Node(
-        package="ugv_nav4d_ros2",
-        executable="ugv_nav4d_ros2_gui_node",
-        name="ugv_nav4d_ros2",
-        output="screen",
-        condition=IfCondition(LaunchConfiguration("use_gui")),
         remappings=[
                 ("/ugv_nav4d_ros2/pointcloud", LaunchConfiguration("pointcloud_topic")),
                 ("/ugv_nav4d_ros2/goal_pose", LaunchConfiguration("goal_topic")),

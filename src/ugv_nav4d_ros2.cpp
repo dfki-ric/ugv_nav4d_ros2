@@ -2418,8 +2418,13 @@ bool PathPlannerNode::loadPlyAsMLS(const std::string& path){
             mls_map_ptr = std::make_shared<maps::grid::MLSMapSloped>(numCells, maps::grid::Vector2d(mls_res, mls_res), cfg);
             mls_map_ptr->translate(Eigen::Vector3d(mls_min_x, mls_min_y, 0));
             mls_map_ptr->mergePointCloud(*cloud_filtered, base::Transform3d::Identity());
+            return true;
         }
-        return true;
+        // A failed PLY read must NOT report success: mls_map_ptr would stay null
+        // and every consumer (initializeMLSMap, configurePlanner, publishMLSMap)
+        // would dereference it.
+        RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to read PLY '" << path << "'.");
+        return false;
     }
     RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to load MLS from '" << path << "': unknown format (expected .ply).");
     return false;
@@ -2484,10 +2489,24 @@ bool PathPlannerNode::saveMLSMapAsBin(const std::string& filename = "") {
 
     // Create a binary archive. Lock while serializing the map, since the save action runs on
     // its own thread and the MLS map may be rebuilt concurrently by the executor thread.
+    try
     {
         std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+        if (!mls_map_ptr)
+        {
+            RCLCPP_ERROR_STREAM(this->get_logger(), "Cannot save MLS map: no map loaded.");
+            return false;
+        }
         boost::archive::binary_oarchive archive(binFile);
         archive << *mls_map_ptr;
+    }
+    catch (const std::exception& ex)
+    {
+        // boost::archive throws on stream failure (disk full, permissions); an
+        // uncaught throw here would terminate the node from the action thread.
+        RCLCPP_ERROR_STREAM(this->get_logger(), "Failed to save MLS map to '"
+                            << fileToUse << "': " << ex.what());
+        return false;
     }
 
     RCLCPP_INFO_STREAM(this->get_logger(), "MLS Map saved to " << fileToUse);
@@ -2805,6 +2824,13 @@ void PathPlannerNode::publishPlannedPath(const std::vector<trajectory_follower::
                     base::Vector3d end_point, end_tangent;
                     std::tie(end_point, end_tangent) = trajectory.posSpline.getPointAndTangent(last_param);
 
+                    // A degenerate end tangent normalizes to NaN and would append
+                    // NaN poses that Nav2's controller consumes blindly.
+                    if (end_tangent.norm() < 1e-9 || !end_tangent.allFinite()) {
+                        RCLCPP_WARN_STREAM(this->get_logger(),
+                            "Skipping trajectory extension: degenerate spline end tangent.");
+                        continue;
+                    }
                     Eigen::Vector3d direction = end_tangent.normalized();
 
                     base::Vector3d ext_point_half = end_point + direction * (extension_distance * 0.5);
