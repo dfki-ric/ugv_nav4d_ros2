@@ -118,7 +118,7 @@ ugv_nav4d_ros2:
     slopeMetricScale: 1.0
     obstacleInflationMultiplier: 1.0
     partiallyTraversableMultiplier: 1.0
-    numYawSamples: 12 # yaw samples over [0,180) for partial-cell allowed orientations (12 -> 15deg step)
+    numYawSamples: 12 # yaw checks over the full circle for partial-cell allowed orientations (12 -> 30deg step), offset-independent
     #Trajectory Extension:
     extend_trajectory: true
     extension_distance: 2.0

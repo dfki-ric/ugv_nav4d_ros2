@@ -22,6 +22,10 @@
 #include <sstream>
 #include <unordered_set>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 using namespace rclcpp;
 
 namespace ugv_nav4d_ros2 {
@@ -3280,6 +3284,17 @@ void PathPlannerNode::updateParameters(){
     planner_config.epsilonSteps                     = get_parameter("epsilonSteps").as_int();
     planner_config.initialEpsilon                   = get_parameter("initialEpsilon").as_int();
     planner_config.numThreads                       = get_parameter("numThreads").as_int();
+    // One thread knob for the whole node: the traversability generator's own
+    // numThreads is overwritten with the planner's value (applied by travgen at
+    // the start of every expandAll).
+    traversability_config.numThreads                = planner_config.numThreads;
+#ifdef _OPENMP
+    // One thread budget for the whole node: the traversability generator's
+    // wave-parallel expansion runs OpenMP regions BEFORE the first plan, but
+    // ugv_nav4d only applies numThreads at Planner::plan(). Set it here so map
+    // generation is capped by the same parameter instead of grabbing all cores.
+    omp_set_num_threads(std::max(1, static_cast<int>(planner_config.numThreads)));
+#endif
     planner_config.usePathStatistics                = get_parameter("usePathStatistics").as_bool();
     planner_config.searchUntilFirstSolution         = get_parameter("searchUntilFirstSolution").as_bool();
     planner_config.corridorWidth                    = get_parameter("corridorWidth").as_double();

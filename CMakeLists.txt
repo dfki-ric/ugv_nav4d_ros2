@@ -96,6 +96,13 @@ target_link_libraries(${PROJECT_NAME}
   ${ugv_nav4d_LDFLAGS}
   Eigen3::Eigen
 )
+# omp_set_num_threads(numThreads) in ugv_nav4d_ros2.cpp caps the traversability
+# generator's wave-parallel expansion with the SAME numThreads parameter the
+# planner uses. Without OpenMP the call compiles out (and travgen runs serial).
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(${PROJECT_NAME} OpenMP::OpenMP_CXX)
+endif()
 
 qt5_wrap_cpp(MOC_TRAV_MAP_FILES include/ugv_nav4d_ros2_trav_map_plugin/TravMapDisplay.hpp)
 # Create the plugin library
