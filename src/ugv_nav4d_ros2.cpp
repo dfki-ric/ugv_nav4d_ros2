@@ -83,6 +83,12 @@ PathPlannerNode::PathPlannerNode()
     labeled_path_publisher = this->create_publisher<ugv_nav4d_ros2::msg::LabeledPathArray>("/ugv_nav4d_ros2/labeled_path_segments", 10);
     colored_path_publisher = this->create_publisher<visualization_msgs::msg::MarkerArray>(
             "/ugv_nav4d_ros2/mission_path", rclcpp::QoS(1).transient_local());
+    // Previews get their own topics so a fresh plan never visually replaces the
+    // route the follower is currently driving; Execute promotes the preview onto
+    // the executing topics above.
+    preview_path_publisher = this->create_publisher<nav_msgs::msg::Path>("/ugv_nav4d_ros2/preview_path", 10);
+    preview_colored_path_publisher = this->create_publisher<visualization_msgs::msg::MarkerArray>(
+            "/ugv_nav4d_ros2/preview_mission_path", rclcpp::QoS(1).transient_local());
     // Latched: the map is published only on discrete events (load, regenerate,
     // zone edits), so late-joining subscribers (field_operations readiness,
     // RViz) must still receive the last map without a manual republish.
@@ -151,6 +157,9 @@ void PathPlannerNode::setupSubscriptions()
     remove_last_waypoint_service = this->create_service<std_srvs::srv::Trigger>(
             "/ugv_nav4d_ros2/remove_last_waypoint", std::bind(&PathPlannerNode::removeLastWaypointCallback, this, std::placeholders::_1, std::placeholders::_2));
 
+    reverse_waypoints_service = this->create_service<std_srvs::srv::Trigger>(
+            "/ugv_nav4d_ros2/reverse_waypoints", std::bind(&PathPlannerNode::reverseWaypointsCallback, this, std::placeholders::_1, std::placeholders::_2));
+
     edit_waypoint_service = this->create_service<ugv_nav4d_ros2::srv::EditWaypoint>(
             "/ugv_nav4d_ros2/edit_waypoint", std::bind(&PathPlannerNode::editWaypointCallback, this, std::placeholders::_1, std::placeholders::_2));
 
@@ -177,9 +186,9 @@ void PathPlannerNode::setupSubscriptions()
             "/ugv_nav4d_ros2/replan_current_mission", std::bind(&PathPlannerNode::replanCurrentMissionCallback, this, std::placeholders::_1, std::placeholders::_2));
     recover_out_of_obstacle_service = this->create_service<std_srvs::srv::Trigger>(
             "/ugv_nav4d_ros2/recover_out_of_obstacle", std::bind(&PathPlannerNode::recoverOutOfObstacleCallback, this, std::placeholders::_1, std::placeholders::_2));
-    save_mission_service = this->create_service<std_srvs::srv::Trigger>(
+    save_mission_service = this->create_service<ugv_nav4d_ros2::srv::MissionFile>(
             "/ugv_nav4d_ros2/save_mission", std::bind(&PathPlannerNode::saveMissionCallback, this, std::placeholders::_1, std::placeholders::_2));
-    load_mission_service = this->create_service<std_srvs::srv::Trigger>(
+    load_mission_service = this->create_service<ugv_nav4d_ros2::srv::MissionFile>(
             "/ugv_nav4d_ros2/load_mission", std::bind(&PathPlannerNode::loadMissionCallback, this, std::placeholders::_1, std::placeholders::_2));
 
     // Execution gate: planning only publishes a preview (path / labeled_path_segments /
@@ -411,6 +420,7 @@ void PathPlannerNode::regenerateMapsCallback(
     std_msgs::msg::Bool route_valid;
     route_valid.data = false;
     route_valid_publisher->publish(route_valid);
+    clearExecutingPathDisplay();
 
     publishStatus("Regenerating MLS and traversability maps...");
     if (get_parameter("load_mls_from_file").as_bool())
@@ -632,6 +642,34 @@ void PathPlannerNode::removeLastWaypointCallback(const std::shared_ptr<std_srvs:
     publishStatus("Removed last waypoint; " + response->message);
 }
 
+void PathPlannerNode::reverseWaypointsCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+                                               std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    if (waypoint_queue.empty()){
+        response->success = false;
+        response->message = "No waypoints queued.";
+        return;
+    }
+    std::reverse(waypoint_queue.begin(), waypoint_queue.end());
+    // Flip each heading half a turn: traversing the route the other way means
+    // the robot passes every waypoint facing the opposite direction.
+    const Eigen::Quaterniond half_turn(Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitZ()));
+    for (auto& wp : waypoint_queue){
+        Eigen::Quaterniond q(wp.orientation.w, wp.orientation.x, wp.orientation.y, wp.orientation.z);
+        q = (q * half_turn).normalized();
+        wp.orientation.w = q.w();
+        wp.orientation.x = q.x();
+        wp.orientation.y = q.y();
+        wp.orientation.z = q.z();
+    }
+    publishWaypointMarkers();
+    response->success = true;
+    response->message = "Reversed " + std::to_string(waypoint_queue.size()) +
+                        " waypoint(s) and flipped their headings; set a goal and plan.";
+    RCLCPP_INFO_STREAM(this->get_logger(), response->message);
+    publishStatus(response->message);
+}
+
 void PathPlannerNode::editWaypointCallback(const std::shared_ptr<ugv_nav4d_ros2::srv::EditWaypoint::Request> request,
                                            std::shared_ptr<ugv_nav4d_ros2::srv::EditWaypoint::Response> response){
     std::lock_guard<std::recursive_mutex> lock(planner_mutex);
@@ -728,10 +766,11 @@ void PathPlannerNode::planThroughWaypoints(bool record_mission){
     const bool dumpOnError = get_parameter("dumpOnError").as_bool();
     const bool dumpOnSuccess = get_parameter("dumpOnSuccess").as_bool();
 
+    // Anchor recording is deferred to executePathCallback (see plan()).
+    pending_records_mission = record_mission;
     if (record_mission){
-        last_mission_start = start_pose_rbs;
-        last_mission_goal = goal_pose_rbs;
-        has_last_mission_start = true;
+        pending_mission_start = start_pose_rbs;
+        pending_mission_goal = goal_pose_rbs;
     }
 
     RCLCPP_INFO_STREAM(this->get_logger(), "Planner state: Planning through "
@@ -1079,22 +1118,23 @@ void PathPlannerNode::recoverOutOfObstacleCallback(
 }
 
 void PathPlannerNode::saveMissionCallback(
-        const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
-        std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+        const std::shared_ptr<ugv_nav4d_ros2::srv::MissionFile::Request> request,
+        std::shared_ptr<ugv_nav4d_ros2::srv::MissionFile::Response> response){
     std::lock_guard<std::recursive_mutex> lock(planner_mutex);
-    const std::string filename = get_parameter("mission_file").as_string();
+    const std::string filename = request->filename.empty()
+        ? get_parameter("mission_file").as_string()
+        : request->filename;
     std::ofstream out(filename);
     if (!out){
         response->success = false;
         response->message = "Cannot open mission file for writing: " + filename;
         return;
     }
-    out << "UGV_NAV4D_MISSION_V1\n";
-    const auto& g = goal_pose_rbs;
-    out << "goal " << std::setprecision(17)
-        << g.position.x() << ' ' << g.position.y() << ' ' << g.position.z() << ' '
-        << g.orientation.x() << ' ' << g.orientation.y() << ' '
-        << g.orientation.z() << ' ' << g.orientation.w() << '\n';
+    // V2 stores waypoints and zones only. The goal is deliberately NOT part of a
+    // mission: it is set fresh per run (RViz / OperatorPanel), so a reloaded
+    // mission can never silently drive to yesterday's goal.
+    out << "UGV_NAV4D_MISSION_V2\n";
+    out << std::setprecision(17);
     out << "waypoints " << waypoint_queue.size() << '\n';
     for (const auto& wp : waypoint_queue){
         out << "wp " << wp.position.x << ' ' << wp.position.y << ' ' << wp.position.z << ' '
@@ -1117,25 +1157,31 @@ void PathPlannerNode::saveMissionCallback(
 }
 
 void PathPlannerNode::loadMissionCallback(
-        const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
-        std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+        const std::shared_ptr<ugv_nav4d_ros2::srv::MissionFile::Request> request,
+        std::shared_ptr<ugv_nav4d_ros2::srv::MissionFile::Response> response){
     std::lock_guard<std::recursive_mutex> lock(planner_mutex);
-    const std::string filename = get_parameter("mission_file").as_string();
+    const std::string filename = request->filename.empty()
+        ? get_parameter("mission_file").as_string()
+        : request->filename;
     std::ifstream in(filename);
     std::string token, magic;
-    if (!(in >> magic) || magic != "UGV_NAV4D_MISSION_V1"){
+    if (!(in >> magic) || (magic != "UGV_NAV4D_MISSION_V1" && magic != "UGV_NAV4D_MISSION_V2")){
         response->success = false;
         response->message = "Invalid or unreadable mission file: " + filename;
         return;
     }
-    base::samples::RigidBodyState loaded_goal;
-    if (!(in >> token) || token != "goal" ||
-        !(in >> loaded_goal.position.x() >> loaded_goal.position.y() >> loaded_goal.position.z()
-             >> loaded_goal.orientation.x() >> loaded_goal.orientation.y()
-             >> loaded_goal.orientation.z() >> loaded_goal.orientation.w())){
-        response->success = false;
-        response->message = "Mission file has an invalid goal.";
-        return;
+    if (magic == "UGV_NAV4D_MISSION_V1"){
+        // V1 files stored a goal pose; parse and DISCARD it. Missions carry only
+        // waypoints and zones — the goal is always set fresh by the operator.
+        base::samples::RigidBodyState ignored_goal;
+        if (!(in >> token) || token != "goal" ||
+            !(in >> ignored_goal.position.x() >> ignored_goal.position.y() >> ignored_goal.position.z()
+                 >> ignored_goal.orientation.x() >> ignored_goal.orientation.y()
+                 >> ignored_goal.orientation.z() >> ignored_goal.orientation.w())){
+            response->success = false;
+            response->message = "Mission file has an invalid goal.";
+            return;
+        }
     }
     size_t waypoint_count = 0;
     if (!(in >> token >> waypoint_count) || token != "waypoints"){
@@ -1210,7 +1256,6 @@ void PathPlannerNode::loadMissionCallback(
         }
         loaded_zones.push_back(zone);
     }
-    goal_pose_rbs = loaded_goal;
     waypoint_queue = std::move(loaded_waypoints);
     const bool planning_graph_changed =
         std::any_of(forbidden_zones.begin(), forbidden_zones.end(), zoneAffectsPlanning) ||
@@ -1219,7 +1264,7 @@ void PathPlannerNode::loadMissionCallback(
     publishWaypointMarkers();
     onForbiddenZonesChanged(planning_graph_changed);
     response->success = true;
-    response->message = "Mission loaded from " + filename + "; set/review the goal and plan.";
+    response->message = "Mission loaded from " + filename + " (waypoints + zones); set a goal and plan.";
     publishStatus(response->message);
 }
 
@@ -1580,6 +1625,7 @@ void PathPlannerNode::onForbiddenZonesChanged(bool planning_graph_changed,
         std_msgs::msg::Bool route_valid;
         route_valid.data = false;
         route_valid_publisher->publish(route_valid);
+        clearExecutingPathDisplay();
     }
 }
 
@@ -2588,10 +2634,12 @@ void PathPlannerNode::plan(bool record_mission){
         ~PlanningFlagGuard() { flag = false; }
     } planning_flag_guard{is_planning};
 
+    // Anchor recording is deferred to executePathCallback: a plan is only a
+    // preview, and a discarded preview must not move the return-home anchor.
+    pending_records_mission = record_mission;
     if (record_mission){
-        last_mission_start = start_pose_rbs;
-        last_mission_goal = goal_pose_rbs;
-        has_last_mission_start = true;
+        pending_mission_start = start_pose_rbs;
+        pending_mission_goal = goal_pose_rbs;
     }
 
     RCLCPP_INFO_STREAM(this->get_logger(), "Planning: start (" << start_pose_rbs.position.transpose()
@@ -2627,12 +2675,14 @@ void PathPlannerNode::publishPlannedPath(const std::vector<trajectory_follower::
 {
     ugv_nav4d_ros2::msg::LabeledPathArray labeled_path_message;
     visualization_msgs::msg::MarkerArray colored_path_message;
+    visualization_msgs::msg::MarkerArray preview_colored_message;
     auto now = this->get_clock()->now();
     const std::string world_frame = get_parameter("world_frame").as_string();
 
     visualization_msgs::msg::Marker clear_colored_path;
     clear_colored_path.action = visualization_msgs::msg::Marker::DELETEALL;
     colored_path_message.markers.push_back(clear_colored_path);
+    preview_colored_message.markers.push_back(clear_colored_path);
 
     nav_msgs::msg::Path path;
     path.header.frame_id = world_frame;
@@ -2765,6 +2815,21 @@ void PathPlannerNode::publishPlannedPath(const std::vector<trajectory_follower::
                 }
                 colored_path_message.markers.push_back(route_line);
                 colored_path_message.markers.push_back(motion_line);
+
+                // Preview variant: same geometry, unmistakably different look
+                // (translucent yellow underlay, muted motion overlay) so the
+                // operator can tell the preview from the executing route.
+                visualization_msgs::msg::Marker preview_route = route_line;
+                preview_route.ns = "preview_route";
+                preview_route.color.r = 1.0;
+                preview_route.color.g = 0.85;
+                preview_route.color.b = 0.1;
+                preview_route.color.a = 0.45;
+                visualization_msgs::msg::Marker preview_motion = motion_line;
+                preview_motion.ns = "preview_motion";
+                preview_motion.color.a = 0.8;
+                preview_colored_message.markers.push_back(preview_route);
+                preview_colored_message.markers.push_back(preview_motion);
             }
 
             for (size_t i = 0; i < parameters.size(); ++i) {
@@ -2886,12 +2951,16 @@ void PathPlannerNode::publishPlannedPath(const std::vector<trajectory_follower::
         RCLCPP_WARN_STREAM(this->get_logger(), "Planning did not succeed; publishing empty path to clear any stale trajectory.");
     }
 
-    // Publish unconditionally: on failure this clears the previously published path
-    // instead of leaving a stale trajectory on the topic.
+    // Publish unconditionally: on failure this clears the previously published
+    // PREVIEW instead of leaving a stale trajectory on the topic. Only the preview
+    // topics are touched here — the executing-route displays (path/mission_path)
+    // keep showing what the follower is driving until Execute promotes this plan.
     path.header.stamp = now;
-    combined_path_publisher->publish(path);
+    preview_path_publisher->publish(path);
     labeled_path_publisher->publish(labeled_path_message);
-    colored_path_publisher->publish(colored_path_message);
+    preview_colored_path_publisher->publish(preview_colored_message);
+    pending_display_path = path;
+    pending_display_markers = colored_path_message;
     publishRouteRisk(path, labeled_path_message);
 
     // Hold the path for the execution gate. Anything that plans (or fails to)
@@ -2900,10 +2969,11 @@ void PathPlannerNode::publishPlannedPath(const std::vector<trajectory_follower::
     has_pending_path = found_solution && !labeled_path_message.paths.empty();
     path_approved = false;
     pending_path_is_recovery = has_pending_path && is_recovery_path;
-    std_msgs::msg::Bool route_valid;
-    // Preview paths are not resumable by the follower until explicitly approved.
-    route_valid.data = false;
-    route_valid_publisher->publish(route_valid);
+    // Deliberately do NOT lower route_valid here: a new preview says nothing about
+    // the route the follower is currently driving. Lowering it made every mid-drive
+    // goal click pause the robot. The preview itself is protected by the execute
+    // gate (path_approved); route_valid is only lowered when the executing route is
+    // genuinely invalidated (map regeneration, zone changes).
     if (has_pending_path) {
         publishStatus("Path ready (" + std::to_string(pending_labeled_path.paths.size()) +
                       " segment(s)) - review in RViz, then Execute to send to the follower");
@@ -3031,6 +3101,18 @@ void PathPlannerNode::publishRouteRisk(
     route_risk_publisher->publish(risk);
 }
 
+void PathPlannerNode::clearExecutingPathDisplay(){
+    nav_msgs::msg::Path empty_path;
+    empty_path.header.frame_id = get_parameter("world_frame").as_string();
+    empty_path.header.stamp = this->get_clock()->now();
+    combined_path_publisher->publish(empty_path);
+    visualization_msgs::msg::MarkerArray clear_markers;
+    visualization_msgs::msg::Marker clear_marker;
+    clear_marker.action = visualization_msgs::msg::Marker::DELETEALL;
+    clear_markers.markers.push_back(clear_marker);
+    colored_path_publisher->publish(clear_markers);
+}
+
 bool PathPlannerNode::validatePendingPath(){
     if (!has_pending_path || !traversability_generator_ptr){
         return false;
@@ -3069,15 +3151,26 @@ bool PathPlannerNode::validatePendingPath(){
         }
         if (!valid) break;
     }
-    std_msgs::msg::Bool route_valid;
-    route_valid.data = valid && path_approved;
-    route_valid_publisher->publish(route_valid);
+    // route_valid describes the route the follower is driving. Only the approved
+    // path is that route; a pending unapproved preview must not raise or lower the
+    // flag (lowering it would pause an executing mission over a stale preview).
+    if (path_approved){
+        std_msgs::msg::Bool route_valid;
+        route_valid.data = valid;
+        route_valid_publisher->publish(route_valid);
+    }
     if (!valid){
+        const bool was_approved = path_approved;
         has_pending_path = false;
         path_approved = false;
         pending_path_is_recovery = false;
-        publishMissionStatus(ugv_nav4d_ros2::msg::MissionStatus::PAUSED,
-                             "Remaining route is no longer traversable; replan required");
+        if (was_approved){
+            clearExecutingPathDisplay();
+            publishMissionStatus(ugv_nav4d_ros2::msg::MissionStatus::PAUSED,
+                                 "Remaining route is no longer traversable; replan required");
+        } else {
+            publishStatus("Planned preview is no longer traversable; replan required.");
+        }
     }
     return valid;
 }
@@ -3093,9 +3186,29 @@ void PathPlannerNode::executePathCallback(const std::shared_ptr<std_srvs::srv::T
     }
     execute_path_publisher->publish(pending_labeled_path);
     path_approved = true;
+    // Commit the mission anchor now that the plan is actually being driven; a
+    // preview that was never executed leaves the return-home anchor untouched.
+    if (pending_records_mission){
+        last_mission_start = pending_mission_start;
+        last_mission_goal = pending_mission_goal;
+        has_last_mission_start = true;
+        pending_records_mission = false;
+    }
     std_msgs::msg::Bool route_valid;
     route_valid.data = true;
     route_valid_publisher->publish(route_valid);
+    // Promote the preview to the executing displays and clear the preview topics.
+    combined_path_publisher->publish(pending_display_path);
+    colored_path_publisher->publish(pending_display_markers);
+    nav_msgs::msg::Path empty_preview;
+    empty_preview.header.frame_id = get_parameter("world_frame").as_string();
+    empty_preview.header.stamp = this->get_clock()->now();
+    preview_path_publisher->publish(empty_preview);
+    visualization_msgs::msg::MarkerArray clear_preview;
+    visualization_msgs::msg::Marker clear_preview_marker;
+    clear_preview_marker.action = visualization_msgs::msg::Marker::DELETEALL;
+    clear_preview.markers.push_back(clear_preview_marker);
+    preview_colored_path_publisher->publish(clear_preview);
     response->success = true;
     response->message = "Path sent to follower (" +
                         std::to_string(pending_labeled_path.paths.size()) + " segment(s)).";

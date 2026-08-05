@@ -35,6 +35,7 @@
 #include "ugv_nav4d_ros2/srv/edit_waypoint.hpp"
 #include "ugv_nav4d_ros2/srv/delete_forbidden_zone.hpp"
 #include "ugv_nav4d_ros2/srv/inspect_traversability.hpp"
+#include "ugv_nav4d_ros2/srv/mission_file.hpp"
 
 #include "ugv_nav4d_ros2/msg/trav_map.hpp"
 #include "ugv_nav4d_ros2/msg/trav_patch.hpp"
@@ -127,6 +128,8 @@ private:
     void addWaypointCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
     void clearWaypointsCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                                 std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+    void reverseWaypointsCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                                  std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void removeLastWaypointCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                                     std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void publishWaypointMarkers();
@@ -139,6 +142,8 @@ private:
     void publishRouteRisk(const nav_msgs::msg::Path& path,
                           const ugv_nav4d_ros2::msg::LabeledPathArray& labeled);
     bool validatePendingPath();
+    /** Clears the executing-route displays (combined path + mission markers). */
+    void clearExecutingPathDisplay();
     void inspectTraversabilityCallback(
         const std::shared_ptr<ugv_nav4d_ros2::srv::InspectTraversability::Request> request,
         std::shared_ptr<ugv_nav4d_ros2::srv::InspectTraversability::Response> response);
@@ -146,10 +151,10 @@ private:
                                       std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void recoverOutOfObstacleCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                                       std::shared_ptr<std_srvs::srv::Trigger::Response> response);
-    void saveMissionCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
-                             std::shared_ptr<std_srvs::srv::Trigger::Response> response);
-    void loadMissionCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
-                             std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+    void saveMissionCallback(const std::shared_ptr<ugv_nav4d_ros2::srv::MissionFile::Request> request,
+                             std::shared_ptr<ugv_nav4d_ros2::srv::MissionFile::Response> response);
+    void loadMissionCallback(const std::shared_ptr<ugv_nav4d_ros2::srv::MissionFile::Request> request,
+                             std::shared_ptr<ugv_nav4d_ros2::srv::MissionFile::Response> response);
     void saveMapCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                          std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void executePathCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
@@ -247,9 +252,13 @@ private:
     sensor_msgs::msg::PointCloud2::SharedPtr latest_pointcloud;
 
     //publishers
+    //combined_path/mission_path show the EXECUTING route (published on Execute);
+    //preview_path/preview_mission_path show the latest planned PREVIEW.
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr combined_path_publisher;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr preview_path_publisher;
     rclcpp::Publisher<ugv_nav4d_ros2::msg::LabeledPathArray>::SharedPtr labeled_path_publisher;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr colored_path_publisher;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr preview_colored_path_publisher;
     rclcpp::Publisher<ugv_nav4d_ros2::msg::TravMap>::SharedPtr trav_map_publisher;
     rclcpp::Publisher<ugv_nav4d_ros2::msg::MLSMap>::SharedPtr mls_map_publisher;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr robot_pose_publisher;
@@ -268,6 +277,7 @@ private:
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_add_waypoint;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr clear_waypoints_service;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr remove_last_waypoint_service;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reverse_waypoints_service;
     rclcpp::Service<ugv_nav4d_ros2::srv::EditWaypoint>::SharedPtr edit_waypoint_service;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr waypoint_marker_publisher;
     std::vector<geometry_msgs::msg::Pose> waypoint_queue;
@@ -281,14 +291,18 @@ private:
     rclcpp::Service<ugv_nav4d_ros2::srv::InspectTraversability>::SharedPtr inspect_traversability_service;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr replan_current_mission_service;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr recover_out_of_obstacle_service;
-    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr save_mission_service;
-    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr load_mission_service;
+    rclcpp::Service<ugv_nav4d_ros2::srv::MissionFile>::SharedPtr save_mission_service;
+    rclcpp::Service<ugv_nav4d_ros2::srv::MissionFile>::SharedPtr load_mission_service;
 
     //execution gate: planned paths are only previews until confirmed
     rclcpp::Publisher<ugv_nav4d_ros2::msg::LabeledPathArray>::SharedPtr execute_path_publisher;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr execute_path_service;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr discard_path_service;
     ugv_nav4d_ros2::msg::LabeledPathArray pending_labeled_path;
+    //Executing-style rendering of the pending path, held back until Execute
+    //promotes it onto the executing display topics.
+    nav_msgs::msg::Path pending_display_path;
+    visualization_msgs::msg::MarkerArray pending_display_markers;
     bool has_pending_path{false};
     bool path_approved{false};
     bool pending_path_is_recovery{false};
@@ -313,6 +327,12 @@ private:
     base::samples::RigidBodyState last_mission_start;
     base::samples::RigidBodyState last_mission_goal;
     bool has_last_mission_start{false};
+    //Mission anchor candidates: stashed at plan time, committed to last_mission_*
+    //only when the plan is actually Executed. A discarded preview must not move
+    //the return-home anchor.
+    base::samples::RigidBodyState pending_mission_start;
+    base::samples::RigidBodyState pending_mission_goal;
+    bool pending_records_mission{false};
     bool is_return_plan{false};
 
     //tf

@@ -10,6 +10,7 @@
 
 #include "ugv_nav4d_ros2/srv/edit_waypoint.hpp"
 #include "ugv_nav4d_ros2/srv/delete_forbidden_zone.hpp"
+#include "ugv_nav4d_ros2/srv/mission_file.hpp"
 #include "ugv_nav4d_ros2/msg/mission_status.hpp"
 #include "ugv_nav4d_ros2/msg/route_risk.hpp"
 #include "ugv_nav4d_ros2/msg/system_health.hpp"
@@ -66,6 +67,7 @@ private Q_SLOTS:
     void onReturnModeChanged(int index);
     void onClearWaypoints();
     void onUndoWaypoint();
+    void onReverseWaypoints();
     void onClearZones();
     void onUndoZone();
     void onSaveMap();
@@ -111,6 +113,7 @@ private:
     QComboBox* return_mode_combo_{nullptr};
     QPushButton* clear_waypoints_button_{nullptr};
     QPushButton* undo_waypoint_button_{nullptr};
+    QPushButton* reverse_waypoints_button_{nullptr};
     QPushButton* clear_zones_button_{nullptr};
     QPushButton* undo_zone_button_{nullptr};
     QPushButton* save_map_button_{nullptr};
@@ -162,14 +165,18 @@ private:
     rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr set_return_forward_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr clear_waypoints_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr remove_last_waypoint_client_;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr reverse_waypoints_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr clear_zones_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr undo_zone_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr save_map_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr map_publish_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr regenerate_maps_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr update_footprint_client_;
-    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr save_mission_client_;
-    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr load_mission_client_;
+    rclcpp::Client<ugv_nav4d_ros2::srv::MissionFile>::SharedPtr save_mission_client_;
+    rclcpp::Client<ugv_nav4d_ros2::srv::MissionFile>::SharedPtr load_mission_client_;
+    void callMissionFile(const rclcpp::Client<ugv_nav4d_ros2::srv::MissionFile>::SharedPtr& client,
+                         const QString& filename, const QString& actionName);
+    QString last_mission_dir_;
     rclcpp::Client<controller_manager_msgs::srv::ListControllers>::SharedPtr list_controllers_client_;
     rclcpp::Client<controller_manager_msgs::srv::SwitchController>::SharedPtr switch_controller_client_;
     bool health_received_{false};

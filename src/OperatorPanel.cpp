@@ -4,6 +4,8 @@
 
 #include <QCheckBox>
 #include <QGridLayout>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QComboBox>
 #include <QPair>
 #include <QScrollArea>
@@ -117,6 +119,10 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     discard_path_button_ = new QPushButton("Discard path");
     clear_waypoints_button_ = new QPushButton("Clear waypoints");
     undo_waypoint_button_ = new QPushButton("Undo last waypoint");
+    reverse_waypoints_button_ = new QPushButton("Flip route direction");
+    reverse_waypoints_button_->setToolTip(
+        "Reverse the waypoint order and flip each waypoint heading by 180 deg,\n"
+        "so the queued route is driven in the opposite direction. Set a goal and plan afterwards.");
     clear_zones_button_ = new QPushButton("Clear zones");
     undo_zone_button_ = new QPushButton("Undo last zone");
     save_map_button_ = new QPushButton("Save MLS map");
@@ -135,16 +141,17 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     buttons->addWidget(discard_path_button_, 3, 1);
     buttons->addWidget(clear_waypoints_button_, 4, 0);
     buttons->addWidget(undo_waypoint_button_, 4, 1);
-    buttons->addWidget(clear_zones_button_, 5, 0);
-    buttons->addWidget(undo_zone_button_, 5, 1);
-    buttons->addWidget(save_map_button_, 6, 0);
-    buttons->addWidget(republish_maps_button_, 6, 1);
-    buttons->addWidget(regenerate_maps_button_, 7, 0);
-    buttons->addWidget(update_footprint_button_, 7, 1);
+    buttons->addWidget(reverse_waypoints_button_, 5, 0, 1, 2);
+    buttons->addWidget(clear_zones_button_, 6, 0);
+    buttons->addWidget(undo_zone_button_, 6, 1);
+    buttons->addWidget(save_map_button_, 7, 0);
+    buttons->addWidget(republish_maps_button_, 7, 1);
+    buttons->addWidget(regenerate_maps_button_, 8, 0);
+    buttons->addWidget(update_footprint_button_, 8, 1);
     save_mission_button_ = new QPushButton("Save mission");
     load_mission_button_ = new QPushButton("Load mission");
-    buttons->addWidget(save_mission_button_, 8, 0);
-    buttons->addWidget(load_mission_button_, 8, 1);
+    buttons->addWidget(save_mission_button_, 9, 0);
+    buttons->addWidget(load_mission_button_, 9, 1);
     plan_return_button_ = new QPushButton("Plan return");
     layout->addLayout(buttons);
 
@@ -214,6 +221,7 @@ OperatorPanel::OperatorPanel(QWidget* parent)
             this, &OperatorPanel::onReturnModeChanged);
     connect(clear_waypoints_button_, &QPushButton::clicked, this, &OperatorPanel::onClearWaypoints);
     connect(undo_waypoint_button_, &QPushButton::clicked, this, &OperatorPanel::onUndoWaypoint);
+    connect(reverse_waypoints_button_, &QPushButton::clicked, this, &OperatorPanel::onReverseWaypoints);
     connect(clear_zones_button_, &QPushButton::clicked, this, &OperatorPanel::onClearZones);
     connect(undo_zone_button_, &QPushButton::clicked, this, &OperatorPanel::onUndoZone);
     connect(save_map_button_, &QPushButton::clicked, this, &OperatorPanel::onSaveMap);
@@ -336,14 +344,15 @@ void OperatorPanel::onInitialize()
     set_return_forward_client_ = node_->create_client<std_srvs::srv::SetBool>("/ugv_nav4d_ros2/set_return_forward");
     clear_waypoints_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/clear_waypoints");
     remove_last_waypoint_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/remove_last_waypoint");
+    reverse_waypoints_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/reverse_waypoints");
     clear_zones_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/clear_forbidden_zones");
     undo_zone_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/remove_last_forbidden_zone");
     save_map_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/save_mls_map");
     map_publish_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/map_publish");
     regenerate_maps_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/regenerate_maps");
     update_footprint_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/update_footprint");
-    save_mission_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/save_mission");
-    load_mission_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/load_mission");
+    save_mission_client_ = node_->create_client<ugv_nav4d_ros2::srv::MissionFile>("/ugv_nav4d_ros2/save_mission");
+    load_mission_client_ = node_->create_client<ugv_nav4d_ros2::srv::MissionFile>("/ugv_nav4d_ros2/load_mission");
 
     list_controllers_client_ = node_->create_client<controller_manager_msgs::srv::ListControllers>(
         "/arter/ros_control/controller_manager/list_controllers");
@@ -906,6 +915,11 @@ void OperatorPanel::onClearWaypoints()
     callTrigger(clear_waypoints_client_, "Clear waypoints");
 }
 
+void OperatorPanel::onReverseWaypoints()
+{
+    callTrigger(reverse_waypoints_client_, "Flip route direction");
+}
+
 void OperatorPanel::onUndoWaypoint()
 {
     callTrigger(remove_last_waypoint_client_, "Undo waypoint");
@@ -936,14 +950,67 @@ void OperatorPanel::onRegenerateMaps()
     callTrigger(regenerate_maps_client_, "Regenerate maps");
 }
 
+void OperatorPanel::callMissionFile(const rclcpp::Client<ugv_nav4d_ros2::srv::MissionFile>::SharedPtr& client,
+                                    const QString& filename, const QString& actionName)
+{
+    if (!client || !node_)
+    {
+        return;
+    }
+    if (!client->service_is_ready())
+    {
+        setStatusText(actionName + ": service unavailable (is the planner node running?)");
+        return;
+    }
+
+    setStatusText(actionName + " requested...");
+    auto request = std::make_shared<ugv_nav4d_ros2::srv::MissionFile::Request>();
+    request->filename = filename.toStdString();
+    client->async_send_request(request,
+        [this, actionName](rclcpp::Client<ugv_nav4d_ros2::srv::MissionFile>::SharedFuture future)
+        {
+            const auto& response = future.get();
+            QString text = QString::fromStdString(response->message);
+            if (text.isEmpty())
+            {
+                text = actionName + (response->success ? " done" : " failed");
+            }
+            else if (!response->success)
+            {
+                text = actionName + " failed: " + text;
+            }
+            setStatusText(text);
+        });
+}
+
 void OperatorPanel::onSaveMission()
 {
-    callTrigger(save_mission_client_, "Save mission");
+    // File dialog runs on the robot-side rviz host; the chosen FULL path is sent
+    // to the planner node, which writes the file.
+    QString file = QFileDialog::getSaveFileName(
+        this, "Save mission (waypoints + zones)",
+        last_mission_dir_.isEmpty() ? QString("ugv_nav4d_mission.txt")
+                                    : last_mission_dir_ + "/ugv_nav4d_mission.txt",
+        "Mission files (*.txt);;All files (*)");
+    if (file.isEmpty())
+    {
+        return; // dialog cancelled
+    }
+    last_mission_dir_ = QFileInfo(file).absolutePath();
+    callMissionFile(save_mission_client_, file, "Save mission");
 }
 
 void OperatorPanel::onLoadMission()
 {
-    callTrigger(load_mission_client_, "Load mission");
+    QString file = QFileDialog::getOpenFileName(
+        this, "Load mission (waypoints + zones)", last_mission_dir_,
+        "Mission files (*.txt);;All files (*)");
+    if (file.isEmpty())
+    {
+        return; // dialog cancelled
+    }
+    last_mission_dir_ = QFileInfo(file).absolutePath();
+    callMissionFile(load_mission_client_, file, "Load mission");
 }
 
 } // namespace ugv_nav4d_ros2_operator_panel

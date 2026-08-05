@@ -75,6 +75,7 @@ rosidl_generate_interfaces("ugv_nav4d_ros2_msgs"
   "srv/EditWaypoint.srv"
   "srv/DeleteForbiddenZone.srv"
   "srv/InspectTraversability.srv"
+  "srv/MissionFile.srv"
   "action/SaveMLSMap.action"
   DEPENDENCIES geometry_msgs std_msgs nav_msgs builtin_interfaces
   LIBRARY_NAME ${PROJECT_NAME}
