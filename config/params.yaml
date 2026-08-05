@@ -60,6 +60,7 @@ ugv_nav4d_ros2:
     # curve reaches the goal directly. Requires useReedsSheppFinalPath: true.
     useReedsSheppGoalShot: true
     reedsSheppGoalShotMaxDistance: 15.0 # only attempt within this point-robot distance to goal [m]
+    reedsSheppMaxCusps: 1        # max direction changes per accepted RS curve (incl. seam flip); < 0 = unlimited
     #Motion Primitive Parameters:
     cellSkipFactor: 1.0
     destinationCircleRadius: 10

@@ -3183,6 +3183,7 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("reedsSheppMaxShortcut", 0); // <= 0 = unlimited
     declare_parameter("useReedsSheppGoalShot", false); // requires useReedsSheppFinalPath
     declare_parameter("reedsSheppGoalShotMaxDistance", 15.0);
+    declare_parameter("reedsSheppMaxCusps", 1); // max direction changes per accepted RS curve; < 0 = unlimited
 
     declare_parameter("cellSkipFactor", 0.1);
     declare_parameter("destinationCircleRadius", 6);
@@ -3332,6 +3333,7 @@ void PathPlannerNode::updateParameters(){
     planner_config.reedsSheppMaxShortcut            = get_parameter("reedsSheppMaxShortcut").as_int();
     planner_config.useReedsSheppGoalShot            = get_parameter("useReedsSheppGoalShot").as_bool();
     planner_config.reedsSheppGoalShotMaxDistance    = get_parameter("reedsSheppGoalShotMaxDistance").as_double();
+    planner_config.reedsSheppMaxCusps               = get_parameter("reedsSheppMaxCusps").as_int();
 }
 
 void PathPlannerNode::updateParametersFromConfigs(
@@ -3417,6 +3419,7 @@ void PathPlannerNode::updateParametersFromConfigs(
         rclcpp::Parameter("reedsSheppMaxShortcut", planner.reedsSheppMaxShortcut),
         rclcpp::Parameter("useReedsSheppGoalShot", planner.useReedsSheppGoalShot),
         rclcpp::Parameter("reedsSheppGoalShotMaxDistance", planner.reedsSheppGoalShotMaxDistance),
+        rclcpp::Parameter("reedsSheppMaxCusps", planner.reedsSheppMaxCusps),
     };
 
     // Setting the parameters triggers parametersCallback(), which queues them so the
