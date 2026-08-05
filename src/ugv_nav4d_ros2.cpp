@@ -958,6 +958,20 @@ static std::string nodeTypeName(traversability_generator3d::NodeType type){
     return stream.str();
 }
 
+static std::string obstacleCauseName(traversability_generator3d::ObstacleCause cause){
+    using traversability_generator3d::ObstacleCause;
+    switch(cause){
+        case ObstacleCause::NONE:          return "NONE";
+        case ObstacleCause::UNMEASURED:    return "UNMEASURED";
+        case ObstacleCause::STEEP_SLOPE:   return "STEEP_SLOPE";
+        case ObstacleCause::STEP_HEIGHT:   return "STEP_HEIGHT";
+        case ObstacleCause::INCLINE_LIMIT: return "INCLINE_LIMIT";
+        case ObstacleCause::NO_SAFE_YAW:   return "NO_SAFE_YAW";
+        case ObstacleCause::MAP_BOUNDARY:  return "MAP_BOUNDARY";
+    }
+    return "UNKNOWN";
+}
+
 void PathPlannerNode::inspectTraversabilityCallback(
         const std::shared_ptr<ugv_nav4d_ros2::srv::InspectTraversability::Request> request,
         std::shared_ptr<ugv_nav4d_ros2::srv::InspectTraversability::Response> response){
@@ -3723,6 +3737,8 @@ bool PathPlannerNode::publishTravMap(){
             patch_msg.position.z = position.z();
             patch_msg.type = static_cast<uint8_t>(n->getUserData().nodeType);
             patch_msg.type_name = nodeTypeName(n->getUserData().nodeType);
+            patch_msg.obstacle_cause = static_cast<uint8_t>(n->getUserData().obstacleCause);
+            patch_msg.obstacle_cause_name = obstacleCauseName(n->getUserData().obstacleCause);
             patch_msg.slope = n->getUserData().slope;
             patch_msg.slope_direction = n->getUserData().slopeDirectionAtan2;
             patch_msg.cost = n->getUserData().cost;
