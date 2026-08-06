@@ -86,7 +86,7 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     // common field cases.
     controllers_group_ = new QGroupBox("ros2_control controllers");
     auto* controllers_box = new QVBoxLayout;
-    controllers_status_label_ = new QLabel("(waiting for controller_manager)");
+    controllers_status_label_ = new QLabel("(press Refresh to query controllers)");
     controllers_status_label_->setWordWrap(true);
     controllers_box->addWidget(controllers_status_label_);
     controllers_layout_ = new QGridLayout;
@@ -359,10 +359,10 @@ void OperatorPanel::onInitialize()
         "/arter/ros_control/controller_manager/list_controllers");
     switch_controller_client_ = node_->create_client<controller_manager_msgs::srv::SwitchController>(
         "/arter/ros_control/controller_manager/switch_controller");
-    auto* controllers_timer = new QTimer(this);
-    connect(controllers_timer, &QTimer::timeout, this, &OperatorPanel::refreshControllers);
-    controllers_timer->start(3000);
-    refreshControllers();
+    // Controllers are queried ON DEMAND only (Refresh button, and after a
+    // switch request): a periodic ListControllers poll would cost a service
+    // round-trip over the WiFi hop every few seconds for information the
+    // operator rarely watches.
 }
 
 void OperatorPanel::setStatusText(const QString& text)
