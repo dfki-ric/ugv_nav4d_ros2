@@ -5,6 +5,7 @@
 #include <QCheckBox>
 #include <QGridLayout>
 #include <QFileDialog>
+#include <QPointer>
 #include <QFileInfo>
 #include <QComboBox>
 #include <QPair>
@@ -498,8 +499,14 @@ void OperatorPanel::refreshControllers()
     }
     auto request = std::make_shared<controller_manager_msgs::srv::ListControllers::Request>();
     list_controllers_client_->async_send_request(request,
-        [this](rclcpp::Client<controller_manager_msgs::srv::ListControllers>::SharedFuture future)
+        [this, guard = QPointer<OperatorPanel>(this)](rclcpp::Client<controller_manager_msgs::srv::ListControllers>::SharedFuture future)
         {
+            // The panel can be destroyed (rviz closed) while a request to a slow
+            // service is in flight; the response must not touch a dangling this.
+            if (!guard)
+            {
+                return;
+            }
             const auto& response = future.get();
             QVector<QPair<QString, QString>> states;
             for (const auto& controller : response->controller)
@@ -573,8 +580,14 @@ void OperatorPanel::switchControllers(const QStringList& activate, const QString
     request->strictness = controller_manager_msgs::srv::SwitchController::Request::BEST_EFFORT;
     setStatusText(actionName + " requested...");
     switch_controller_client_->async_send_request(request,
-        [this, actionName](rclcpp::Client<controller_manager_msgs::srv::SwitchController>::SharedFuture future)
+        [this, actionName, guard = QPointer<OperatorPanel>(this)](rclcpp::Client<controller_manager_msgs::srv::SwitchController>::SharedFuture future)
         {
+            // The panel can be destroyed (rviz closed) while a request to a slow
+            // service is in flight; the response must not touch a dangling this.
+            if (!guard)
+            {
+                return;
+            }
             const bool ok = future.get()->ok;
             setStatusText(actionName + (ok ? " done." : " failed (see controller_manager log)."));
             QMetaObject::invokeMethod(this, [this]() { refreshControllers(); },
@@ -666,8 +679,14 @@ void OperatorPanel::callTrigger(const rclcpp::Client<std_srvs::srv::Trigger>::Sh
     setStatusText(actionName + " requested...");
     auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
     client->async_send_request(request,
-        [this, actionName](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future)
+        [this, actionName, guard = QPointer<OperatorPanel>(this)](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future)
         {
+            // The panel can be destroyed (rviz closed) while a request to a slow
+            // service is in flight; the response must not touch a dangling this.
+            if (!guard)
+            {
+                return;
+            }
             const auto& response = future.get();
             QString text = QString::fromStdString(response->message);
             if (text.isEmpty())
@@ -741,8 +760,14 @@ void OperatorPanel::onRecoverMission()
     setStatusText("Recovery: requesting a controlled pause...");
     auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
     pause_execution_client_->async_send_request(request,
-        [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future)
+        [this, guard = QPointer<OperatorPanel>(this)](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future)
         {
+            // The panel can be destroyed (rviz closed) while a request to a slow
+            // service is in flight; the response must not touch a dangling this.
+            if (!guard)
+            {
+                return;
+            }
             const auto response = future.get();
             QMetaObject::invokeMethod(this, [this, success = response->success,
                                                    message = response->message]()
@@ -808,8 +833,14 @@ void OperatorPanel::requestNativeRecovery()
     setStatusText("Recovery: finding a native out-of-obstacle trajectory...");
     auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
     native_recovery_client_->async_send_request(request,
-        [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future)
+        [this, guard = QPointer<OperatorPanel>(this)](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future)
         {
+            // The panel can be destroyed (rviz closed) while a request to a slow
+            // service is in flight; the response must not touch a dangling this.
+            if (!guard)
+            {
+                return;
+            }
             const auto response = future.get();
             QMetaObject::invokeMethod(this, [this, success = response->success,
                                                    message = response->message]()
@@ -862,8 +893,14 @@ void OperatorPanel::onDeleteWaypoint()
     request->index = static_cast<uint32_t>(waypoint_index_spin_->value());
     request->remove = true;
     edit_waypoint_client_->async_send_request(request,
-        [this](rclcpp::Client<ugv_nav4d_ros2::srv::EditWaypoint>::SharedFuture future)
+        [this, guard = QPointer<OperatorPanel>(this)](rclcpp::Client<ugv_nav4d_ros2::srv::EditWaypoint>::SharedFuture future)
         {
+            // The panel can be destroyed (rviz closed) while a request to a slow
+            // service is in flight; the response must not touch a dangling this.
+            if (!guard)
+            {
+                return;
+            }
             setStatusText(QString::fromStdString(future.get()->message));
         });
 }
@@ -882,8 +919,14 @@ void OperatorPanel::onDeleteZone()
     auto request = std::make_shared<ugv_nav4d_ros2::srv::DeleteForbiddenZone::Request>();
     request->index = static_cast<uint32_t>(zone_index_spin_->value());
     delete_zone_client_->async_send_request(request,
-        [this](rclcpp::Client<ugv_nav4d_ros2::srv::DeleteForbiddenZone>::SharedFuture future)
+        [this, guard = QPointer<OperatorPanel>(this)](rclcpp::Client<ugv_nav4d_ros2::srv::DeleteForbiddenZone>::SharedFuture future)
         {
+            // The panel can be destroyed (rviz closed) while a request to a slow
+            // service is in flight; the response must not touch a dangling this.
+            if (!guard)
+            {
+                return;
+            }
             setStatusText(QString::fromStdString(future.get()->message));
         });
 }
@@ -904,8 +947,14 @@ void OperatorPanel::onReturnModeChanged(int index)
     auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
     request->data = (index == 0);
     set_return_forward_client_->async_send_request(request,
-        [this](rclcpp::Client<std_srvs::srv::SetBool>::SharedFuture future)
+        [this, guard = QPointer<OperatorPanel>(this)](rclcpp::Client<std_srvs::srv::SetBool>::SharedFuture future)
         {
+            // The panel can be destroyed (rviz closed) while a request to a slow
+            // service is in flight; the response must not touch a dangling this.
+            if (!guard)
+            {
+                return;
+            }
             setStatusText(QString::fromStdString(future.get()->message));
         });
 }
@@ -967,8 +1016,14 @@ void OperatorPanel::callMissionFile(const rclcpp::Client<ugv_nav4d_ros2::srv::Mi
     auto request = std::make_shared<ugv_nav4d_ros2::srv::MissionFile::Request>();
     request->filename = filename.toStdString();
     client->async_send_request(request,
-        [this, actionName](rclcpp::Client<ugv_nav4d_ros2::srv::MissionFile>::SharedFuture future)
+        [this, actionName, guard = QPointer<OperatorPanel>(this)](rclcpp::Client<ugv_nav4d_ros2::srv::MissionFile>::SharedFuture future)
         {
+            // The panel can be destroyed (rviz closed) while a request to a slow
+            // service is in flight; the response must not touch a dangling this.
+            if (!guard)
+            {
+                return;
+            }
             const auto& response = future.get();
             QString text = QString::fromStdString(response->message);
             if (text.isEmpty())

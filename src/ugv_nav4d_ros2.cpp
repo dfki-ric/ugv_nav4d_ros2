@@ -667,6 +667,11 @@ void PathPlannerNode::reverseWaypointsCallback(const std::shared_ptr<std_srvs::s
     const Eigen::Quaterniond half_turn(Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitZ()));
     for (auto& wp : waypoint_queue){
         Eigen::Quaterniond q(wp.orientation.w, wp.orientation.x, wp.orientation.y, wp.orientation.z);
+        //A degenerate quaternion (all zeros / non-finite) would normalize to NaN
+        //and poison the next plan with a NaN heading; treat it as identity.
+        if (!q.coeffs().allFinite() || q.norm() < 1e-6){
+            q = Eigen::Quaterniond::Identity();
+        }
         q = (q * half_turn).normalized();
         wp.orientation.w = q.w();
         wp.orientation.x = q.x();
@@ -1224,6 +1229,21 @@ void PathPlannerNode::loadMissionCallback(
             response->message = "Mission file has an invalid waypoint.";
             return;
         }
+        //Reject degenerate orientations (a zero quaternion normalizes to NaN and
+        //would poison later planning); normalize slightly-off ones.
+        const double quat_norm = std::sqrt(
+            wp.orientation.x * wp.orientation.x + wp.orientation.y * wp.orientation.y +
+            wp.orientation.z * wp.orientation.z + wp.orientation.w * wp.orientation.w);
+        if (!std::isfinite(quat_norm) || quat_norm < 1e-6 ||
+            !std::isfinite(wp.position.x + wp.position.y + wp.position.z)){
+            response->success = false;
+            response->message = "Mission file has a waypoint with an invalid pose.";
+            return;
+        }
+        wp.orientation.x /= quat_norm;
+        wp.orientation.y /= quat_norm;
+        wp.orientation.z /= quat_norm;
+        wp.orientation.w /= quat_norm;
         loaded_waypoints.push_back(wp);
     }
     size_t zone_count = 0;
@@ -3130,7 +3150,14 @@ void PathPlannerNode::publishRouteRisk(
 }
 
 void PathPlannerNode::inspectOrientationsCallback(const geometry_msgs::msg::PolygonStamped::SharedPtr msg){
-    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    //try_to_lock: this is a purely informational query. Blocking here while a
+    //long plan holds the mutex would silently stall every service behind this
+    //callback for up to maxTime seconds.
+    std::unique_lock<std::recursive_mutex> lock(planner_mutex, std::try_to_lock);
+    if (!lock.owns_lock()){
+        publishStatus("Orientation inspection: planner is busy, try again in a moment.");
+        return;
+    }
 
     visualization_msgs::msg::MarkerArray markers;
     visualization_msgs::msg::Marker clear_marker;
