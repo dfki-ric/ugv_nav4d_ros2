@@ -29,6 +29,17 @@
   </class>
 </library>
 
+<library path="ugv_nav4d_ros2_inspect_orientations_tool">
+  <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_inspect_orientations_tool::InspectOrientationsTool"
+         base_class_type="rviz_common::Tool">
+    <description>
+      Selects a polygonal region on the map; the planner node renders the
+      allowed-orientation wedges of every partially traversable cell inside it.
+      Right-click with no vertices clears the markers.
+    </description>
+  </class>
+</library>
+
 <library path="ugv_nav4d_ros2_waypoint3d_tool">
   <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_waypoint3d_tool::Waypoint3DTool"
          base_class_type="rviz_common::Tool">

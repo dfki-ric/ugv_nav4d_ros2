@@ -142,6 +142,9 @@ private:
     void publishRouteRisk(const nav_msgs::msg::Path& path,
                           const ugv_nav4d_ros2::msg::LabeledPathArray& labeled);
     bool validatePendingPath();
+    //Orientation inspection: render allowed-orientation wedges for all
+    //partially traversable cells inside an operator-drawn region.
+    void inspectOrientationsCallback(const geometry_msgs::msg::PolygonStamped::SharedPtr msg);
     /** Clears the executing-route displays (combined path + mission markers). */
     void clearExecutingPathDisplay();
     void inspectTraversabilityCallback(
@@ -306,6 +309,8 @@ private:
     bool has_pending_path{false};
     bool path_approved{false};
     bool pending_path_is_recovery{false};
+    rclcpp::Subscription<geometry_msgs::msg::PolygonStamped>::SharedPtr inspect_orientations_sub;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr allowed_orientation_marker_publisher;
 
     //forbidden zones (keep-out): applied to the trav map after every regeneration
     rclcpp::Subscription<ugv_nav4d_ros2::msg::ForbiddenZone>::SharedPtr sub_add_forbidden_zone;

@@ -1,4 +1,6 @@
 #include "ugv_nav4d_ros2.hpp"
+#include <unordered_map>
+#include <unordered_set>
 #include "util_functions.hpp"
 
 #include <pcl/io/ply_io.h>
@@ -190,6 +192,15 @@ void PathPlannerNode::setupSubscriptions()
             "/ugv_nav4d_ros2/save_mission", std::bind(&PathPlannerNode::saveMissionCallback, this, std::placeholders::_1, std::placeholders::_2));
     load_mission_service = this->create_service<ugv_nav4d_ros2::srv::MissionFile>(
             "/ugv_nav4d_ros2/load_mission", std::bind(&PathPlannerNode::loadMissionCallback, this, std::placeholders::_1, std::placeholders::_2));
+
+    // Orientation inspection: the rviz tool publishes a polygon, the node
+    // answers with allowed-orientation wedges for the partially traversable
+    // cells inside it. Latched so a display restart keeps the last answer.
+    inspect_orientations_sub = create_subscription<geometry_msgs::msg::PolygonStamped>(
+            "/ugv_nav4d_ros2/inspect_orientations_region", 10,
+            std::bind(&PathPlannerNode::inspectOrientationsCallback, this, std::placeholders::_1));
+    allowed_orientation_marker_publisher = this->create_publisher<visualization_msgs::msg::MarkerArray>(
+            "/ugv_nav4d_ros2/allowed_orientation_markers", rclcpp::QoS(1).transient_local());
 
     // Execution gate: planning only publishes a preview (path / labeled_path_segments /
     // colored_path). The follower listens on execute_path_segments, which is only
@@ -2831,14 +2842,17 @@ void PathPlannerNode::publishPlannedPath(const std::vector<trajectory_follower::
                 colored_path_message.markers.push_back(motion_line);
 
                 // Preview variant: same geometry, unmistakably different look
-                // (translucent yellow underlay, muted motion overlay) so the
-                // operator can tell the preview from the executing route.
+                // (magenta underlay, muted motion overlay) so the operator can
+                // tell the preview from the executing route. Magenta appears in
+                // no travmap patch type, no MLS colormap and no other path
+                // color, and it keeps contrast on the green traversable
+                // patches where white/yellow wash out.
                 visualization_msgs::msg::Marker preview_route = route_line;
                 preview_route.ns = "preview_route";
                 preview_route.color.r = 1.0;
-                preview_route.color.g = 0.85;
-                preview_route.color.b = 0.1;
-                preview_route.color.a = 0.45;
+                preview_route.color.g = 0.0;
+                preview_route.color.b = 0.9;
+                preview_route.color.a = 0.6;
                 visualization_msgs::msg::Marker preview_motion = motion_line;
                 preview_motion.ns = "preview_motion";
                 preview_motion.color.a = 0.8;
@@ -3113,6 +3127,138 @@ void PathPlannerNode::publishRouteRisk(
     if (!risk.warnings.empty()) summary << ", " << risk.warnings.size() << " warning(s)";
     risk.summary = summary.str();
     route_risk_publisher->publish(risk);
+}
+
+void PathPlannerNode::inspectOrientationsCallback(const geometry_msgs::msg::PolygonStamped::SharedPtr msg){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+
+    visualization_msgs::msg::MarkerArray markers;
+    visualization_msgs::msg::Marker clear_marker;
+    clear_marker.action = visualization_msgs::msg::Marker::DELETEALL;
+    markers.markers.push_back(clear_marker);
+
+    //An empty region is the explicit CLEAR request from the tool.
+    if (msg->polygon.points.size() < 3){
+        allowed_orientation_marker_publisher->publish(markers);
+        publishStatus("Orientation markers cleared.");
+        return;
+    }
+    const std::string world_frame = normalizedFrame(get_parameter("world_frame").as_string());
+    const std::string region_frame = normalizedFrame(msg->header.frame_id);
+    if (!region_frame.empty() && region_frame != world_frame){
+        publishStatus("Orientation inspection rejected: RViz fixed frame must match " + world_frame);
+        return;
+    }
+    if (!traversability_generator_ptr || !got_map){
+        publishStatus("Orientation inspection: traversability map is unavailable.");
+        return;
+    }
+
+    //Region polygon (XY) + reference height from the clicked vertices, so the
+    //inspection stays on the storey the operator clicked on.
+    std::vector<geometry_msgs::msg::Point> polygon;
+    double ref_height = 0.0;
+    for (const auto& p : msg->polygon.points){
+        geometry_msgs::msg::Point q;
+        q.x = p.x;
+        q.y = p.y;
+        q.z = p.z;
+        polygon.push_back(q);
+        ref_height += p.z;
+    }
+    ref_height /= static_cast<double>(polygon.size());
+
+    const auto& trav_map_3d = traversability_generator_ptr->getTraversabilityMap();
+    const double wedge_radius = 0.45 * get_parameter("grid_resolution").as_double();
+    constexpr size_t MAX_CELLS = 2000; //marker-count guard for huge selections
+
+    visualization_msgs::msg::Marker wedges;
+    wedges.header.frame_id = get_parameter("world_frame").as_string();
+    wedges.header.stamp = this->get_clock()->now();
+    wedges.ns = "allowed_orientations";
+    wedges.id = 0;
+    wedges.type = visualization_msgs::msg::Marker::LINE_LIST;
+    wedges.action = visualization_msgs::msg::Marker::ADD;
+    wedges.pose.orientation.w = 1.0;
+    wedges.scale.x = 0.03;
+    wedges.color.r = 0.2;
+    wedges.color.g = 1.0;
+    wedges.color.b = 0.3;
+    wedges.color.a = 1.0;
+
+    size_t cells = 0;
+    bool truncated = false;
+    for(const maps::grid::LevelList<traversability_generator3d::TravGenNode*>& level : trav_map_3d)
+    {
+        for(const traversability_generator3d::TravGenNode* node : level)
+        {
+            if (node->getUserData().nodeType != traversability_generator3d::NodeType::PARTIALLY_TRAVERSABLE){
+                continue;
+            }
+            if (std::abs(node->getHeight() - ref_height) > traversability_config.robotHeight){
+                continue; //other storey
+            }
+            Eigen::Vector3d position;
+            trav_map_3d.fromGrid(node->getIndex(), position, node->getHeight(), true);
+            if (!pointInPolygonXY(position.x(), position.y(), polygon)){
+                continue;
+            }
+            if (cells >= MAX_CELLS){
+                truncated = true;
+                break;
+            }
+            ++cells;
+
+            geometry_msgs::msg::Point center;
+            center.x = position.x();
+            center.y = position.y();
+            center.z = position.z() + 0.08;
+
+            //One wedge per allowed interval: two radial edges + an arc,
+            //as LINE_LIST segment pairs.
+            for (const auto& allowed : node->getUserData().allowedOrientations){
+                const double start = allowed.getStart().getRad();
+                const double width = allowed.getWidth();
+                const int arc_steps = std::max(2, static_cast<int>(std::ceil(width / 0.35)));
+                geometry_msgs::msg::Point prev;
+                for (int k = 0; k <= arc_steps; ++k){
+                    const double angle = start + width * static_cast<double>(k) / arc_steps;
+                    geometry_msgs::msg::Point rim;
+                    rim.x = center.x + wedge_radius * std::cos(angle);
+                    rim.y = center.y + wedge_radius * std::sin(angle);
+                    rim.z = center.z;
+                    if (k == 0 || k == arc_steps){
+                        //radial edge marking the interval boundary
+                        wedges.points.push_back(center);
+                        wedges.points.push_back(rim);
+                    }
+                    if (k > 0){
+                        wedges.points.push_back(prev);
+                        wedges.points.push_back(rim);
+                    }
+                    prev = rim;
+                }
+            }
+        }
+        if (truncated){
+            break;
+        }
+    }
+
+    if (!wedges.points.empty()){
+        markers.markers.push_back(wedges);
+    }
+    allowed_orientation_marker_publisher->publish(markers);
+    std::ostringstream status;
+    status << "Orientation inspection: " << cells << " partially traversable cell(s) in the region";
+    if (truncated){
+        status << " (display capped at " << MAX_CELLS << ")";
+    }
+    if (cells == 0){
+        status << " - nothing to show";
+    }
+    status << ".";
+    publishStatus(status.str());
 }
 
 void PathPlannerNode::clearExecutingPathDisplay(){

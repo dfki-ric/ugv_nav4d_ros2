@@ -163,6 +163,20 @@ target_link_libraries(ugv_nav4d_ros2_forbidden_zone_tool
   Qt5::Widgets
 )
 
+qt5_wrap_cpp(MOC_INSPECT_ORIENTATIONS_TOOL_FILES include/ugv_nav4d_ros2_inspect_orientations_tool/InspectOrientationsTool.hpp)
+# Create the orientation-inspection tool plugin library
+add_library(ugv_nav4d_ros2_inspect_orientations_tool SHARED src/InspectOrientationsTool.cpp ${MOC_INSPECT_ORIENTATIONS_TOOL_FILES})
+target_link_libraries(ugv_nav4d_ros2_inspect_orientations_tool "${cpp_typesupport_target}")
+ament_target_dependencies(ugv_nav4d_ros2_inspect_orientations_tool  ${THIS_PACKAGE_INCLUDE_DEPENDS})
+target_include_directories(ugv_nav4d_ros2_inspect_orientations_tool PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/ugv_nav4d_ros2_inspect_orientations_tool/>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(ugv_nav4d_ros2_inspect_orientations_tool
+  Qt5::Core
+  Qt5::Widgets
+)
+
 qt5_wrap_cpp(MOC_OPERATOR_PANEL_FILES include/ugv_nav4d_ros2_operator_panel/OperatorPanel.hpp)
 # Create the panel plugin library
 add_library(ugv_nav4d_ros2_operator_panel SHARED src/OperatorPanel.cpp ${MOC_OPERATOR_PANEL_FILES})
@@ -240,6 +254,11 @@ install(TARGETS ugv_nav4d_ros2_operator_panel
   RUNTIME DESTINATION bin)
 
 install(TARGETS ugv_nav4d_ros2_forbidden_zone_tool
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+
+install(TARGETS ugv_nav4d_ros2_inspect_orientations_tool
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
