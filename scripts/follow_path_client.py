@@ -435,6 +435,31 @@ class FollowPathClient(Node):
         text.text = f'{deviation:.2f} m / {limit:.1f} m'
         markers.markers.append(text)
 
+        # Big, unmissable readout floating well above the robot model and the
+        # travmap clutter. White in the OK state (readable on the green cells
+        # where green text vanishes), yellow near the limit, red at breach.
+        big = Marker()
+        big.header.frame_id = frame_id
+        big.header.stamp = text.header.stamp
+        big.ns = 'path_deviation_big'
+        big.id = 2
+        big.type = Marker.TEXT_VIEW_FACING
+        big.action = Marker.ADD
+        big.pose.position.x = rx
+        big.pose.position.y = ry
+        big.pose.position.z = rz + 4.5
+        big.pose.orientation.w = 1.0
+        big.scale.z = 1.4
+        if ratio >= 1.0:
+            big.color.r, big.color.g, big.color.b = 1.0, 0.2, 0.2
+        elif ratio >= 0.5:
+            big.color.r, big.color.g, big.color.b = 1.0, 0.8, 0.0
+        else:
+            big.color.r, big.color.g, big.color.b = 1.0, 1.0, 1.0
+        big.color.a = 1.0
+        big.text = f'DEV {deviation:.2f} / {limit:.1f} m'
+        markers.markers.append(big)
+
         self.deviation_marker_pub.publish(markers)
         self.deviation_markers_active = True
 
