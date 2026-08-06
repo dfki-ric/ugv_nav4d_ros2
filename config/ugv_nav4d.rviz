@@ -6737,9 +6737,9 @@ Visualization Manager:
       Visual Enabled: true
     - Alpha: 1
       Class: rviz_default_plugins/Polygon
-      Color: 25; 255; 0
+      Color: 255; 0; 0
       Enabled: true
-      Name: Polygon
+      Name: FootprintReal
       Topic:
         Depth: 5
         Durability Policy: Volatile
