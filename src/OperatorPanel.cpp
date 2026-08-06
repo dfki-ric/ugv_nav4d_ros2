@@ -28,6 +28,11 @@ namespace ugv_nav4d_ros2
 namespace ugv_nav4d_ros2_operator_panel
 {
 
+//Drive controllers the follower needs; activating an already-active
+//controller is a BEST_EFFORT no-op, so this set is safe to (re)apply.
+static const QStringList kNavigationControllers = {
+    "steer_position_controller", "wheel_velocity_controller", "steering_mode_controller"};
+
 OperatorPanel::OperatorPanel(QWidget* parent)
 : rviz_common::Panel(parent)
 {
@@ -236,9 +241,7 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     connect(refresh_controllers_button_, &QPushButton::clicked, this,
             &OperatorPanel::refreshControllers);
     connect(nav_controllers_button_, &QPushButton::clicked, this, [this]() {
-        switchControllers({"steer_position_controller", "wheel_velocity_controller",
-                           "steering_mode_controller"},
-                          {}, "Enable navigation controllers");
+        switchControllers(kNavigationControllers, {}, "Enable navigation controllers");
     });
     updateExecuteEnabled();
 }
@@ -870,7 +873,39 @@ void OperatorPanel::onReplanMission()
 
 void OperatorPanel::onExecutePath()
 {
+    //Send the path FIRST, then activate the navigation controller set right
+    //after (operator-chosen order): the follower/goal handshake takes longer
+    //than the controller switch, so the controllers are up before the first
+    //command lands, and Execute is never delayed by the switch round-trip.
+    //BEST_EFFORT makes the activation a no-op when they already run; without
+    //a controller_manager (bench/sim) the switch is skipped entirely.
     callTrigger(execute_path_client_, "Execute path");
+
+    if (switch_controller_client_ && switch_controller_client_->service_is_ready())
+    {
+        auto request = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
+        for (const auto& name : kNavigationControllers)
+        {
+            request->activate_controllers.push_back(name.toStdString());
+        }
+        request->strictness = controller_manager_msgs::srv::SwitchController::Request::BEST_EFFORT;
+        switch_controller_client_->async_send_request(request,
+            [this, guard = QPointer<OperatorPanel>(this)](rclcpp::Client<controller_manager_msgs::srv::SwitchController>::SharedFuture future)
+            {
+                if (!guard)
+                {
+                    return;
+                }
+                const bool ok = future.get()->ok;
+                QMetaObject::invokeMethod(this, [this, ok]() {
+                    refreshControllers();
+                    if (!ok)
+                    {
+                        setStatusText("WARNING: path executing but the navigation controllers could not be enabled.");
+                    }
+                }, Qt::QueuedConnection);
+            });
+    }
 }
 
 void OperatorPanel::onDiscardPath()
