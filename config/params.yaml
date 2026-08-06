@@ -1,10 +1,9 @@
 ugv_nav4d_ros2:
   ros__parameters:
     read_pose_from_topic: false
-    load_mls_from_file: false
-    mls_file_type: "bin" #Options: bin, ply
-    mls_file_path: '/path/to/my_map.bin'
     load_mls_from_file: true
+    mls_file_type: "ply" #Options: bin, ply
+    mls_file_path: '/opt/workspace/flat_plane.ply' # sandpit: /opt/workspace/sandpit.ply
     mls_gap_size: 0.4
     ply_downsample_leaf_size: 0.0 # voxel leaf size (m) for PLY downsampling; 0 = disabled
     robot_frame: arter/base_link
@@ -75,7 +74,7 @@ ugv_nav4d_ros2:
     allowForwardDownhill: true
     articulatedSuspension: false # if false, the robot is modeled with a rigid chassis/axles
     costFunctionDist: 0.0
-    distToGround: 0.0
+    distToGround: 0.5
     enableInclineLimitting: false
     inclineLimittingLimit: 0.43
     inclineLimittingMinSlope: 0.22
@@ -123,6 +122,14 @@ ugv_nav4d_ros2:
     #Trajectory Extension:
     extend_trajectory: true
     extension_distance: 2.0
+
+ugv_nav4d_follow_path_client:
+  ros__parameters:
+    # Deviation watchdog: pause when the robot is farther than this from the
+    # nearest point of the executing segment for N consecutive 0.5 s checks.
+    # Live-tunable: ros2 param set /ugv_nav4d_follow_path_client max_path_deviation_m 3.0
+    max_path_deviation_m: 2.0
+    deviation_breaches_to_pause: 2
 
 ugv_nav4d_field_operations:
   ros__parameters:

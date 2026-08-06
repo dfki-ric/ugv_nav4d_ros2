@@ -12,7 +12,8 @@ from tf2_ros import Buffer, TransformListener
 from nav_msgs.msg import Path
 from nav2_msgs.action import FollowPath
 from std_srvs.srv import Trigger
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float32
+from visualization_msgs.msg import Marker, MarkerArray
 from ugv_nav4d_ros2.msg import LabeledPathArray, MissionStatus
 
 import math
@@ -30,6 +31,8 @@ class FollowPathClient(Node):
     # diverging robot drives away unchecked. This watchdog pauses execution
     # (cancel + zero velocity, mission retained) once the robot is farther
     # than this from the current segment.
+    # Defaults for the max_path_deviation_m / deviation_breaches_to_pause
+    # PARAMETERS (tunable per deployment and live via `ros2 param set`).
     MAX_PATH_DEVIATION_M = 2.0
     # Consecutive breached checks (at DEVIATION_CHECK_PERIOD_S) required
     # before pausing, so a single localization jump cannot stop a mission.
@@ -99,6 +102,15 @@ class FollowPathClient(Node):
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.declare_parameter('max_path_deviation_m', self.MAX_PATH_DEVIATION_M)
+        self.declare_parameter('deviation_breaches_to_pause', self.DEVIATION_BREACHES_TO_PAUSE)
+        # Live deviation readout for RViz: text + a line from the robot to the
+        # nearest path point, colored by closeness to the pause limit.
+        self.deviation_marker_pub = self.create_publisher(
+            MarkerArray, '/follow_path_client/path_deviation_markers', 10)
+        self.deviation_pub = self.create_publisher(
+            Float32, '/follow_path_client/path_deviation', 10)
+        self.deviation_markers_active = False
         self.deviation_breaches = 0
         self.deviation_timer = self.create_timer(
             self.DEVIATION_CHECK_PERIOD_S, self.check_path_deviation)
@@ -367,10 +379,70 @@ class FollowPathClient(Node):
             self.get_logger().error('Remaining route invalidated; pausing execution.')
             self._request_pause('Route invalidated by a map or operational-zone change')
 
+    def clear_deviation_markers(self):
+        if not self.deviation_markers_active:
+            return
+        self.deviation_markers_active = False
+        clear = Marker()
+        clear.action = Marker.DELETEALL
+        msg = MarkerArray()
+        msg.markers.append(clear)
+        self.deviation_marker_pub.publish(msg)
+
+    def publish_deviation_markers(self, frame_id, rx, ry, rz, nearest, deviation, limit):
+        markers = MarkerArray()
+        ratio = deviation / limit if limit > 0.0 else 0.0
+        if ratio < 0.5:
+            r, g, b = 0.2, 1.0, 0.3
+        elif ratio < 1.0:
+            r, g, b = 1.0, 0.8, 0.0
+        else:
+            r, g, b = 1.0, 0.2, 0.2
+
+        line = Marker()
+        line.header.frame_id = frame_id
+        line.header.stamp = self.get_clock().now().to_msg()
+        line.ns = 'path_deviation'
+        line.id = 0
+        line.type = Marker.LINE_LIST
+        line.action = Marker.ADD
+        line.pose.orientation.w = 1.0
+        line.scale.x = 0.05
+        line.color.r, line.color.g, line.color.b, line.color.a = r, g, b, 0.9
+        start = type(nearest.pose.position)()
+        start.x, start.y, start.z = rx, ry, rz + 0.1
+        end = type(nearest.pose.position)()
+        end.x = nearest.pose.position.x
+        end.y = nearest.pose.position.y
+        end.z = nearest.pose.position.z + 0.1
+        line.points.append(start)
+        line.points.append(end)
+        markers.markers.append(line)
+
+        text = Marker()
+        text.header.frame_id = frame_id
+        text.header.stamp = line.header.stamp
+        text.ns = 'path_deviation'
+        text.id = 1
+        text.type = Marker.TEXT_VIEW_FACING
+        text.action = Marker.ADD
+        text.pose.position.x = rx
+        text.pose.position.y = ry
+        text.pose.position.z = rz + 1.6
+        text.pose.orientation.w = 1.0
+        text.scale.z = 0.45
+        text.color.r, text.color.g, text.color.b, text.color.a = r, g, b, 1.0
+        text.text = f'{deviation:.2f} m / {limit:.1f} m'
+        markers.markers.append(text)
+
+        self.deviation_marker_pub.publish(markers)
+        self.deviation_markers_active = True
+
     def check_path_deviation(self):
         if (self.current_item is None or self.goal_finished or self.paused
                 or self.cancel_in_progress or self.current_goal_handle is None):
             self.deviation_breaches = 0
+            self.clear_deviation_markers()
             return
 
         path, label = self.current_item
@@ -383,27 +455,35 @@ class FollowPathClient(Node):
             # No localization yet; readiness monitoring reports that separately.
             return
 
+        limit = float(self.get_parameter('max_path_deviation_m').value)
+        breaches_to_pause = max(1, int(self.get_parameter('deviation_breaches_to_pause').value))
+
         # XY only: path z carries the body-frame ground-clearance convention,
         # which would inflate a 3D distance without any real divergence.
         rx = tf.transform.translation.x
         ry = tf.transform.translation.y
-        deviation = math.sqrt(min(
-            (p.pose.position.x - rx) ** 2 + (p.pose.position.y - ry) ** 2
-            for p in path.poses))
+        rz = tf.transform.translation.z
+        nearest = min(
+            path.poses,
+            key=lambda p: (p.pose.position.x - rx) ** 2 + (p.pose.position.y - ry) ** 2)
+        deviation = math.hypot(nearest.pose.position.x - rx, nearest.pose.position.y - ry)
 
-        if deviation <= self.MAX_PATH_DEVIATION_M:
+        self.deviation_pub.publish(Float32(data=float(deviation)))
+        self.publish_deviation_markers(path.header.frame_id, rx, ry, rz, nearest, deviation, limit)
+
+        if deviation <= limit:
             self.deviation_breaches = 0
             return
         self.deviation_breaches += 1
-        if self.deviation_breaches < self.DEVIATION_BREACHES_TO_PAUSE:
+        if self.deviation_breaches < breaches_to_pause:
             return
         self.deviation_breaches = 0
         self.get_logger().error(
             f'Robot is {deviation:.1f} m from segment "{label}" '
-            f'(limit {self.MAX_PATH_DEVIATION_M} m); pausing execution.')
+            f'(limit {limit} m); pausing execution.')
         self._request_pause(
             f'Robot diverged {deviation:.1f} m from the path '
-            f'(limit {self.MAX_PATH_DEVIATION_M} m); replan from the robot position')
+            f'(limit {limit} m); replan from the robot position')
 
     def _request_pause(self, reason):
         if self.current_goal_handle is None or self.goal_finished:
