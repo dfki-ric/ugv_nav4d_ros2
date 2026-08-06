@@ -180,7 +180,7 @@ void PathPlannerNode::setupSubscriptions()
     route_valid_publisher = this->create_publisher<std_msgs::msg::Bool>(
             "/ugv_nav4d_ros2/route_valid", rclcpp::QoS(1).transient_local());
 
-    save_map_service = this->create_service<std_srvs::srv::Trigger>(
+    save_map_service = this->create_service<ugv_nav4d_ros2::srv::MissionFile>(
             "/ugv_nav4d_ros2/save_mls_map", std::bind(&PathPlannerNode::saveMapCallback, this, std::placeholders::_1, std::placeholders::_2));
     inspect_traversability_service = this->create_service<ugv_nav4d_ros2::srv::InspectTraversability>(
             "/ugv_nav4d_ros2/inspect_traversability", std::bind(&PathPlannerNode::inspectTraversabilityCallback, this, std::placeholders::_1, std::placeholders::_2));
@@ -1043,15 +1043,19 @@ void PathPlannerNode::inspectTraversabilityCallback(
     }
 }
 
-void PathPlannerNode::saveMapCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
-                                      std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+void PathPlannerNode::saveMapCallback(const std::shared_ptr<ugv_nav4d_ros2::srv::MissionFile::Request> request,
+                                      std::shared_ptr<ugv_nav4d_ros2::srv::MissionFile::Response> response){
     if (!got_map || !mls_map_ptr){
         response->success = false;
         response->message = "No MLS map available to save.";
         publishStatus(response->message);
         return;
     }
-    const std::string filename = generateTimestampedFilename(".bin");
+    //Full path from the caller (panel file dialog); empty keeps the legacy
+    //behavior of a timestamped file in the node working directory.
+    const std::string filename = request->filename.empty()
+        ? generateTimestampedFilename(".bin")
+        : request->filename;
     if (saveMLSMapAsBin(filename)){
         response->success = true;
         response->message = "MLS map saved to " + filename;

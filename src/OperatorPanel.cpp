@@ -348,7 +348,7 @@ void OperatorPanel::onInitialize()
     reverse_waypoints_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/reverse_waypoints");
     clear_zones_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/clear_forbidden_zones");
     undo_zone_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/remove_last_forbidden_zone");
-    save_map_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/save_mls_map");
+    save_map_client_ = node_->create_client<ugv_nav4d_ros2::srv::MissionFile>("/ugv_nav4d_ros2/save_mls_map");
     map_publish_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/map_publish");
     regenerate_maps_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/regenerate_maps");
     update_footprint_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/update_footprint");
@@ -986,7 +986,19 @@ void OperatorPanel::onUndoZone()
 
 void OperatorPanel::onSaveMap()
 {
-    callTrigger(save_map_client_, "Save map");
+    //Mirrors Save mission: pick the FULL destination path; the planner node
+    //writes the file. Path is resolved on the node's machine.
+    QString file = QFileDialog::getSaveFileName(
+        this, "Save MLS map",
+        last_mission_dir_.isEmpty() ? QString("mls_map.bin")
+                                    : last_mission_dir_ + "/mls_map.bin",
+        "MLS map files (*.bin);;All files (*)");
+    if (file.isEmpty())
+    {
+        return; // dialog cancelled
+    }
+    last_mission_dir_ = QFileInfo(file).absolutePath();
+    callMissionFile(save_map_client_, file, "Save map");
 }
 
 void OperatorPanel::onRepublishMaps()

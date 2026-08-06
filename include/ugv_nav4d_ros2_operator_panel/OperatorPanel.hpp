@@ -168,7 +168,7 @@ private:
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr reverse_waypoints_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr clear_zones_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr undo_zone_client_;
-    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr save_map_client_;
+    rclcpp::Client<ugv_nav4d_ros2::srv::MissionFile>::SharedPtr save_map_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr map_publish_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr regenerate_maps_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr update_footprint_client_;

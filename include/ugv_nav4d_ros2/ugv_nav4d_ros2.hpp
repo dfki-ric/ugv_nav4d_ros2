@@ -158,8 +158,8 @@ private:
                              std::shared_ptr<ugv_nav4d_ros2::srv::MissionFile::Response> response);
     void loadMissionCallback(const std::shared_ptr<ugv_nav4d_ros2::srv::MissionFile::Request> request,
                              std::shared_ptr<ugv_nav4d_ros2::srv::MissionFile::Response> response);
-    void saveMapCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
-                         std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+    void saveMapCallback(const std::shared_ptr<ugv_nav4d_ros2::srv::MissionFile::Request> request,
+                         std::shared_ptr<ugv_nav4d_ros2::srv::MissionFile::Response> response);
     void executePathCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                              std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void discardPathCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
@@ -290,7 +290,7 @@ private:
     rclcpp::Publisher<ugv_nav4d_ros2::msg::MissionStatus>::SharedPtr mission_status_publisher;
     rclcpp::Publisher<ugv_nav4d_ros2::msg::RouteRisk>::SharedPtr route_risk_publisher;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr route_valid_publisher;
-    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr save_map_service;
+    rclcpp::Service<ugv_nav4d_ros2::srv::MissionFile>::SharedPtr save_map_service;
     rclcpp::Service<ugv_nav4d_ros2::srv::InspectTraversability>::SharedPtr inspect_traversability_service;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr replan_current_mission_service;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr recover_out_of_obstacle_service;
