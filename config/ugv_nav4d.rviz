@@ -6806,6 +6806,8 @@ Visualization Manager:
     - Class: rviz_default_plugins/MoveCamera
     - Class: rviz_default_plugins/Select
     - Class: rviz_default_plugins/FocusCamera
+    - Class: ugv_nav4d_ros2::ugv_nav4d_ros2_jump_to_robot_tool::JumpToRobotTool
+      Robot frame: arter/base_link
     - Class: rviz_default_plugins/Measure
       Line color: 128; 128; 0
     - Class: rviz_default_plugins/SetInitialPose
