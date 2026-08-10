@@ -51,6 +51,7 @@
 #include <ugv_nav4d/Planner.hpp>
 #include <traversability_generator3d/TraversabilityGenerator3d.hpp>
 #include <maps/grid/MLSMap.hpp>
+#include <limits>
 
 
 namespace ugv_nav4d_ros2{
@@ -212,6 +213,19 @@ private:
     /** Periodic: publish the measured wheelbase (Float32), the footprint
      *  polygon (like Nav2's published_footprint) and RViz markers. */
     void publishWheelbaseStatus();
+    /** Height of the traversable patch under the robot (nearest in z to the
+     *  current projection). False when no map / outside map / no patch. */
+    bool groundPatchHeightUnderRobot(double& patch_z, std::string* error);
+    void recalibrateHeightCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                                   std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+    /** Latched busy flag for the operator panel; depth-counted so nested
+     *  rebuild scopes (regenerate -> configurePlanner) publish correctly. */
+    void publishRebuilding(bool active);
+    struct ScopedRebuildFlag {
+        PathPlannerNode& node;
+        explicit ScopedRebuildFlag(PathPlannerNode& n) : node(n) { node.publishRebuilding(true); }
+        ~ScopedRebuildFlag() { node.publishRebuilding(false); }
+    };
     void publishPlannedPath(const std::vector<trajectory_follower::SubTrajectory>& trajectory3D, bool found_solution);
     static const char* planningResultToString(ugv_nav4d::Planner::PLANNING_RESULT res);
     void initializeMLSMap();
@@ -273,6 +287,13 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr update_footprint_service;
     rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr wheelbase_publisher;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr footprint_info_publisher;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr height_info_publisher;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr rebuilding_publisher;
+    int rebuild_depth_ = 0;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr recalibrate_height_service;
+    int height_info_tick_ = 0;
+    int height_miss_streak_ = 0;
+    double height_last_patch_z_ = std::numeric_limits<double>::quiet_NaN();
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr footprint_marker_publisher;
     rclcpp::Publisher<geometry_msgs::msg::PolygonStamped>::SharedPtr footprint_polygon_publisher;
     rclcpp::TimerBase::SharedPtr wheelbase_status_timer;

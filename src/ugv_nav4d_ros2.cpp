@@ -104,6 +104,21 @@ PathPlannerNode::PathPlannerNode()
     footprint_info_publisher = this->create_publisher<std_msgs::msg::String>(
         "/ugv_nav4d_ros2/footprint_info",
         rclcpp::QoS(1).transient_local());
+    height_info_publisher = this->create_publisher<std_msgs::msg::String>(
+        "/ugv_nav4d_ros2/height_info", 10);
+    rebuilding_publisher = this->create_publisher<std_msgs::msg::Bool>(
+        "/ugv_nav4d_ros2/rebuilding", rclcpp::QoS(1).transient_local());
+    {
+        std_msgs::msg::Bool not_rebuilding;
+        not_rebuilding.data = false;
+        rebuilding_publisher->publish(not_rebuilding);
+    }
+    recalibrate_height_service = this->create_service<std_srvs::srv::Trigger>(
+        "/ugv_nav4d_ros2/recalibrate_height",
+        [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+               std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+            recalibrateHeightCallback(request, response);
+        });
     wheelbase_publisher = this->create_publisher<std_msgs::msg::Float32>(
             "/ugv_nav4d_ros2/wheelbase", 10);
     // footprint_planner = the footprint the PLANNER is configured with
@@ -280,7 +295,9 @@ void PathPlannerNode::parameterUpdateTimerCallback(){
     {
         parameters_to_update.clear();
         RCLCPP_INFO(this->get_logger(), "Parameters changed; reconfiguring planner.");
+        publishStatus("Parameters changed; rebuilding maps and planner (this can take a while)...");
         configurePlanner();
+        publishStatus("Planner reconfigured.");
     }
     const auto now = this->get_clock()->now();
     const size_t old_zone_count = forbidden_zones.size();
@@ -419,6 +436,10 @@ void PathPlannerNode::regenerateMapsCallback(
         publishStatus(response->message);
         return;
     }
+    // This full regeneration supersedes any rebuild queued by a parameter
+    // change (e.g. recalibrate height); clearing the dirty flag prevents the
+    // parameter timer from running a SECOND rebuild right after this one.
+    parameters_to_update.clear();
 
     if (!get_parameter("read_pose_from_topic").as_bool() && !updatePoseFromTF())
     {
@@ -436,6 +457,7 @@ void PathPlannerNode::regenerateMapsCallback(
     route_valid_publisher->publish(route_valid);
     clearExecutingPathDisplay();
 
+    ScopedRebuildFlag rebuild_flag(*this);
     publishStatus("Regenerating MLS and traversability maps...");
     if (get_parameter("load_mls_from_file").as_bool())
     {
@@ -2093,6 +2115,111 @@ void PathPlannerNode::updateFootprintCallback(const std::shared_ptr<std_srvs::sr
     publishStatus(response->message);
 }
 
+bool PathPlannerNode::groundPatchHeightUnderRobot(double& patch_z, std::string* error){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    if (!mls_map_ptr || !got_map){
+        if (error) *error = "no MLS map loaded";
+        return false;
+    }
+    // Query the MLS directly (source of truth for surface heights, present
+    // wherever the point cloud has data) instead of the traversability map,
+    // which only has nodes where expansion ran. Per operator request: take
+    // the level list at the robot's (x, y) and use the nearest patch below
+    // the robot's z.
+    const auto& pos = start_pose.pose.position;
+    const auto resolution = mls_map_ptr->getResolution();
+    const maps::grid::Vector2ui num_cells = mls_map_ptr->getNumCells();
+    const double lx = (pos.x - mls_min_x) / resolution.x();
+    const double ly = (pos.y - mls_min_y) / resolution.y();
+    const int cx = static_cast<int>(std::floor(lx));
+    const int cy = static_cast<int>(std::floor(ly));
+    constexpr int kMaxRingRadius = 2;         // robot shadows its own cell
+
+    typedef maps::grid::MLSMap<maps::grid::MLSConfig::SLOPE>::CellType Cell;
+    bool cell_in_map = false;
+    bool saw_patch = false;
+    for (int radius = 0; radius <= kMaxRingRadius; ++radius){
+        double best_top = -std::numeric_limits<double>::infinity();
+        for (int dx = -radius; dx <= radius; ++dx){
+            for (int dy = -radius; dy <= radius; ++dy){
+                if (std::max(std::abs(dx), std::abs(dy)) != radius){
+                    continue; // ring cells only; inner cells were previous rings
+                }
+                const int nx = cx + dx;
+                const int ny = cy + dy;
+                if (nx < 0 || ny < 0 ||
+                    static_cast<size_t>(nx) >= num_cells.x() ||
+                    static_cast<size_t>(ny) >= num_cells.y()){
+                    continue;
+                }
+                cell_in_map = true;
+                const Cell& list = mls_map_ptr->at(static_cast<size_t>(nx),
+                                                   static_cast<size_t>(ny));
+                for (Cell::const_iterator it = list.begin(); it != list.end(); ++it){
+                    saw_patch = true;
+                    float min_z = 0.0f;
+                    float max_z = 0.0f;
+                    it->getRange(min_z, max_z);
+                    const double top = static_cast<double>(max_z);
+                    if (top <= pos.z && top > best_top){
+                        best_top = top;
+                    }
+                }
+            }
+        }
+        if (std::isfinite(best_top)){
+            patch_z = best_top;
+            return true;
+        }
+    }
+    if (error){
+        if (!cell_in_map){
+            *error = "robot outside the MLS map";
+        } else if (saw_patch){
+            *error = "all MLS patches near the robot lie above the robot z "
+                     "(pose frame or height grossly wrong)";
+        } else {
+            *error = "no MLS patches within " + std::to_string(kMaxRingRadius) +
+                     " cells of the robot";
+        }
+    }
+    return false;
+}
+
+void PathPlannerNode::recalibrateHeightCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+                                                std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    double patch_z = 0.0;
+    std::string error;
+    if (!groundPatchHeightUnderRobot(patch_z, &error)){
+        response->success = false;
+        response->message = "Height recalibration failed: " + error;
+        publishStatus(response->message);
+        return;
+    }
+    const double old_value = get_parameter("distToGround").as_double();
+    const double new_value = start_pose.pose.position.z - patch_z;
+    if (std::abs(new_value - old_value) < 0.01){
+        response->success = true;
+        response->message = "distToGround already calibrated (change < 1 cm); nothing to do.";
+        publishStatus(response->message);
+        return;
+    }
+    std::ostringstream msg;
+    msg.setf(std::ios::fixed);
+    msg.precision(3);
+    msg << "distToGround recalibrated: " << old_value << " -> " << new_value
+        << " m (patch z " << patch_z << "); full map+planner rebuild follows, "
+        << "do NOT press Regenerate maps -- it would run a second rebuild.";
+    // No "footprint_" prefix: the parameter feeds the traversability config,
+    // so setting it marks the planner dirty and triggers the rebuild.
+    set_parameters({rclcpp::Parameter("distToGround", new_value)});
+    response->success = true;
+    response->message = msg.str();
+    RCLCPP_INFO_STREAM(this->get_logger(), response->message);
+    publishStatus(response->message);
+}
+
 void PathPlannerNode::publishWheelbaseStatus(){
     FootprintEnvelope envelope;
     std::string error;
@@ -2214,6 +2341,128 @@ void PathPlannerNode::publishWheelbaseStatus(){
     std_msgs::msg::String info;
     info.data = label.str();
     footprint_info_publisher->publish(info);
+
+    // distToGround visualization: plumb line from base_link to the ASSUMED
+    // ground, one disc there, one disc at the ACTUAL map patch under the
+    // robot. The vertical gap between the discs is the calibration error;
+    // the assumed disc turns amber/red as the gap approaches maxStepHeight
+    // (beyond it the next plan returns START_INVALID).
+    {
+        const double dist_to_ground = get_parameter("distToGround").as_double();
+        const double max_step = std::max(1e-6, get_parameter("maxStepHeight").as_double());
+        double patch_z = 0.0;
+        double pose_z = 0.0;
+        std::string height_error;
+        bool have_patch = false;
+        {
+            std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+            pose_z = start_pose.pose.position.z;
+            have_patch = groundPatchHeightUnderRobot(patch_z, &height_error);
+        }
+        // Hysteresis: with pose z right at a patch top, the strict below-z
+        // rule can alternate found/not-found between ticks, which made the
+        // discs blink. Hold the last valid measurement for ~1 s before the
+        // markers give up.
+        if (have_patch){
+            height_last_patch_z_ = patch_z;
+            height_miss_streak_ = 0;
+        } else if (height_miss_streak_ < 10){
+            ++height_miss_streak_;
+            if (std::isfinite(height_last_patch_z_)){
+                patch_z = height_last_patch_z_;
+                have_patch = true;
+            }
+        }
+        const double assumed_rel = -dist_to_ground;          // robot frame
+        const double actual_rel = patch_z - pose_z;          // robot frame
+        const double gap = std::abs(assumed_rel - actual_rel);
+        // Tiny lift so the discs don't z-fight with the coplanar map surface
+        // rendering (per-frame shimmer). Falsifies the display by 2 cm only.
+        const double draw_lift = 0.02;
+
+        visualization_msgs::msg::Marker plumb;
+        plumb.header.frame_id = robot_frame;
+        plumb.header.stamp = stamp;
+        plumb.ns = "dist_to_ground";
+        plumb.id = 0;
+        plumb.type = visualization_msgs::msg::Marker::LINE_LIST;
+        plumb.action = visualization_msgs::msg::Marker::ADD;
+        plumb.pose.orientation.w = 1.0;
+        plumb.scale.x = 0.04;
+        plumb.color.r = plumb.color.g = plumb.color.b = 0.9f;
+        plumb.color.a = 0.9f;
+        plumb.lifetime = lifetime;
+        geometry_msgs::msg::Point top;
+        geometry_msgs::msg::Point bottom;
+        bottom.z = assumed_rel;
+        plumb.points.push_back(top);
+        plumb.points.push_back(bottom);
+        markers.markers.push_back(plumb);
+
+        visualization_msgs::msg::Marker assumed;
+        assumed.header = plumb.header;
+        assumed.ns = "dist_to_ground";
+        assumed.id = 1;
+        assumed.type = visualization_msgs::msg::Marker::CYLINDER;
+        assumed.action = visualization_msgs::msg::Marker::ADD;
+        assumed.pose.orientation.w = 1.0;
+        assumed.pose.position.z = assumed_rel + draw_lift;
+        assumed.scale.x = 1.0;
+        assumed.scale.y = 1.0;
+        assumed.scale.z = 0.03;
+        if (!have_patch){
+            assumed.color.r = assumed.color.g = assumed.color.b = 0.6f;
+        } else if (gap > max_step){
+            assumed.color.r = 1.0f; assumed.color.g = 0.15f; assumed.color.b = 0.15f;
+        } else if (gap > 0.5 * max_step){
+            assumed.color.r = 1.0f; assumed.color.g = 0.65f; assumed.color.b = 0.0f;
+        } else {
+            assumed.color.r = 0.2f; assumed.color.g = 0.9f; assumed.color.b = 0.3f;
+        }
+        assumed.color.a = 0.85f;
+        assumed.lifetime = lifetime;
+        markers.markers.push_back(assumed);
+
+        visualization_msgs::msg::Marker actual;
+        actual.header = plumb.header;
+        actual.ns = "dist_to_ground";
+        actual.id = 2;
+        actual.type = visualization_msgs::msg::Marker::CYLINDER;
+        actual.action = have_patch ? visualization_msgs::msg::Marker::ADD
+                                   : visualization_msgs::msg::Marker::DELETE;
+        actual.pose.orientation.w = 1.0;
+        actual.pose.position.z = actual_rel + draw_lift;
+        actual.scale.x = 1.3;
+        actual.scale.y = 1.3;
+        actual.scale.z = 0.03;
+        actual.color.r = 0.25f;
+        actual.color.g = 0.55f;
+        actual.color.b = 1.0f;
+        actual.color.a = 0.6f;
+        actual.lifetime = lifetime;
+        markers.markers.push_back(actual);
+
+        // Numbers for the operator panel at ~1 Hz (this timer runs at 10 Hz).
+        if (++height_info_tick_ >= 10){
+            height_info_tick_ = 0;
+            std::ostringstream info;
+            info.setf(std::ios::fixed);
+            info.precision(2);
+            info << "distToGround " << dist_to_ground << " m";
+            if (have_patch){
+                const double delta = assumed_rel - actual_rel;
+                info << " | map \u0394 " << (delta >= 0 ? "+" : "") << delta << " m ";
+                if (gap > max_step) info << "(START WOULD BE INVALID)";
+                else if (gap > 0.5 * max_step) info << "(check height)";
+                else info << "(ok)";
+            } else {
+                info << " | map: " << height_error;
+            }
+            std_msgs::msg::String info_msg;
+            info_msg.data = info.str();
+            height_info_publisher->publish(info_msg);
+        }
+    }
 
     footprint_marker_publisher->publish(markers);
 }
@@ -3732,7 +3981,17 @@ void PathPlannerNode::updateParametersFromConfigs(
     RCLCPP_INFO(this->get_logger(), "Applied %zu parameters from GUI; planner will reconfigure.", params.size());
 }
 
+void PathPlannerNode::publishRebuilding(bool active){
+    rebuild_depth_ = std::max(0, rebuild_depth_ + (active ? 1 : -1));
+    std_msgs::msg::Bool msg;
+    msg.data = rebuild_depth_ > 0;
+    rebuilding_publisher->publish(msg);
+}
+
 void PathPlannerNode::configurePlanner(){
+    // Latched busy flag: the panel greys its buttons while this runs (map
+    // regeneration + environment rebuild can take a long time).
+    ScopedRebuildFlag rebuild_flag(*this);
     std::lock_guard<std::recursive_mutex> lock(planner_mutex);
     // If the grid resolution changed, the MLS map must be recreated at the new resolution
     // before the traversability map and planner are rebuilt below.

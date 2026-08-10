@@ -72,6 +72,9 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     footprint_label_ = new QLabel("Footprint: press Update footprint to measure");
     footprint_label_->setWordWrap(true);
     footprint_label_->setMaximumHeight(40);
+    height_label_ = new QLabel("Height: waiting for planner");
+    height_label_->setWordWrap(true);
+    height_label_->setMaximumHeight(40);
     inspection_label_ = new QLabel("Inspection: select Inspect Traversability and click a map patch");
     inspection_label_->setWordWrap(true);
     inspection_label_->setMaximumHeight(60);
@@ -80,6 +83,7 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     layout->addWidget(risk_label_);
     layout->addWidget(deviation_label_);
     layout->addWidget(footprint_label_);
+    layout->addWidget(height_label_);
     layout->addWidget(health_label_);
     layout->addWidget(readiness_label_);
     layout->addWidget(inspection_label_);
@@ -143,6 +147,11 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     save_map_button_ = new QPushButton("Save MLS map");
     republish_maps_button_ = new QPushButton("Republish maps");
     regenerate_maps_button_ = new QPushButton("Regenerate maps");
+    recalibrate_height_button_ = new QPushButton("Recalibrate height");
+    recalibrate_height_button_->setToolTip(
+        "Measure the ground patch under the robot and set distToGround = pose.z - patch.z.\n"
+        "Use after the chassis changed its height (adaptation), when planning fails with\n"
+        "START_INVALID, or when the height discs in the 3D view separate.");
     update_footprint_button_ = new QPushButton("Update footprint");
     update_footprint_button_->setToolTip(
         "Measure the current wheel positions via TF (the wheelbase is variable) "
@@ -167,6 +176,13 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     load_mission_button_ = new QPushButton("Load mission");
     buttons->addWidget(save_mission_button_, 9, 0);
     buttons->addWidget(load_mission_button_, 9, 1);
+    buttons->addWidget(recalibrate_height_button_, 10, 0, 1, 2);
+    rebuild_sensitive_buttons_ = {
+        recover_button_, replan_button_, execute_path_button_, discard_path_button_,
+        clear_waypoints_button_, undo_waypoint_button_, reverse_waypoints_button_,
+        clear_zones_button_, undo_zone_button_, save_map_button_,
+        republish_maps_button_, regenerate_maps_button_, update_footprint_button_,
+        save_mission_button_, load_mission_button_, recalibrate_height_button_};
     plan_return_button_ = new QPushButton("Plan return");
     layout->addLayout(buttons);
 
@@ -242,6 +258,9 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     connect(save_map_button_, &QPushButton::clicked, this, &OperatorPanel::onSaveMap);
     connect(republish_maps_button_, &QPushButton::clicked, this, &OperatorPanel::onRepublishMaps);
     connect(regenerate_maps_button_, &QPushButton::clicked, this, &OperatorPanel::onRegenerateMaps);
+    connect(recalibrate_height_button_, &QPushButton::clicked, this, [this]() {
+        callTrigger(recalibrate_height_client_, "Recalibrate height");
+    });
     connect(update_footprint_button_, &QPushButton::clicked, this, [this]() {
         callTrigger(update_footprint_client_, "Update footprint");
     });
@@ -367,6 +386,43 @@ void OperatorPanel::onInitialize()
                 footprint_label_->setToolTip(text);
             }, Qt::QueuedConnection);
         });
+    rebuilding_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+        "/ugv_nav4d_ros2/rebuilding", rclcpp::QoS(1).transient_local(),
+        [this](const std_msgs::msg::Bool::SharedPtr msg)
+        {
+            QMetaObject::invokeMethod(this, [this, rebuilding = msg->data]() {
+                rebuilding_ = rebuilding;
+                for (auto* button : rebuild_sensitive_buttons_){
+                    if (button){
+                        button->setEnabled(!rebuilding);
+                    }
+                }
+                if (rebuilding){
+                    setStatusText("Rebuilding maps and planner... buttons disabled until done.");
+                } else {
+                    // restore state-dependent enables instead of blanket-on
+                    updateExecuteEnabled();
+                }
+            }, Qt::QueuedConnection);
+        });
+    height_info_sub_ = node_->create_subscription<std_msgs::msg::String>(
+        "/ugv_nav4d_ros2/height_info", 10,
+        [this](const std_msgs::msg::String::SharedPtr msg)
+        {
+            const QString text = "Height: " + QString::fromStdString(msg->data);
+            QString style;
+            if (msg->data.find("INVALID") != std::string::npos){
+                style = "QLabel { color: #e0564f; font-weight: bold; }";
+            } else if (msg->data.find("check height") != std::string::npos){
+                style = "QLabel { color: #e8a33c; font-weight: bold; }";
+            } else if (msg->data.find("(ok)") != std::string::npos){
+                style = "QLabel { color: #4fc26b; }";
+            }
+            QMetaObject::invokeMethod(this, [this, text, style]() {
+                height_label_->setText(text);
+                height_label_->setStyleSheet(style);
+            }, Qt::QueuedConnection);
+        });
     inspection_result_sub_ = node_->create_subscription<std_msgs::msg::String>(
         "/ugv_nav4d_ros2/inspection_result", rclcpp::QoS(1).transient_local(),
         [this](const std_msgs::msg::String::SharedPtr msg)
@@ -397,6 +453,7 @@ void OperatorPanel::onInitialize()
     map_publish_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/map_publish");
     regenerate_maps_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/regenerate_maps");
     update_footprint_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/update_footprint");
+    recalibrate_height_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/recalibrate_height");
     save_mission_client_ = node_->create_client<ugv_nav4d_ros2::srv::MissionFile>("/ugv_nav4d_ros2/save_mission");
     load_mission_client_ = node_->create_client<ugv_nav4d_ros2::srv::MissionFile>("/ugv_nav4d_ros2/load_mission");
 
@@ -681,7 +738,7 @@ void OperatorPanel::updateExecuteEnabled()
     // a new pending path that the operator confirms with Execute.
     QString blocking_check;
     const bool health_ok = health_received_ && checkedReadinessOk(&blocking_check);
-    const bool execute_ok = health_ok && route_ready_ && !executing;
+    const bool execute_ok = health_ok && route_ready_ && !executing && !rebuilding_;
     execute_path_button_->setEnabled(execute_ok);
     execute_path_button_->setToolTip(
         executing
