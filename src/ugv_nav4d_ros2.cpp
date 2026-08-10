@@ -101,6 +101,9 @@ PathPlannerNode::PathPlannerNode()
             "/ugv_nav4d_ros2/robot_pose", 10);
     zone_speed_limit_publisher = this->create_publisher<std_msgs::msg::Float32>(
             "/ugv_nav4d_ros2/zone_speed_limit", 10);
+    footprint_info_publisher = this->create_publisher<std_msgs::msg::String>(
+        "/ugv_nav4d_ros2/footprint_info",
+        rclcpp::QoS(1).transient_local());
     wheelbase_publisher = this->create_publisher<std_msgs::msg::Float32>(
             "/ugv_nav4d_ros2/wheelbase", 10);
     // footprint_planner = the footprint the PLANNER is configured with
@@ -2192,28 +2195,25 @@ void PathPlannerNode::publishWheelbaseStatus(){
     axle.points.push_back(front);
     markers.markers.push_back(axle);
 
-    visualization_msgs::msg::Marker text;
-    text.header = box.header;
-    text.ns = "wheelbase";
-    text.id = 2;
-    text.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
-    text.action = visualization_msgs::msg::Marker::ADD;
-    text.pose.orientation.w = 1.0;
-    text.pose.position.z = 2.0;
-    text.scale.z = 0.5;
-    text.color.r = 1.0f;
-    text.color.g = 1.0f;
-    text.color.b = 1.0f;
-    text.color.a = 1.0f;
-    text.lifetime = lifetime;
+    // The readout lives in the operator panel (footprint_info topic), not as
+    // a 3D label blocking the view of the robot. The DELETE clears the old
+    // text marker in rviz sessions that still show one.
+    visualization_msgs::msg::Marker text_delete;
+    text_delete.header = box.header;
+    text_delete.ns = "wheelbase";
+    text_delete.id = 2;
+    text_delete.action = visualization_msgs::msg::Marker::DELETE;
+    markers.markers.push_back(text_delete);
+
     std::ostringstream label;
     label.setf(std::ios::fixed);
     label.precision(2);
     label << "wheelbase " << wheelbase << " m | footprint "
           << 2.0 * half_x << " x " << 2.0 * half_y << " m @ x"
           << (box_offset_x >= 0 ? "+" : "") << box_offset_x;
-    text.text = label.str();
-    markers.markers.push_back(text);
+    std_msgs::msg::String info;
+    info.data = label.str();
+    footprint_info_publisher->publish(info);
 
     footprint_marker_publisher->publish(markers);
 }
@@ -3950,9 +3950,11 @@ bool PathPlannerNode::publishTravMap(){
                     patch_msg.color.a = 1;
                     break;   
                 case traversability_generator3d::NodeType::UNKNOWN:
-                    patch_msg.color.r = 0.5;
-                    patch_msg.color.g = 0;
-                    patch_msg.color.b = 0.5;
+                    // teal; the old dark magenta was hard to tell from the
+                    // STEP_HEIGHT cause purple when cause-coloring is on
+                    patch_msg.color.r = 0.0;
+                    patch_msg.color.g = 0.55;
+                    patch_msg.color.b = 0.55;
                     patch_msg.color.a = 1;
                     break;
 
@@ -3979,9 +3981,11 @@ bool PathPlannerNode::publishTravMap(){
                     break;
 
                 default: // e.g. HOLE
-                    patch_msg.color.r = 0.3;
-                    patch_msg.color.g = 0.3;
-                    patch_msg.color.b = 0.3;
+                    // blue-grey; plain 0.3 grey was indistinguishable from the
+                    // UNMEASURED cause grey (0.35)
+                    patch_msg.color.r = 0.25;
+                    patch_msg.color.g = 0.32;
+                    patch_msg.color.b = 0.45;
                     patch_msg.color.a = 1;
                     break;
             }

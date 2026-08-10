@@ -272,6 +272,7 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr regenerate_maps_service;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr update_footprint_service;
     rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr wheelbase_publisher;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr footprint_info_publisher;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr footprint_marker_publisher;
     rclcpp::Publisher<geometry_msgs::msg::PolygonStamped>::SharedPtr footprint_polygon_publisher;
     rclcpp::TimerBase::SharedPtr wheelbase_status_timer;

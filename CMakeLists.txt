@@ -177,6 +177,19 @@ target_link_libraries(ugv_nav4d_ros2_inspect_orientations_tool
   Qt5::Widgets
 )
 
+qt5_wrap_cpp(MOC_JUMP_TO_ROBOT_TOOL_FILES include/ugv_nav4d_ros2_jump_to_robot_tool/JumpToRobotTool.hpp)
+# Create the jump-to-robot tool plugin library
+add_library(ugv_nav4d_ros2_jump_to_robot_tool SHARED src/JumpToRobotTool.cpp ${MOC_JUMP_TO_ROBOT_TOOL_FILES})
+ament_target_dependencies(ugv_nav4d_ros2_jump_to_robot_tool  ${THIS_PACKAGE_INCLUDE_DEPENDS})
+target_include_directories(ugv_nav4d_ros2_jump_to_robot_tool PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/ugv_nav4d_ros2_jump_to_robot_tool/>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(ugv_nav4d_ros2_jump_to_robot_tool
+  Qt5::Core
+  Qt5::Widgets
+)
+
 qt5_wrap_cpp(MOC_OPERATOR_PANEL_FILES include/ugv_nav4d_ros2_operator_panel/OperatorPanel.hpp)
 # Create the panel plugin library
 add_library(ugv_nav4d_ros2_operator_panel SHARED src/OperatorPanel.cpp ${MOC_OPERATOR_PANEL_FILES})
@@ -259,6 +272,7 @@ install(TARGETS ugv_nav4d_ros2_forbidden_zone_tool
   RUNTIME DESTINATION bin)
 
 install(TARGETS ugv_nav4d_ros2_inspect_orientations_tool
+  ugv_nav4d_ros2_jump_to_robot_tool
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)

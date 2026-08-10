@@ -14,6 +14,7 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <cstdio>
 #include <QPushButton>
 #include <QStringList>
 #include <QSpinBox>
@@ -65,12 +66,20 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     readiness_label_->setWordWrap(true);
     readiness_label_->setMaximumHeight(180);
     readiness_label_->setStyleSheet("QLabel { font-family: monospace; }");
+    deviation_label_ = new QLabel("Deviation: idle");
+    deviation_label_->setWordWrap(true);
+    deviation_label_->setMaximumHeight(40);
+    footprint_label_ = new QLabel("Footprint: press Update footprint to measure");
+    footprint_label_->setWordWrap(true);
+    footprint_label_->setMaximumHeight(40);
     inspection_label_ = new QLabel("Inspection: select Inspect Traversability and click a map patch");
     inspection_label_->setWordWrap(true);
     inspection_label_->setMaximumHeight(60);
     inspection_label_->setStyleSheet("QLabel { color: #69a8ff; }");
     layout->addWidget(execution_label_);
     layout->addWidget(risk_label_);
+    layout->addWidget(deviation_label_);
+    layout->addWidget(footprint_label_);
     layout->addWidget(health_label_);
     layout->addWidget(readiness_label_);
     layout->addWidget(inspection_label_);
@@ -323,6 +332,39 @@ void OperatorPanel::onInitialize()
                 health_received_ = true;
                 rebuildReadinessLabel();
                 updateExecuteEnabled();
+            }, Qt::QueuedConnection);
+        });
+    deviation_text_sub_ = node_->create_subscription<std_msgs::msg::String>(
+        "/follow_path_client/deviation_text", 10,
+        [this](const std_msgs::msg::String::SharedPtr msg)
+        {
+            const QString text = "Deviation: " + QString::fromStdString(msg->data);
+            // color from "value / limit": green in the OK band, orange when
+            // past half the limit, red at breach
+            float value = 0.0f;
+            float limit = 0.0f;
+            QString style;
+            if (std::sscanf(msg->data.c_str(), "%f / %f", &value, &limit) == 2 &&
+                limit > 0.0f)
+            {
+                const float ratio = value / limit;
+                style = ratio >= 1.0f ? "QLabel { color: #e0564f; font-weight: bold; }"
+                      : ratio >= 0.5f ? "QLabel { color: #e8a33c; font-weight: bold; }"
+                                      : "QLabel { color: #4fc26b; }";
+            }
+            QMetaObject::invokeMethod(this, [this, text, style]() {
+                deviation_label_->setText(text);
+                deviation_label_->setStyleSheet(style);
+            }, Qt::QueuedConnection);
+        });
+    footprint_info_sub_ = node_->create_subscription<std_msgs::msg::String>(
+        "/ugv_nav4d_ros2/footprint_info", rclcpp::QoS(1).transient_local(),
+        [this](const std_msgs::msg::String::SharedPtr msg)
+        {
+            const QString text = "Footprint: " + QString::fromStdString(msg->data);
+            QMetaObject::invokeMethod(this, [this, text]() {
+                footprint_label_->setText(text);
+                footprint_label_->setToolTip(text);
             }, Qt::QueuedConnection);
         });
     inspection_result_sub_ = node_->create_subscription<std_msgs::msg::String>(

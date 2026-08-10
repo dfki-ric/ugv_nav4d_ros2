@@ -98,6 +98,8 @@ private:
     QLabel* health_label_{nullptr};
     QLabel* readiness_label_{nullptr};
     QLabel* inspection_label_{nullptr};
+    QLabel* deviation_label_{nullptr};
+    QLabel* footprint_label_{nullptr};
     QPushButton* stop_button_{nullptr};
     QPushButton* pause_button_{nullptr};
     QPushButton* resume_button_{nullptr};
@@ -152,6 +154,8 @@ private:
     rclcpp::Subscription<ugv_nav4d_ros2::msg::RouteRisk>::SharedPtr route_risk_sub_;
     rclcpp::Subscription<ugv_nav4d_ros2::msg::SystemHealth>::SharedPtr system_health_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr inspection_result_sub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr deviation_text_sub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr footprint_info_sub_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr stop_execution_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr pause_execution_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr resume_execution_client_;

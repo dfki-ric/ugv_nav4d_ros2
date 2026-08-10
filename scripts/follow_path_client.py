@@ -12,7 +12,7 @@ from tf2_ros import Buffer, TransformListener
 from nav_msgs.msg import Path
 from nav2_msgs.action import FollowPath
 from std_srvs.srv import Trigger
-from std_msgs.msg import Bool, Float32
+from std_msgs.msg import Bool, Float32, String
 from visualization_msgs.msg import Marker, MarkerArray
 from ugv_nav4d_ros2.msg import LabeledPathArray, MissionStatus
 
@@ -108,6 +108,8 @@ class FollowPathClient(Node):
         # nearest path point, colored by closeness to the pause limit.
         self.deviation_marker_pub = self.create_publisher(
             MarkerArray, '/follow_path_client/path_deviation_markers', 10)
+        self.deviation_text_pub = self.create_publisher(
+            String, '/follow_path_client/deviation_text', 10)
         self.deviation_pub = self.create_publisher(
             Float32, '/follow_path_client/path_deviation', 10)
         self.deviation_markers_active = False
@@ -383,6 +385,9 @@ class FollowPathClient(Node):
         if not self.deviation_markers_active:
             return
         self.deviation_markers_active = False
+        idle = String()
+        idle.data = 'idle'
+        self.deviation_text_pub.publish(idle)
         clear = Marker()
         clear.action = Marker.DELETEALL
         msg = MarkerArray()
@@ -419,49 +424,24 @@ class FollowPathClient(Node):
         line.points.append(end)
         markers.markers.append(line)
 
-        text = Marker()
-        text.header.frame_id = frame_id
-        text.header.stamp = line.header.stamp
-        text.ns = 'path_deviation'
-        text.id = 1
-        text.type = Marker.TEXT_VIEW_FACING
-        text.action = Marker.ADD
-        text.pose.position.x = rx
-        text.pose.position.y = ry
-        text.pose.position.z = rz + 1.6
-        text.pose.orientation.w = 1.0
-        text.scale.z = 0.45
-        text.color.r, text.color.g, text.color.b, text.color.a = r, g, b, 1.0
-        text.text = f'{deviation:.2f} m / {limit:.1f} m'
-        markers.markers.append(text)
-
-        # Big, unmissable readout floating well above the robot model and the
-        # travmap clutter. White in the OK state (readable on the green cells
-        # where green text vanishes), yellow near the limit, red at breach.
-        big = Marker()
-        big.header.frame_id = frame_id
-        big.header.stamp = text.header.stamp
-        big.ns = 'path_deviation_big'
-        big.id = 2
-        big.type = Marker.TEXT_VIEW_FACING
-        big.action = Marker.ADD
-        big.pose.position.x = rx
-        big.pose.position.y = ry
-        big.pose.position.z = rz + 4.5
-        big.pose.orientation.w = 1.0
-        big.scale.z = 1.4
-        if ratio >= 1.0:
-            big.color.r, big.color.g, big.color.b = 1.0, 0.2, 0.2
-        elif ratio >= 0.5:
-            big.color.r, big.color.g, big.color.b = 1.0, 0.8, 0.0
-        else:
-            big.color.r, big.color.g, big.color.b = 1.0, 1.0, 1.0
-        big.color.a = 1.0
-        big.text = f'DEV {deviation:.2f} / {limit:.1f} m'
-        markers.markers.append(big)
+        # The numeric readout lives in the operator panel (deviation_text
+        # topic); only the robot-to-path line stays in the 3D view. The
+        # DELETEs clear the old text markers in running rviz sessions.
+        for stale_ns, stale_id in (('path_deviation', 1), ('path_deviation_big', 2)):
+            stale = Marker()
+            stale.header.frame_id = frame_id
+            stale.header.stamp = line.header.stamp
+            stale.ns = stale_ns
+            stale.id = stale_id
+            stale.action = Marker.DELETE
+            markers.markers.append(stale)
 
         self.deviation_marker_pub.publish(markers)
         self.deviation_markers_active = True
+
+        text_msg = String()
+        text_msg.data = f'{deviation:.2f} / {limit:.1f} m'
+        self.deviation_text_pub.publish(text_msg)
 
     def check_path_deviation(self):
         if (self.current_item is None or self.goal_finished or self.paused

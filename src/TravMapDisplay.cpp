@@ -1,6 +1,7 @@
 #include "TravMapDisplay.hpp"
 #include <rviz_rendering/objects/shape.hpp>
 #include <rviz_common/properties/bool_property.hpp>
+#include <rviz_common/properties/property.hpp>
 #include <rviz_common/properties/color_property.hpp>
 #include <rviz_common/properties/float_property.hpp>
 #include <rviz_common/properties/int_property.hpp>
@@ -35,6 +36,47 @@ TravMapDisplay::TravMapDisplay()
       "red = steep slope, purple = step height, pink = incline limit, "
       "dark red = no safe yaw, brown = map boundary. Same palette as the travgen GUI.",
       this, SLOT(updateColorMode()));
+
+  // In-rviz legend: read-only swatches in the property tree, so the operator
+  // can check what a color means without leaving rviz. Values must match the
+  // publisher (ugv_nav4d_ros2.cpp) and obstacleCauseColor() above.
+  auto add_swatch = [](rviz_common::properties::Property* parent,
+                       const char* name, QColor c, const char* desc) {
+    auto* p = new rviz_common::properties::ColorProperty(name, c, desc, parent);
+    p->setReadOnly(true);
+  };
+  auto* legend_types = new rviz_common::properties::Property(
+      "Legend: cell types", QVariant(),
+      "Reference only. Base colors of the published map.", this);
+  legend_types->setReadOnly(true);
+  add_swatch(legend_types, "Traversable", QColor(0, 255, 0), "Drivable in any heading");
+  add_swatch(legend_types, "Partially traversable", QColor(153, 204, 0),
+             "Drivable only in certain headings");
+  add_swatch(legend_types, "Obstacle", QColor(255, 0, 0), "Not drivable");
+  add_swatch(legend_types, "Inflated obstacle", QColor(255, 128, 0),
+             "Blocked by the safety margin, not the cell itself");
+  add_swatch(legend_types, "Frontier", QColor(0, 0, 255), "Edge of the explored map");
+  add_swatch(legend_types, "Inflated frontier", QColor(128, 204, 255),
+             "Safety margin around a frontier");
+  add_swatch(legend_types, "Unknown", QColor(0, 140, 140), "Not yet classified");
+  add_swatch(legend_types, "Unset", QColor(255, 255, 0), "Created but never evaluated");
+  add_swatch(legend_types, "Hole / other", QColor(64, 82, 115), "No usable surface");
+
+  auto* legend_causes = new rviz_common::properties::Property(
+      "Legend: obstacle causes", QVariant(),
+      "Reference only. Used when 'Color obstacles by cause' is enabled.", this);
+  legend_causes->setReadOnly(true);
+  add_swatch(legend_causes, "Unmeasured", QColor(89, 89, 89),
+             "Ground-plane fit failed: no or too-sparse data");
+  add_swatch(legend_causes, "Steep slope", QColor(255, 0, 0), "Slope exceeds maxSlope");
+  add_swatch(legend_causes, "Step height", QColor(161, 33, 240),
+             "Step collides with the robot body volume");
+  add_swatch(legend_causes, "Incline limit", QColor(255, 102, 153),
+             "No allowed heading under incline limiting");
+  add_swatch(legend_causes, "No safe yaw", QColor(140, 0, 0),
+             "Inflation found no collision-free heading");
+  add_swatch(legend_causes, "Map boundary", QColor(140, 89, 38),
+             "Robot body would leave the mapped grid");
 }
 
 TravMapDisplay::~TravMapDisplay()
@@ -91,59 +133,55 @@ void TravMapDisplay::renderMap(const ugv_nav4d_ros2::msg::TravMap& msg)
 
   const bool color_by_cause = color_by_cause_property_ && color_by_cause_property_->getBool();
 
+  // One ManualObject for the WHOLE map: a per-patch object means one scene
+  // object and one draw call per cell, which freezes rviz on large maps
+  // (and made the color-by-cause re-render appear to hang).
+  auto* mesh = scene_manager_->createManualObject();
+  mesh->setDynamic(false);
+  manual_objects_.push_back(mesh);
+  mesh->estimateVertexCount(msg.patches.size() * 4);
+  mesh->estimateIndexCount(msg.patches.size() * 6);
+  mesh->begin("BaseWhiteNoLighting", Ogre::RenderOperation::OT_TRIANGLE_LIST);
+
+  const float size = msg.resolution / 2;
+  const Ogre::Vector3 default_normal(0, 0, 1);
+  uint32_t base = 0;
+
   for (const auto& patch : msg.patches) {
-    // Convert the plane parameters to a visual representation
     Ogre::Vector3 position(patch.position.x, patch.position.y, patch.position.z);
 
-    // Compute the normal vector of the plane (a, b, c) and a point on the plane
     Ogre::Vector3 normal(patch.a, patch.b, patch.c);
     normal.normalise();
-
-    // Compute the orientation from the normal
-    Ogre::Vector3 default_normal(0, 0, 1);
     Ogre::Quaternion orientation = default_normal.getRotationTo(normal);
 
-    // Set the color of the plane
     Ogre::ColourValue color(patch.color.r, patch.color.g, patch.color.b, patch.color.a);
     if (color_by_cause && patch.obstacle_cause != 0) {
       color = obstacleCauseColor(patch.obstacle_cause, color);
     }
 
-    // Create a plane visual for each patch
-    auto plane = scene_manager_->createManualObject();
-    manual_objects_.push_back(plane);
-    plane->begin("BaseWhiteNoLighting", Ogre::RenderOperation::OT_TRIANGLE_LIST);
-
-    // Define the vertices of the plane based on the patch parameters
-    // Example: A simple square plane, adjust according to your plane parameters
-    float size = msg.resolution/2;
-
-    Ogre::Vector3 corners[4] = {
+    const Ogre::Vector3 corners[4] = {
       position + orientation * Ogre::Vector3(-size, -size, 0),
       position + orientation * Ogre::Vector3(size, -size, 0),
       position + orientation * Ogre::Vector3(size, size, 0),
       position + orientation * Ogre::Vector3(-size, size, 0)
     };
 
-    plane->position(corners[0]);
-    plane->colour(color);
-    plane->position(corners[1]);
-    plane->colour(color);
-    plane->position(corners[2]);
-    plane->colour(color);
-    plane->position(corners[3]);
-    plane->colour(color);
+    for (const auto& corner : corners) {
+      mesh->position(corner);
+      mesh->colour(color);
+    }
 
-    plane->index(0);
-    plane->index(1);
-    plane->index(2);
-    plane->index(2);
-    plane->index(3);
-    plane->index(0);
-
-    plane->end();
-    scene_node_->attachObject(plane);
+    mesh->index(base + 0);
+    mesh->index(base + 1);
+    mesh->index(base + 2);
+    mesh->index(base + 2);
+    mesh->index(base + 3);
+    mesh->index(base + 0);
+    base += 4;
   }
+
+  mesh->end();
+  scene_node_->attachObject(mesh);
 }
 
 } // namespace ugv_nav4d_ros2_trav_map_plugin
