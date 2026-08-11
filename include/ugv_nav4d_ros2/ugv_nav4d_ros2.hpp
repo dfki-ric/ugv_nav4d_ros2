@@ -15,6 +15,7 @@
 #include <std_srvs/srv/trigger.hpp>
 #include <std_srvs/srv/set_bool.hpp>
 
+#include <geometry_msgs/msg/pose_array.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/polygon_stamped.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -289,6 +290,10 @@ private:
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr footprint_info_publisher;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr height_info_publisher;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr rebuilding_publisher;
+    rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr waypoint_poses_publisher;
+    rclcpp::Subscription<ugv_nav4d_ros2::msg::MissionStatus>::SharedPtr execution_status_subscription;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr clear_executed_path_service;
+    uint8_t last_execution_state_ = 255;
     int rebuild_depth_ = 0;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr recalibrate_height_service;
     int height_info_tick_ = 0;

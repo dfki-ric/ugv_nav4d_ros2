@@ -11,7 +11,8 @@ from tf2_ros import Buffer, TransformListener
 
 from nav_msgs.msg import Path
 from nav2_msgs.action import FollowPath
-from std_srvs.srv import Trigger
+from std_srvs.srv import SetBool, Trigger
+from geometry_msgs.msg import PoseArray
 from std_msgs.msg import Bool, Float32, String
 from visualization_msgs.msg import Marker, MarkerArray
 from ugv_nav4d_ros2.msg import LabeledPathArray, MissionStatus
@@ -38,6 +39,20 @@ class FollowPathClient(Node):
     # before pausing, so a single localization jump cannot stop a mission.
     DEVIATION_BREACHES_TO_PAUSE = 2
     DEVIATION_CHECK_PERIOD_S = 0.5
+    # Pause-at-waypoints trigger distance (XY) plus a z window so a waypoint
+    # on another level (ramp above, floor below) can never trigger the pause:
+    # waypoint z and robot z share the body-frame height convention, so on
+    # the same level they agree within slope/calibration error, while other
+    # storeys differ by meters.
+    WAYPOINT_PAUSE_RADIUS_M = 1.5
+    # A waypoint within this distance of the current segment's tail counts as
+    # a segment-boundary waypoint (generous: the tail includes the goal-
+    # tolerance extension appended past the true waypoint).
+    WAYPOINT_BOUNDARY_MATCH_M = 1.2
+    # Shared same-level window: poses/waypoints and the robot both carry the
+    # body-frame height convention, so same level agrees within slope and
+    # calibration error while other storeys differ by meters.
+    LEVEL_Z_WINDOW_M = 2.0
     ROBOT_FRAME = 'arter/base_link'
 
     def __init__(self):
@@ -64,6 +79,30 @@ class FollowPathClient(Node):
 
         # Operator stop: cancels the running FollowPath goal and drops all queued
         # segments. Named under the planner namespace for the RViz operator panel.
+        # Pause-at-waypoints: when enabled, execution pauses once near each
+        # queued waypoint and the operator must press Resume. Only meaningful
+        # for waypoint routes; a single-goal route has an empty queue.
+        self.pause_at_waypoints = False
+        self.waypoint_xyz = []
+        self.waypoints_paused = set()
+        # Waypoints sitting at the END of the current segment (direction
+        # change at the waypoint): those pause AFTER the segment completes,
+        # so the controller drives its full (extended) trajectory and stops
+        # AT the waypoint instead of being canceled 1.5 m short.
+        self.current_boundary_wps = set()
+        self.boundary_pause = False
+        self.pause_at_wp_state_pub = self.create_publisher(
+            Bool, '/follow_path_client/pause_at_waypoints',
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.pause_at_wp_state_pub.publish(Bool(data=False))
+        self.create_service(
+            SetBool, '/ugv_nav4d_ros2/set_pause_at_waypoints',
+            self.set_pause_at_waypoints_callback)
+        self.create_subscription(
+            PoseArray, '/ugv_nav4d_ros2/waypoint_poses',
+            self.waypoint_poses_callback,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+
         self.stop_service = self.create_service(
             Trigger, '/ugv_nav4d_ros2/stop_execution', self.stop_callback)
         self.pause_service = self.create_service(
@@ -261,6 +300,9 @@ class FollowPathClient(Node):
         self.goal_finished = True
         self.paused = False
         self.route_valid = True
+        self.waypoints_paused = set()
+        self.current_boundary_wps = set()
+        self.boundary_pause = False
         self.current_item = None
         self.total_segments = len(self.path_queue)
         self.current_segment = 0
@@ -278,6 +320,7 @@ class FollowPathClient(Node):
             return
 
         self.current_item = self.path_queue.pop(0)
+        self.current_boundary_wps = self.segment_boundary_waypoints(self.current_item[0])
         self.current_segment += 1
         # Feedback from the previous segment must not leak into the resume
         # trimming of this one before the first feedback of this goal arrives.
@@ -468,8 +511,16 @@ class FollowPathClient(Node):
         rx = tf.transform.translation.x
         ry = tf.transform.translation.y
         rz = tf.transform.translation.z
+        if self.check_waypoint_pause(rx, ry, rz):
+            return
+        # Same-level poses only: on a route that overlaps itself vertically
+        # (ramp, underpass of its own path), the XY-nearest pose can lie on
+        # another storey and mask a real divergence. Fall back to the full
+        # path if the filter empties (degenerate z data).
+        level_poses = [p for p in path.poses
+                       if abs(p.pose.position.z - rz) <= self.LEVEL_Z_WINDOW_M]
         nearest = min(
-            path.poses,
+            level_poses or path.poses,
             key=lambda p: (p.pose.position.x - rx) ** 2 + (p.pose.position.y - ry) ** 2)
         deviation = math.hypot(nearest.pose.position.x - rx, nearest.pose.position.y - ry)
 
@@ -489,6 +540,62 @@ class FollowPathClient(Node):
         self._request_pause(
             f'Robot diverged {deviation:.1f} m from the path '
             f'(limit {limit} m); replan from the robot position')
+
+    def set_pause_at_waypoints_callback(self, request, response):
+        self.pause_at_waypoints = bool(request.data)
+        self.pause_at_wp_state_pub.publish(Bool(data=self.pause_at_waypoints))
+        response.success = True
+        response.message = ('Pause at each waypoint ENABLED; press Resume after each stop.'
+                            if self.pause_at_waypoints else 'Pause at waypoints disabled.')
+        self.get_logger().info(response.message)
+        return response
+
+    def waypoint_poses_callback(self, msg):
+        self.waypoint_xyz = [(p.position.x, p.position.y, p.position.z)
+                             for p in msg.poses]
+        # Queue changed: earlier stops no longer map to the same waypoints.
+        self.waypoints_paused = set()
+
+    def segment_boundary_waypoints(self, path):
+        """Indices of waypoints lying at the tail of this segment."""
+        if not self.waypoint_xyz or not path.poses:
+            return set()
+        tail = path.poses[-20:]
+        boundary = set()
+        for idx, (wx, wy, wz) in enumerate(self.waypoint_xyz):
+            if idx in self.waypoints_paused:
+                continue
+            for p in tail:
+                if (abs(p.pose.position.z - wz) <= self.LEVEL_Z_WINDOW_M and
+                        math.hypot(p.pose.position.x - wx,
+                                   p.pose.position.y - wy)
+                        <= self.WAYPOINT_BOUNDARY_MATCH_M):
+                    boundary.add(idx)
+                    break
+        return boundary
+
+    def check_waypoint_pause(self, rx, ry, rz):
+        """Pause once per waypoint when the robot gets close on the SAME
+        level. Returns True if a pause was just requested (skip further
+        checks this tick)."""
+        if not self.pause_at_waypoints or not self.waypoint_xyz:
+            return False
+        for idx, (wx, wy, wz) in enumerate(self.waypoint_xyz):
+            if idx in self.waypoints_paused or idx in self.current_boundary_wps:
+                # Boundary waypoints pause at segment completion instead;
+                # canceling here would leave a stub of the old segment that
+                # resume replays before switching.
+                continue
+            if abs(wz - rz) > self.LEVEL_Z_WINDOW_M:
+                continue
+            if math.hypot(wx - rx, wy - ry) <= self.WAYPOINT_PAUSE_RADIUS_M:
+                self.waypoints_paused.add(idx)
+                self.get_logger().info(
+                    f'Waypoint {idx + 1} reached; pausing (pause-at-waypoints is on).')
+                self._request_pause(
+                    f'Waypoint {idx + 1} reached; press Resume to continue')
+                return True
+        return False
 
     def _request_pause(self, reason):
         if self.current_goal_handle is None or self.goal_finished:
@@ -531,6 +638,17 @@ class FollowPathClient(Node):
 
     def resume_callback(self, request, response):
         del request
+        if self.boundary_pause:
+            if not self.route_valid:
+                response.success = False
+                response.message = 'Route is invalid; replan before resuming.'
+                return response
+            self.boundary_pause = False
+            self.paused = False
+            response.success = True
+            response.message = 'Resuming with the next segment.'
+            self.send_next_path()
+            return response
         if not self.paused or self.current_item is None:
             response.success = False
             response.message = 'No paused mission is available.'
@@ -550,6 +668,8 @@ class FollowPathClient(Node):
         dropped = len(self.path_queue)
         self.path_queue.clear()
         self.paused = False
+        self.boundary_pause = False
+        self.current_boundary_wps = set()
         self.cancel_reason = 'abort'
         if self.current_goal_handle is not None and not self.goal_finished:
             if not self.cancel_in_progress:
@@ -670,6 +790,22 @@ class FollowPathClient(Node):
                     f'path remaining; continuing the segment '
                     f'(auto-continue {self.auto_continue_count}/{self.MAX_AUTO_CONTINUES}).')
                 self.send_current_path(self.trimmed_current_path())
+                return
+            if (self.pause_at_waypoints and self.path_queue and
+                    self.current_boundary_wps):
+                wp = min(self.current_boundary_wps) + 1
+                self.waypoints_paused.update(self.current_boundary_wps)
+                self.current_boundary_wps = set()
+                self.current_item = None
+                self.paused = True
+                self.boundary_pause = True
+                self.get_logger().info(
+                    f'Waypoint {wp} reached (segment boundary); pausing before '
+                    f'the next segment.')
+                self.publish_status(
+                    MissionStatus.PAUSED,
+                    f'Waypoint {wp} reached; press Resume for the next segment',
+                    can_resume=True)
                 return
             self.get_logger().info('Goal completed, sending next if available.')
             self.current_item = None

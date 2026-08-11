@@ -163,6 +163,14 @@ void PathPlannerNode::setupSubscriptions()
     regenerate_maps_service = this->create_service<std_srvs::srv::Trigger>(
             "/ugv_nav4d_ros2/regenerate_maps", std::bind(&PathPlannerNode::regenerateMapsCallback, this, std::placeholders::_1, std::placeholders::_2));
 
+    execution_status_subscription = create_subscription<ugv_nav4d_ros2::msg::MissionStatus>(
+        "/ugv_nav4d_ros2/execution_status", rclcpp::QoS(1).transient_local(),
+        [this](const ugv_nav4d_ros2::msg::MissionStatus::SharedPtr msg){
+            // Tracked so the clear-executed-path service can refuse while a
+            // route is actually being driven. Clearing itself is manual
+            // (operator button) by explicit request.
+            last_execution_state_ = msg->state;
+        });
     sub_goal_pose = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/goal_pose", 1,
             bind(&PathPlannerNode::processGoalRequest, this, std::placeholders::_1));
 
@@ -184,6 +192,8 @@ void PathPlannerNode::setupSubscriptions()
             "/ugv_nav4d_ros2/edit_waypoint", std::bind(&PathPlannerNode::editWaypointCallback, this, std::placeholders::_1, std::placeholders::_2));
 
     // transient_local so RViz still shows the queued waypoints after a display restart
+    waypoint_poses_publisher = this->create_publisher<geometry_msgs::msg::PoseArray>(
+        "/ugv_nav4d_ros2/waypoint_poses", rclcpp::QoS(1).transient_local());
     waypoint_marker_publisher = this->create_publisher<visualization_msgs::msg::MarkerArray>(
             "/ugv_nav4d_ros2/waypoint_markers", rclcpp::QoS(1).transient_local());
 
@@ -226,6 +236,22 @@ void PathPlannerNode::setupSubscriptions()
     execute_path_publisher = this->create_publisher<ugv_nav4d_ros2::msg::LabeledPathArray>(
             "/ugv_nav4d_ros2/execute_path_segments", 10);
 
+    clear_executed_path_service = this->create_service<std_srvs::srv::Trigger>(
+        "/ugv_nav4d_ros2/clear_executed_path",
+        [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+               std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+            if (last_execution_state_ == ugv_nav4d_ros2::msg::MissionStatus::EXECUTING ||
+                last_execution_state_ == ugv_nav4d_ros2::msg::MissionStatus::PAUSED){
+                response->success = false;
+                response->message = "Route is still active (executing/paused); stop it before clearing the display.";
+                publishStatus(response->message);
+                return;
+            }
+            clearExecutingPathDisplay();
+            response->success = true;
+            response->message = "Executed-path display cleared.";
+            publishStatus(response->message);
+        });
     execute_path_service = this->create_service<std_srvs::srv::Trigger>(
             "/ugv_nav4d_ros2/execute_path", std::bind(&PathPlannerNode::executePathCallback, this, std::placeholders::_1, std::placeholders::_2));
 
@@ -737,6 +763,14 @@ void PathPlannerNode::editWaypointCallback(const std::shared_ptr<ugv_nav4d_ros2:
 }
 
 void PathPlannerNode::publishWaypointMarkers(){
+    // Latched queue snapshot for the follower (pause-at-waypoints) and the
+    // operator panel (toggle enable state). Markers below are display-only.
+    geometry_msgs::msg::PoseArray queue_msg;
+    queue_msg.header.frame_id = get_parameter("world_frame").as_string();
+    queue_msg.header.stamp = this->get_clock()->now();
+    queue_msg.poses.assign(waypoint_queue.begin(), waypoint_queue.end());
+    waypoint_poses_publisher->publish(queue_msg);
+
     visualization_msgs::msg::MarkerArray marker_array;
 
     visualization_msgs::msg::Marker delete_all;
@@ -1343,6 +1377,28 @@ void PathPlannerNode::loadMissionCallback(
 }
 
 // Even-odd rule point-in-polygon test in the XY plane.
+// Zones are drawn on a map surface, so their vertex z values carry the level
+// they were drawn on. A zone applies only within [min vz - margin, max vz +
+// margin]; the vertex spread absorbs slopes inside large polygons. Legacy or
+// synthetic zones with all-zero vertex z keep the old whole-column behavior.
+static bool zoneLevelBandContains(const std::vector<geometry_msgs::msg::Point>& vertices, double z){
+    constexpr double kLevelMargin = 2.0;
+    double min_z = std::numeric_limits<double>::infinity();
+    double max_z = -std::numeric_limits<double>::infinity();
+    bool any_nonzero = false;
+    for (const auto& v : vertices){
+        min_z = std::min(min_z, v.z);
+        max_z = std::max(max_z, v.z);
+        if (std::abs(v.z) > 1e-9){
+            any_nonzero = true;
+        }
+    }
+    if (!any_nonzero || vertices.empty()){
+        return true; // whole column (legacy zones without height information)
+    }
+    return z >= min_z - kLevelMargin && z <= max_z + kLevelMargin;
+}
+
 static bool pointInPolygonXY(double x, double y, const std::vector<geometry_msgs::msg::Point>& poly){
     if (poly.size() < 3){
         return false;
@@ -1451,7 +1507,10 @@ void PathPlannerNode::rebuildSpeedZoneCache(){
                 }
                 Eigen::Vector3d position;
                 if (!map.fromGrid(neighbor->getIndex(), position, neighbor->getHeight(), false) ||
-                    !pointInPolygonXY(position.x(), position.y(), zone.vertices)){
+                    !pointInPolygonXY(position.x(), position.y(), zone.vertices) ||
+                    !zoneLevelBandContains(zone.vertices, position.z())){
+                    // The band stops the one remaining vertical path: a ramp
+                    // that lies inside the polygon and connects the storeys.
                     continue;
                 }
                 zone_nodes.insert(neighbor);
@@ -1507,7 +1566,9 @@ void PathPlannerNode::publishZoneSpeedLimit(const geometry_msgs::msg::Point& rob
             rclcpp::Time(zone.expires_at) <= now;
         if (!expired && zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::SPEED_LIMIT &&
             std::isfinite(zone.speed_limit) && zone.speed_limit > 0.0f &&
-            pointInPolygonXY(robot_position.x, robot_position.y, zone.vertices)){
+            pointInPolygonXY(robot_position.x, robot_position.y, zone.vertices) &&
+            zoneLevelBandContains(zone.vertices,
+                robot_position.z - get_parameter("distToGround").as_double())){
             xy_fallback_limit = xy_fallback_limit > 0.0f
                 ? std::min(xy_fallback_limit, zone.speed_limit)
                 : zone.speed_limit;
@@ -1562,7 +1623,8 @@ void PathPlannerNode::publishZoneSpeedLimit(const geometry_msgs::msg::Point& rob
             rclcpp::Time(zone.expires_at) <= now;
         if (expired || zone.zone_type != ugv_nav4d_ros2::msg::ForbiddenZone::SPEED_LIMIT ||
             !std::isfinite(zone.speed_limit) || zone.speed_limit <= 0.0f ||
-            !pointInPolygonXY(robot_position.x, robot_position.y, zone.vertices)){
+            !pointInPolygonXY(robot_position.x, robot_position.y, zone.vertices) ||
+            !zoneLevelBandContains(zone.vertices, robot_node->getHeight())){
             continue;
         }
         // An empty cache means the drawn surface could not be resolved. Apply
@@ -1730,7 +1792,8 @@ void PathPlannerNode::applyForbiddenZones(){
                 if (!trav_map_3d.fromGrid(node->getIndex(), position, node->getHeight(), false)) continue;
                 bool preferred = false;
                 for (const auto* zone : preferred_zones){
-                    if (pointInPolygonXY(position.x(), position.y(), zone->vertices)){
+                    if (pointInPolygonXY(position.x(), position.y(), zone->vertices) &&
+                        zoneLevelBandContains(zone->vertices, position.z())){
                         preferred = true;
                         break;
                     }
@@ -1841,7 +1904,8 @@ size_t PathPlannerNode::applyZoneToTravMap(const ugv_nav4d_ros2::msg::ForbiddenZ
             }
             Eigen::Vector3d position;
             trav_map_3d.fromGrid(neighbor->getIndex(), position, neighbor->getHeight(), false);
-            if (!pointInPolygonXY(position.x(), position.y(), zone.vertices)){
+            if (!pointInPolygonXY(position.x(), position.y(), zone.vertices) ||
+                !zoneLevelBandContains(zone.vertices, position.z())){
                 continue;
             }
             visited.insert(neighbor);
@@ -3546,6 +3610,11 @@ void PathPlannerNode::clearExecutingPathDisplay(){
     empty_path.header.frame_id = get_parameter("world_frame").as_string();
     empty_path.header.stamp = this->get_clock()->now();
     combined_path_publisher->publish(empty_path);
+    // Also clear the per-pose direction arrows: visualize_path.py treats an
+    // empty LabeledPathArray on the DISPLAY topic as "clear". The follower's
+    // execute_path_segments input is deliberately not touched.
+    ugv_nav4d_ros2::msg::LabeledPathArray empty_labeled;
+    labeled_path_publisher->publish(empty_labeled);
     visualization_msgs::msg::MarkerArray clear_markers;
     visualization_msgs::msg::Marker clear_marker;
     clear_marker.action = visualization_msgs::msg::Marker::DELETEALL;

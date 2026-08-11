@@ -82,6 +82,15 @@ def generate_launch_description():
 
     declared_arguments.append(
         Node(
+            package="ugv_nav4d_ros2",
+            executable="bag_recorder.py",
+            name="nav_bag_recorder",
+            output="screen",
+        )
+    )
+
+    declared_arguments.append(
+        Node(
         package="ugv_nav4d_ros2",
         executable="visualize_path.py",
         name="ugv_nav4d_path_visualization",

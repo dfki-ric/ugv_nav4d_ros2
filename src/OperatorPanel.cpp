@@ -15,6 +15,8 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <cstdio>
+#include <std_srvs/srv/set_bool.hpp>
+#include <geometry_msgs/msg/pose_array.hpp>
 #include <QPushButton>
 #include <QStringList>
 #include <QSpinBox>
@@ -75,6 +77,9 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     height_label_ = new QLabel("Height: waiting for planner");
     height_label_->setWordWrap(true);
     height_label_->setMaximumHeight(40);
+    bag_label_ = new QLabel("Bag: recorder not seen");
+    bag_label_->setWordWrap(true);
+    bag_label_->setMaximumHeight(40);
     inspection_label_ = new QLabel("Inspection: select Inspect Traversability and click a map patch");
     inspection_label_->setWordWrap(true);
     inspection_label_->setMaximumHeight(60);
@@ -84,6 +89,7 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     layout->addWidget(deviation_label_);
     layout->addWidget(footprint_label_);
     layout->addWidget(height_label_);
+    layout->addWidget(bag_label_);
     layout->addWidget(health_label_);
     layout->addWidget(readiness_label_);
     layout->addWidget(inspection_label_);
@@ -157,26 +163,45 @@ OperatorPanel::OperatorPanel(QWidget* parent)
         "Measure the current wheel positions via TF (the wheelbase is variable) "
         "and apply the resulting footprint to the planner. Triggers a trav-map "
         "and planner rebuild when the size changed.");
+    pause_at_wp_check_ = new QCheckBox("Pause at each waypoint (manual resume)");
+    pause_at_wp_check_->setEnabled(false);
+    pause_at_wp_check_->setToolTip(
+        "When enabled, execution pauses once near every queued waypoint and only\n"
+        "continues after Resume. Needs at least one waypoint in the queue; a plain\n"
+        "single-goal route has none, so the toggle stays disabled.");
+    buttons->addWidget(pause_at_wp_check_, 1, 0, 1, 2);
     buttons->addWidget(pause_button_, 0, 0);
     buttons->addWidget(resume_button_, 0, 1);
-    buttons->addWidget(recover_button_, 1, 0, 1, 2);
-    buttons->addWidget(replan_button_, 2, 0, 1, 2);
-    buttons->addWidget(execute_path_button_, 3, 0);
-    buttons->addWidget(discard_path_button_, 3, 1);
-    buttons->addWidget(clear_waypoints_button_, 4, 0);
-    buttons->addWidget(undo_waypoint_button_, 4, 1);
-    buttons->addWidget(reverse_waypoints_button_, 5, 0, 1, 2);
-    buttons->addWidget(clear_zones_button_, 6, 0);
-    buttons->addWidget(undo_zone_button_, 6, 1);
-    buttons->addWidget(save_map_button_, 7, 0);
-    buttons->addWidget(republish_maps_button_, 7, 1);
-    buttons->addWidget(regenerate_maps_button_, 8, 0);
-    buttons->addWidget(update_footprint_button_, 8, 1);
+    buttons->addWidget(recover_button_, 2, 0, 1, 2);
+    buttons->addWidget(replan_button_, 3, 0, 1, 2);
+    buttons->addWidget(execute_path_button_, 4, 0);
+    buttons->addWidget(discard_path_button_, 4, 1);
+    buttons->addWidget(clear_waypoints_button_, 5, 0);
+    buttons->addWidget(undo_waypoint_button_, 5, 1);
+    buttons->addWidget(reverse_waypoints_button_, 6, 0, 1, 2);
+    buttons->addWidget(clear_zones_button_, 7, 0);
+    buttons->addWidget(undo_zone_button_, 7, 1);
+    buttons->addWidget(save_map_button_, 8, 0);
+    buttons->addWidget(republish_maps_button_, 8, 1);
+    buttons->addWidget(regenerate_maps_button_, 9, 0);
+    buttons->addWidget(update_footprint_button_, 9, 1);
     save_mission_button_ = new QPushButton("Save mission");
     load_mission_button_ = new QPushButton("Load mission");
-    buttons->addWidget(save_mission_button_, 9, 0);
-    buttons->addWidget(load_mission_button_, 9, 1);
-    buttons->addWidget(recalibrate_height_button_, 10, 0, 1, 2);
+    buttons->addWidget(save_mission_button_, 10, 0);
+    buttons->addWidget(load_mission_button_, 10, 1);
+    buttons->addWidget(recalibrate_height_button_, 11, 0, 1, 2);
+    record_bag_button_ = new QPushButton("\u25CF Record nav bag");
+    record_bag_button_->setCheckable(true);
+    record_bag_button_->setToolTip(
+        "Start/stop a rosbag ON THE ROBOT with all navigation topics\n"
+        "(planner + follower namespaces, TF, cmd_vel, odometries, rosout,\n"
+        "input point cloud). Written to /opt/workspace/bags on the robot.");
+    clear_executed_path_button_ = new QPushButton("Clear executed path");
+    clear_executed_path_button_->setToolTip(
+        "Remove the finished/stopped route from the 3D view (display only).\n"
+        "Refused while a route is executing or paused.");
+    buttons->addWidget(clear_executed_path_button_, 12, 0, 1, 2);
+    buttons->addWidget(record_bag_button_, 13, 0, 1, 2);
     rebuild_sensitive_buttons_ = {
         recover_button_, replan_button_, execute_path_button_, discard_path_button_,
         clear_waypoints_button_, undo_waypoint_button_, reverse_waypoints_button_,
@@ -260,6 +285,23 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     connect(regenerate_maps_button_, &QPushButton::clicked, this, &OperatorPanel::onRegenerateMaps);
     connect(recalibrate_height_button_, &QPushButton::clicked, this, [this]() {
         callTrigger(recalibrate_height_client_, "Recalibrate height");
+    });
+    connect(clear_executed_path_button_, &QPushButton::clicked, this, [this]() {
+        callTrigger(clear_executed_path_client_, "Clear executed path");
+    });
+    connect(pause_at_wp_check_, &QCheckBox::toggled, this, [this](bool checked) {
+        auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
+        request->data = checked;
+        if (set_pause_at_wp_client_->service_is_ready()){
+            set_pause_at_wp_client_->async_send_request(request);
+        } else {
+            setStatusText("Pause-at-waypoints service unavailable (follower not running?)");
+        }
+    });
+    connect(record_bag_button_, &QPushButton::clicked, this, [this](bool checked) {
+        // The latched status topic is the truth; the check state follows it.
+        callTrigger(checked ? start_bag_client_ : stop_bag_client_,
+                    checked ? "Start bag recording" : "Stop bag recording");
     });
     connect(update_footprint_button_, &QPushButton::clicked, this, [this]() {
         callTrigger(update_footprint_client_, "Update footprint");
@@ -405,6 +447,50 @@ void OperatorPanel::onInitialize()
                 }
             }, Qt::QueuedConnection);
         });
+    waypoint_poses_sub_ = node_->create_subscription<geometry_msgs::msg::PoseArray>(
+        "/ugv_nav4d_ros2/waypoint_poses", rclcpp::QoS(1).transient_local(),
+        [this](const geometry_msgs::msg::PoseArray::SharedPtr msg)
+        {
+            const int count = static_cast<int>(msg->poses.size());
+            QMetaObject::invokeMethod(this, [this, count]() {
+                // Only meaningful for waypoint routes: no queue, no toggle.
+                pause_at_wp_check_->setEnabled(count > 0);
+                if (count == 0){
+                    pause_at_wp_check_->setToolTip(
+                        "Add at least one waypoint first; a plain single-goal "
+                        "route has nothing to pause at.");
+                }
+            }, Qt::QueuedConnection);
+        });
+    pause_at_wp_state_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+        "/follow_path_client/pause_at_waypoints", rclcpp::QoS(1).transient_local(),
+        [this](const std_msgs::msg::Bool::SharedPtr msg)
+        {
+            QMetaObject::invokeMethod(this, [this, on = msg->data]() {
+                // Follow the follower's latched truth without re-triggering
+                // the service call.
+                QSignalBlocker block(pause_at_wp_check_);
+                pause_at_wp_check_->setChecked(on);
+            }, Qt::QueuedConnection);
+        });
+    bag_status_sub_ = node_->create_subscription<std_msgs::msg::String>(
+        "/ugv_nav4d_ros2/bag_recorder_status", rclcpp::QoS(1).transient_local(),
+        [this](const std_msgs::msg::String::SharedPtr msg)
+        {
+            const bool recording = msg->data.rfind("RECORDING", 0) == 0;
+            const QString text = "Bag: " + QString::fromStdString(msg->data);
+            QMetaObject::invokeMethod(this, [this, text, recording]() {
+                bag_label_->setText(text);
+                bag_label_->setStyleSheet(recording
+                    ? "QLabel { color: #e0564f; font-weight: bold; }" : "");
+                record_bag_button_->setChecked(recording);
+                record_bag_button_->setText(recording
+                    ? "\u25A0 Stop nav bag" : "\u25CF Record nav bag");
+                record_bag_button_->setStyleSheet(recording
+                    ? "QPushButton { font-weight: bold; background-color: #b71c1c; color: white; }"
+                    : "");
+            }, Qt::QueuedConnection);
+        });
     height_info_sub_ = node_->create_subscription<std_msgs::msg::String>(
         "/ugv_nav4d_ros2/height_info", 10,
         [this](const std_msgs::msg::String::SharedPtr msg)
@@ -454,6 +540,10 @@ void OperatorPanel::onInitialize()
     regenerate_maps_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/regenerate_maps");
     update_footprint_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/update_footprint");
     recalibrate_height_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/recalibrate_height");
+    set_pause_at_wp_client_ = node_->create_client<std_srvs::srv::SetBool>("/ugv_nav4d_ros2/set_pause_at_waypoints");
+    clear_executed_path_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/clear_executed_path");
+    start_bag_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/start_bag_recording");
+    stop_bag_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/stop_bag_recording");
     save_mission_client_ = node_->create_client<ugv_nav4d_ros2::srv::MissionFile>("/ugv_nav4d_ros2/save_mission");
     load_mission_client_ = node_->create_client<ugv_nav4d_ros2::srv::MissionFile>("/ugv_nav4d_ros2/load_mission");
 

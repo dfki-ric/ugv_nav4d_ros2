@@ -299,6 +299,7 @@ install(FILES plugins_description.xml
 install(PROGRAMS
   scripts/visualize_path.py
   scripts/follow_path_client.py
+  scripts/bag_recorder.py
   scripts/field_operations.py
   scripts/test_footprint_adaptation.py
   scripts/posture_publisher.py
