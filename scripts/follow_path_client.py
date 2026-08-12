@@ -865,6 +865,20 @@ class FollowPathClient(Node):
                 elif reason == 'abort':
                     self.current_item = None
                     self.publish_status(MissionStatus.ABORTED, 'Mission aborted by operator')
+            elif self.current_item is not None:
+                # Externally canceled (robot-side stop, another action client,
+                # controller shutdown) -- no operator-side request set
+                # cancel_in_progress. Keep the mission and present it as a
+                # resumable pause: Resume re-sends the remaining stretch from
+                # the robot position (and the panel re-arms the controllers).
+                self.current_speed = 0.0
+                self.paused = True
+                self.get_logger().warn(
+                    'Goal canceled externally; mission retained as paused.')
+                self.publish_status(
+                    MissionStatus.PAUSED,
+                    'Execution stopped externally; press Resume to continue '
+                    'from the robot position', can_resume=True)
         else:
             if self.paused and self.current_item is not None:
                 # A requested pause can race the controller into ABORTED
@@ -886,6 +900,23 @@ class FollowPathClient(Node):
                 pending = self.pending_labeled_path_msg
                 self.pending_labeled_path_msg = None
                 self.replace_queue_and_send(pending)
+                return
+            if (result.status == GoalStatus.STATUS_ABORTED and
+                    self.current_item is not None):
+                # Aborted without any operator-side request: typically a
+                # robot-side stop (controller deactivated, e-stop cycle,
+                # MCS intervention). The mission is still sound -- keep it
+                # as a resumable pause instead of a dead FAILED that forces
+                # re-executing the stale route from segment one.
+                self.current_speed = 0.0
+                self.paused = True
+                self.get_logger().warn(
+                    'Goal aborted externally; mission retained as paused. '
+                    'Resume retries the remaining stretch from the robot position.')
+                self.publish_status(
+                    MissionStatus.PAUSED,
+                    'Execution aborted externally (controller stop?); press '
+                    'Resume to continue from the robot position', can_resume=True)
                 return
             self.get_logger().warn(f'Goal failed with status: {result.status}. Stopping.')
             failure = ('FollowPath aborted' if result.status == GoalStatus.STATUS_ABORTED
