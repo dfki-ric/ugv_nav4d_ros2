@@ -139,6 +139,15 @@ PathPlannerNode::PathPlannerNode()
     last_zone_speed_limit_match = this->get_clock()->now();
 
     setupSubscriptions();
+
+    // Publish the TRUE (empty) startup state of every latched display topic.
+    // The zenoh bridge caches transient_local samples and outlives planner and
+    // rviz restarts; without these, a rejoining rviz receives the PREVIOUS
+    // session's zones/waypoints/paths from the bridge cache as ghosts.
+    publishWaypointMarkers();
+    publishForbiddenZoneMarkers();
+    clearExecutingPathDisplay();
+
     publishMissionStatus(ugv_nav4d_ros2::msg::MissionStatus::READY, "Planner node started");
 }
 
@@ -163,6 +172,12 @@ void PathPlannerNode::setupSubscriptions()
     regenerate_maps_service = this->create_service<std_srvs::srv::Trigger>(
             "/ugv_nav4d_ros2/regenerate_maps", std::bind(&PathPlannerNode::regenerateMapsCallback, this, std::placeholders::_1, std::placeholders::_2));
 
+    waypoint_photos_subscription = create_subscription<std_msgs::msg::String>(
+        "/follow_path_client/waypoint_photos", rclcpp::QoS(1).transient_local(),
+        [this](const std_msgs::msg::String::SharedPtr msg){
+            std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+            waypoint_photos_json = msg->data;
+        });
     execution_status_subscription = create_subscription<ugv_nav4d_ros2::msg::MissionStatus>(
         "/ugv_nav4d_ros2/execution_status", rclcpp::QoS(1).transient_local(),
         [this](const ugv_nav4d_ros2::msg::MissionStatus::SharedPtr msg){
@@ -1243,6 +1258,12 @@ void PathPlannerNode::saveMissionCallback(
             << zone.vertices.size() << '\n';
         for (const auto& v : zone.vertices) out << "v " << v.x << ' ' << v.y << ' ' << v.z << '\n';
     }
+    // Optional trailing section: photos captured at waypoint pauses during the
+    // last execution (JSON: waypoint number -> file path on the robot). Old
+    // loaders stop after the zones and never see it.
+    if (!waypoint_photos_json.empty() && waypoint_photos_json != "{}"){
+        out << "photos " << std::quoted(waypoint_photos_json) << '\n';
+    }
     response->success = static_cast<bool>(out);
     response->message = response->success ? "Mission saved to " + filename
                                           : "Failed while writing mission file " + filename;
@@ -1369,10 +1390,24 @@ void PathPlannerNode::loadMissionCallback(
         std::any_of(forbidden_zones.begin(), forbidden_zones.end(), zoneAffectsPlanning) ||
         std::any_of(loaded_zones.begin(), loaded_zones.end(), zoneAffectsPlanning);
     forbidden_zones = std::move(loaded_zones);
+    std::string photo_note;
+    if ((in >> token) && token == "photos"){
+        std::string photos_json;
+        if (in >> std::quoted(photos_json) && !photos_json.empty()){
+            waypoint_photos_json = photos_json;
+            const size_t count = static_cast<size_t>(
+                std::count(photos_json.begin(), photos_json.end(), ':'));
+            photo_note = " Mission references " + std::to_string(count) +
+                         " waypoint photo(s); paths logged.";
+            RCLCPP_INFO_STREAM(this->get_logger(),
+                "Waypoint photos from mission file: " << photos_json);
+        }
+    }
     publishWaypointMarkers();
     onForbiddenZonesChanged(planning_graph_changed);
     response->success = true;
-    response->message = "Mission loaded from " + filename + " (waypoints + zones); set a goal and plan.";
+    response->message = "Mission loaded from " + filename +
+                        " (waypoints + zones); set a goal and plan." + photo_note;
     publishStatus(response->message);
 }
 

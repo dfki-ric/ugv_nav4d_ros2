@@ -292,6 +292,8 @@ private:
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr rebuilding_publisher;
     rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr waypoint_poses_publisher;
     rclcpp::Subscription<ugv_nav4d_ros2::msg::MissionStatus>::SharedPtr execution_status_subscription;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr waypoint_photos_subscription;
+    std::string waypoint_photos_json;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr clear_executed_path_service;
     uint8_t last_execution_state_ = 255;
     int rebuild_depth_ = 0;

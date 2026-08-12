@@ -13,11 +13,16 @@ from nav_msgs.msg import Path
 from nav2_msgs.action import FollowPath
 from std_srvs.srv import SetBool, Trigger
 from geometry_msgs.msg import PoseArray
+from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import Bool, Float32, String
 from visualization_msgs.msg import Marker, MarkerArray
 from ugv_nav4d_ros2.msg import LabeledPathArray, MissionStatus
 
+import datetime
+import json
 import math
+import os
+import time
 
 class FollowPathClient(Node):
     # A controller "success" with more than this much path length remaining is
@@ -91,6 +96,23 @@ class FollowPathClient(Node):
         # AT the waypoint instead of being canceled 1.5 m short.
         self.current_boundary_wps = set()
         self.boundary_pause = False
+        # Waypoint photos: on every waypoint pause the latest camera frame is
+        # written to disk; the index->path map is published latched so the
+        # planner persists it into the mission file on save_mission.
+        self.declare_parameter('waypoint_photo_topic',
+                               '/arter/prosilica_left/image_raw/compressed')
+        self.declare_parameter('waypoint_photo_dir', '/opt/workspace/missions/photos')
+        self.latest_photo_msg = None
+        self.latest_photo_wall = 0.0
+        self.waypoint_photos = {}
+        self.create_subscription(
+            CompressedImage,
+            self.get_parameter('waypoint_photo_topic').value,
+            self.photo_frame_callback, 1)
+        self.waypoint_photos_pub = self.create_publisher(
+            String, '/follow_path_client/waypoint_photos',
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.waypoint_photos_pub.publish(String(data='{}'))
         self.pause_at_wp_state_pub = self.create_publisher(
             Bool, '/follow_path_client/pause_at_waypoints',
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
@@ -303,6 +325,8 @@ class FollowPathClient(Node):
         self.waypoints_paused = set()
         self.current_boundary_wps = set()
         self.boundary_pause = False
+        self.waypoint_photos = {}
+        self.waypoint_photos_pub.publish(String(data='{}'))
         self.current_item = None
         self.total_segments = len(self.path_queue)
         self.current_segment = 0
@@ -574,6 +598,37 @@ class FollowPathClient(Node):
                     break
         return boundary
 
+    def photo_frame_callback(self, msg):
+        self.latest_photo_msg = msg
+        self.latest_photo_wall = time.time()
+
+    def capture_waypoint_photo(self, wp_index):
+        """Write the latest camera frame for this waypoint; never raises."""
+        try:
+            if self.latest_photo_msg is None:
+                self.get_logger().warn(
+                    f'Waypoint {wp_index + 1}: no camera frame received on '
+                    f'{self.get_parameter("waypoint_photo_topic").value}; no photo saved.')
+                return
+            age = time.time() - self.latest_photo_wall
+            if age > 5.0:
+                self.get_logger().warn(
+                    f'Waypoint {wp_index + 1}: newest camera frame is {age:.0f} s old; '
+                    f'saving it anyway.')
+            photo_dir = self.get_parameter('waypoint_photo_dir').value
+            os.makedirs(photo_dir, exist_ok=True)
+            ext = 'jpg' if 'jp' in (self.latest_photo_msg.format or '').lower() else 'png'
+            stamp = datetime.datetime.now().strftime('%Y_%m_%d-%H_%M_%S')
+            path = os.path.join(photo_dir, f'wp{wp_index + 1}_{stamp}.{ext}')
+            with open(path, 'wb') as f:
+                f.write(bytes(self.latest_photo_msg.data))
+            self.waypoint_photos[str(wp_index + 1)] = path
+            self.waypoint_photos_pub.publish(
+                String(data=json.dumps(self.waypoint_photos)))
+            self.get_logger().info(f'Waypoint {wp_index + 1}: photo saved to {path}')
+        except Exception as e:  # noqa: BLE001 -- a photo must never break driving
+            self.get_logger().error(f'Waypoint photo capture failed: {e}')
+
     def check_waypoint_pause(self, rx, ry, rz):
         """Pause once per waypoint when the robot gets close on the SAME
         level. Returns True if a pause was just requested (skip further
@@ -590,6 +645,7 @@ class FollowPathClient(Node):
                 continue
             if math.hypot(wx - rx, wy - ry) <= self.WAYPOINT_PAUSE_RADIUS_M:
                 self.waypoints_paused.add(idx)
+                self.capture_waypoint_photo(idx)
                 self.get_logger().info(
                     f'Waypoint {idx + 1} reached; pausing (pause-at-waypoints is on).')
                 self._request_pause(
@@ -794,6 +850,7 @@ class FollowPathClient(Node):
             if (self.pause_at_waypoints and self.path_queue and
                     self.current_boundary_wps):
                 wp = min(self.current_boundary_wps) + 1
+                self.capture_waypoint_photo(wp - 1)
                 self.waypoints_paused.update(self.current_boundary_wps)
                 self.current_boundary_wps = set()
                 self.current_item = None
