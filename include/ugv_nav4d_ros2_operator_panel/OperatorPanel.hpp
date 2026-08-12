@@ -59,6 +59,7 @@ private Q_SLOTS:
     void onStopExecution();
     void onPauseExecution();
     void onResumeExecution();
+    void activateNavigationControllers(const QString& context);
     void onRecoverMission();
     void onReplanMission();
     void onExecutePath();

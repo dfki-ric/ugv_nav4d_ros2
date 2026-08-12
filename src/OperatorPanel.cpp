@@ -910,7 +910,10 @@ void OperatorPanel::onPauseExecution()
 
 void OperatorPanel::onResumeExecution()
 {
+    // Same ordering rationale as Execute: a pause can outlive a controller
+    // deactivation (e-stop cycle, manual switch), so Resume re-arms the set.
     callTrigger(resume_execution_client_, "Resume");
+    activateNavigationControllers("resume requested");
 }
 
 void OperatorPanel::onRecoverMission()
@@ -1060,41 +1063,47 @@ void OperatorPanel::onReplanMission()
     callTrigger(replan_mission_client_, "Replan");
 }
 
+void OperatorPanel::activateNavigationControllers(const QString& context)
+{
+    //Command FIRST, controller switch right after (operator-chosen order): the
+    //follower/goal handshake takes longer than the switch, so the controllers
+    //are up before the first command lands, and the button is never delayed
+    //by the switch round-trip. BEST_EFFORT makes the activation a no-op when
+    //they already run; without a controller_manager (bench/sim) the switch is
+    //skipped entirely.
+    if (!switch_controller_client_ || !switch_controller_client_->service_is_ready())
+    {
+        return;
+    }
+    auto request = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
+    for (const auto& name : kNavigationControllers)
+    {
+        request->activate_controllers.push_back(name.toStdString());
+    }
+    request->strictness = controller_manager_msgs::srv::SwitchController::Request::BEST_EFFORT;
+    switch_controller_client_->async_send_request(request,
+        [this, guard = QPointer<OperatorPanel>(this), context](rclcpp::Client<controller_manager_msgs::srv::SwitchController>::SharedFuture future)
+        {
+            if (!guard)
+            {
+                return;
+            }
+            const bool ok = future.get()->ok;
+            QMetaObject::invokeMethod(this, [this, ok, context]() {
+                refreshControllers();
+                if (!ok)
+                {
+                    setStatusText("WARNING: " + context +
+                                  ", but the navigation controllers could not be enabled.");
+                }
+            }, Qt::QueuedConnection);
+        });
+}
+
 void OperatorPanel::onExecutePath()
 {
-    //Send the path FIRST, then activate the navigation controller set right
-    //after (operator-chosen order): the follower/goal handshake takes longer
-    //than the controller switch, so the controllers are up before the first
-    //command lands, and Execute is never delayed by the switch round-trip.
-    //BEST_EFFORT makes the activation a no-op when they already run; without
-    //a controller_manager (bench/sim) the switch is skipped entirely.
     callTrigger(execute_path_client_, "Execute path");
-
-    if (switch_controller_client_ && switch_controller_client_->service_is_ready())
-    {
-        auto request = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
-        for (const auto& name : kNavigationControllers)
-        {
-            request->activate_controllers.push_back(name.toStdString());
-        }
-        request->strictness = controller_manager_msgs::srv::SwitchController::Request::BEST_EFFORT;
-        switch_controller_client_->async_send_request(request,
-            [this, guard = QPointer<OperatorPanel>(this)](rclcpp::Client<controller_manager_msgs::srv::SwitchController>::SharedFuture future)
-            {
-                if (!guard)
-                {
-                    return;
-                }
-                const bool ok = future.get()->ok;
-                QMetaObject::invokeMethod(this, [this, ok]() {
-                    refreshControllers();
-                    if (!ok)
-                    {
-                        setStatusText("WARNING: path executing but the navigation controllers could not be enabled.");
-                    }
-                }, Qt::QueuedConnection);
-            });
-    }
+    activateNavigationControllers("path executing");
 }
 
 void OperatorPanel::onDiscardPath()
