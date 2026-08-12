@@ -39,7 +39,7 @@ class FollowPathClient(Node):
     # than this from the current segment.
     # Defaults for the max_path_deviation_m / deviation_breaches_to_pause
     # PARAMETERS (tunable per deployment and live via `ros2 param set`).
-    MAX_PATH_DEVIATION_M = 4.0
+    MAX_PATH_DEVIATION_M = 2.0
     # Consecutive breached checks (at DEVIATION_CHECK_PERIOD_S) required
     # before pausing, so a single localization jump cannot stop a mission.
     DEVIATION_BREACHES_TO_PAUSE = 2
