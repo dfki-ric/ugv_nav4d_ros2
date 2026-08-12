@@ -49,11 +49,18 @@ class FollowPathClient(Node):
     # waypoint z and robot z share the body-frame height convention, so on
     # the same level they agree within slope/calibration error, while other
     # storeys differ by meters.
-    WAYPOINT_PAUSE_RADIUS_M = 1.5
-    # A waypoint within this distance of the current segment's tail counts as
-    # a segment-boundary waypoint (generous: the tail includes the goal-
-    # tolerance extension appended past the true waypoint).
-    WAYPOINT_BOUNDARY_MATCH_M = 1.2
+    # Pause-at-waypoints fires at the moment of REACHING the waypoint: the
+    # distance is tracked once the robot is inside the arm radius, and the
+    # pause triggers when the robot is on the point (AT radius) or the
+    # distance starts growing again (closest approach passed). The machine
+    # then brakes and rests just past the waypoint.
+    WAYPOINT_ARM_RADIUS_M = 3.0
+    WAYPOINT_AT_RADIUS_M = 0.4
+    WAYPOINT_RECEDE_M = 0.3
+    # Receding only counts as "reached" if the closest approach actually got
+    # near the point; merely brushing the arm radius and turning away (e.g.
+    # a direction change 2.5 m from the waypoint) must not fire.
+    WAYPOINT_REACH_MIN_M = 0.8
     # Shared same-level window: poses/waypoints and the robot both carry the
     # body-frame height convention, so same level agrees within slope and
     # calibration error while other storeys differ by meters.
@@ -94,8 +101,7 @@ class FollowPathClient(Node):
         # change at the waypoint): those pause AFTER the segment completes,
         # so the controller drives its full (extended) trajectory and stops
         # AT the waypoint instead of being canceled 1.5 m short.
-        self.current_boundary_wps = set()
-        self.boundary_pause = False
+        self.waypoint_min_dist = {}
         # Waypoint photos: on every waypoint pause the latest camera frame is
         # written to disk; the index->path map is published latched so the
         # planner persists it into the mission file on save_mission.
@@ -323,8 +329,7 @@ class FollowPathClient(Node):
         self.paused = False
         self.route_valid = True
         self.waypoints_paused = set()
-        self.current_boundary_wps = set()
-        self.boundary_pause = False
+        self.waypoint_min_dist = {}
         self.waypoint_photos = {}
         self.waypoint_photos_pub.publish(String(data='{}'))
         self.current_item = None
@@ -344,7 +349,6 @@ class FollowPathClient(Node):
             return
 
         self.current_item = self.path_queue.pop(0)
-        self.current_boundary_wps = self.segment_boundary_waypoints(self.current_item[0])
         self.current_segment += 1
         # Feedback from the previous segment must not leak into the resume
         # trimming of this one before the first feedback of this goal arrives.
@@ -579,24 +583,7 @@ class FollowPathClient(Node):
                              for p in msg.poses]
         # Queue changed: earlier stops no longer map to the same waypoints.
         self.waypoints_paused = set()
-
-    def segment_boundary_waypoints(self, path):
-        """Indices of waypoints lying at the tail of this segment."""
-        if not self.waypoint_xyz or not path.poses:
-            return set()
-        tail = path.poses[-20:]
-        boundary = set()
-        for idx, (wx, wy, wz) in enumerate(self.waypoint_xyz):
-            if idx in self.waypoints_paused:
-                continue
-            for p in tail:
-                if (abs(p.pose.position.z - wz) <= self.LEVEL_Z_WINDOW_M and
-                        math.hypot(p.pose.position.x - wx,
-                                   p.pose.position.y - wy)
-                        <= self.WAYPOINT_BOUNDARY_MATCH_M):
-                    boundary.add(idx)
-                    break
-        return boundary
+        self.waypoint_min_dist = {}
 
     def photo_frame_callback(self, msg):
         self.latest_photo_msg = msg
@@ -630,26 +617,43 @@ class FollowPathClient(Node):
             self.get_logger().error(f'Waypoint photo capture failed: {e}')
 
     def check_waypoint_pause(self, rx, ry, rz):
-        """Pause once per waypoint when the robot gets close on the SAME
-        level. Returns True if a pause was just requested (skip further
-        checks this tick)."""
+        """Pause once per waypoint at the moment it is REACHED (closest
+        approach), same level only. Returns True if a pause was just
+        requested (skip further checks this tick)."""
         if not self.pause_at_waypoints or not self.waypoint_xyz:
             return False
-        for idx, (wx, wy, wz) in enumerate(self.waypoint_xyz):
-            if idx in self.waypoints_paused or idx in self.current_boundary_wps:
-                # Boundary waypoints pause at segment completion instead;
-                # canceling here would leave a stub of the old segment that
-                # resume replays before switching.
-                continue
+        # STRICT ORDER: waypoints are visited in queue order (the planner
+        # routes through them in sequence), so only the next un-paused
+        # waypoint is ever eligible. Driving past waypoint 2's location on
+        # the way to waypoint 1 must not pause.
+        pending = [i for i in range(len(self.waypoint_xyz))
+                   if i not in self.waypoints_paused]
+        if not pending:
+            return False
+        for idx in (min(pending),):
+            wx, wy, wz = self.waypoint_xyz[idx]
             if abs(wz - rz) > self.LEVEL_Z_WINDOW_M:
                 continue
-            if math.hypot(wx - rx, wy - ry) <= self.WAYPOINT_PAUSE_RADIUS_M:
+            d = math.hypot(wx - rx, wy - ry)
+            if d > self.WAYPOINT_ARM_RADIUS_M:
+                continue
+            seen_min = self.waypoint_min_dist.get(idx)
+            self.waypoint_min_dist[idx] = d if seen_min is None else min(seen_min, d)
+            reached = (d <= self.WAYPOINT_AT_RADIUS_M or
+                       (seen_min is not None and
+                        seen_min <= self.WAYPOINT_REACH_MIN_M and
+                        d >= seen_min + self.WAYPOINT_RECEDE_M))
+            if not reached:
+                continue
+            # A pause can only take hold while a goal is active; in the gap
+            # between two segments it fails and is retried on the next tick.
+            if self._request_pause(
+                    f'Waypoint {idx + 1} reached; press Resume to continue'):
                 self.waypoints_paused.add(idx)
+                self.waypoint_min_dist.pop(idx, None)
                 self.capture_waypoint_photo(idx)
                 self.get_logger().info(
                     f'Waypoint {idx + 1} reached; pausing (pause-at-waypoints is on).')
-                self._request_pause(
-                    f'Waypoint {idx + 1} reached; press Resume to continue')
                 return True
         return False
 
@@ -694,17 +698,6 @@ class FollowPathClient(Node):
 
     def resume_callback(self, request, response):
         del request
-        if self.boundary_pause:
-            if not self.route_valid:
-                response.success = False
-                response.message = 'Route is invalid; replan before resuming.'
-                return response
-            self.boundary_pause = False
-            self.paused = False
-            response.success = True
-            response.message = 'Resuming with the next segment.'
-            self.send_next_path()
-            return response
         if not self.paused or self.current_item is None:
             response.success = False
             response.message = 'No paused mission is available.'
@@ -724,8 +717,7 @@ class FollowPathClient(Node):
         dropped = len(self.path_queue)
         self.path_queue.clear()
         self.paused = False
-        self.boundary_pause = False
-        self.current_boundary_wps = set()
+        self.waypoint_min_dist = {}
         self.cancel_reason = 'abort'
         if self.current_goal_handle is not None and not self.goal_finished:
             if not self.cancel_in_progress:
@@ -846,23 +838,6 @@ class FollowPathClient(Node):
                     f'path remaining; continuing the segment '
                     f'(auto-continue {self.auto_continue_count}/{self.MAX_AUTO_CONTINUES}).')
                 self.send_current_path(self.trimmed_current_path())
-                return
-            if (self.pause_at_waypoints and self.path_queue and
-                    self.current_boundary_wps):
-                wp = min(self.current_boundary_wps) + 1
-                self.capture_waypoint_photo(wp - 1)
-                self.waypoints_paused.update(self.current_boundary_wps)
-                self.current_boundary_wps = set()
-                self.current_item = None
-                self.paused = True
-                self.boundary_pause = True
-                self.get_logger().info(
-                    f'Waypoint {wp} reached (segment boundary); pausing before '
-                    f'the next segment.')
-                self.publish_status(
-                    MissionStatus.PAUSED,
-                    f'Waypoint {wp} reached; press Resume for the next segment',
-                    can_resume=True)
                 return
             self.get_logger().info('Goal completed, sending next if available.')
             self.current_item = None
