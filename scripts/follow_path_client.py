@@ -65,6 +65,11 @@ class FollowPathClient(Node):
     # body-frame height convention, so same level agrees within slope and
     # calibration error while other storeys differ by meters.
     LEVEL_Z_WINDOW_M = 2.0
+    # Mirrors the controller goal_checker xy_goal_tolerance: within this radius
+    # of a segment's (extended) end pose, nav2 would declare the goal reached
+    # immediately, so resume can skip the remainder instead of creeping along
+    # the extension stubs.
+    SEGMENT_GOAL_TOLERANCE_M = 2.0
     ROBOT_FRAME = 'arter/base_link'
 
     def __init__(self):
@@ -696,6 +701,31 @@ class FollowPathClient(Node):
         self.current_speed = 0.0
         self.publish_status(MissionStatus.PAUSED, 'Paused; mission retained')
 
+    def segment_end_reached(self):
+        """True if the robot already stands within the controller's goal
+        tolerance of the current segment's final (extended) pose. Resuming
+        such a segment would only creep forward along the extension until the
+        goal checker fires, so the caller advances to the next segment
+        directly instead."""
+        if self.current_item is None:
+            return False
+        path, _ = self.current_item
+        if not path.poses or not path.header.frame_id:
+            return False
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                path.header.frame_id, self.ROBOT_FRAME, Time())
+        except Exception:
+            return False  # no localization; let the normal resume path handle it
+        end = path.poses[-1].pose.position
+        dx = tf.transform.translation.x - end.x
+        dy = tf.transform.translation.y - end.y
+        if math.hypot(dx, dy) > self.SEGMENT_GOAL_TOLERANCE_M:
+            return False
+        # Same level-window guard as the waypoint logic: on a route that
+        # overlaps itself vertically, never match an end pose on another storey.
+        return abs(tf.transform.translation.z - end.z) <= self.LEVEL_Z_WINDOW_M
+
     def resume_callback(self, request, response):
         del request
         if not self.paused or self.current_item is None:
@@ -704,6 +734,13 @@ class FollowPathClient(Node):
         elif not self.route_valid:
             response.success = False
             response.message = 'Route is invalid; replan before resuming.'
+        elif self.segment_end_reached():
+            response.success = True
+            response.message = ('Segment end already reached; continuing with '
+                                'the next segment.')
+            self.get_logger().info(response.message)
+            self.paused = False
+            self.send_next_path()
         else:
             response.success = True
             response.message = 'Resuming current segment.'
