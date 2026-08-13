@@ -195,8 +195,6 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     buttons->addWidget(save_mission_button_, 10, 0);
     buttons->addWidget(load_mission_button_, 10, 1);
     calibrate_geometry_button_ = new QPushButton("Calibrate geometry (footprint + height)");
-    calibrate_geometry_button_->setStyleSheet(
-        "QPushButton { font-weight: bold; }");
     calibrate_geometry_button_->setToolTip(
         "One-click after-adaptation calibration: measures the footprint via TF\n"
         "(wheels + tool), recalibrates distToGround against the MLS under the\n"
