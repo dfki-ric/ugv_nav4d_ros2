@@ -66,7 +66,8 @@
          base_class_type="rviz_common::Tool">
     <description>
       Draws a polygonal operational zone on the map. Zone properties select
-      keep-out, caution, speed-limit, preferred, direction, or note semantics.
+      keep-out, caution, speed-limit, preferred, direction, note, or traversable
+      (manual MLS edit for tall grass) semantics.
     </description>
   </class>
 </library>

@@ -12,6 +12,8 @@
 #include <controller_manager_msgs/srv/switch_controller.hpp>
 
 #include "ugv_nav4d_ros2/srv/edit_waypoint.hpp"
+#include "ugv_nav4d_ros2/srv/set_fill_plane.hpp"
+#include "ugv_nav4d_ros2/srv/delete_mls_patches.hpp"
 #include "ugv_nav4d_ros2/srv/delete_forbidden_zone.hpp"
 #include "ugv_nav4d_ros2/srv/mission_file.hpp"
 #include "ugv_nav4d_ros2/msg/mission_status.hpp"
@@ -31,6 +33,7 @@ class QGroupBox;
 class QLabel;
 class QComboBox;
 class QPushButton;
+class QDoubleSpinBox;
 class QSpinBox;
 
 namespace ugv_nav4d_ros2
@@ -81,6 +84,8 @@ private Q_SLOTS:
     void onLoadMission();
 
 private:
+    void onFillPlane();
+    void onDeleteMlsPatches();
     void callTrigger(const rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr& client,
                      const QString& actionName);
     void setStatusText(const QString& text);
@@ -110,6 +115,12 @@ private:
     QPushButton* record_bag_button_{nullptr};
     QPushButton* clear_executed_path_button_{nullptr};
     QPushButton* calibrate_geometry_button_{nullptr};
+    QPushButton* mls_delete_button_{nullptr};
+    QPushButton* mls_fill_button_{nullptr};
+    QDoubleSpinBox* fill_z_spin_{nullptr};
+    QDoubleSpinBox* fill_roll_spin_{nullptr};
+    QDoubleSpinBox* fill_pitch_spin_{nullptr};
+    QDoubleSpinBox* delete_top_spin_{nullptr};
     QCheckBox* pause_at_wp_check_{nullptr};
     QPushButton* stop_button_{nullptr};
     QPushButton* pause_button_{nullptr};
@@ -200,6 +211,8 @@ private:
     rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr set_pause_at_wp_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr clear_executed_path_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr calibrate_geometry_client_;
+    rclcpp::Client<ugv_nav4d_ros2::srv::DeleteMlsPatches>::SharedPtr mls_delete_client_;
+    rclcpp::Client<ugv_nav4d_ros2::srv::SetFillPlane>::SharedPtr mls_fill_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr start_bag_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr stop_bag_client_;
     rclcpp::Client<ugv_nav4d_ros2::srv::MissionFile>::SharedPtr save_mission_client_;

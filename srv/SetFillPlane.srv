@@ -1,0 +1,10 @@
+# Fill the last drawn TRAVERSABLE zone's polygon with synthetic flat MLS
+# ground patches on an operator-adjustable plane, after deleting the original
+# patches inside it. The plane passes through the polygon centroid.
+float64 z_offset    # [m] relative to the mean z of the polygon's clicked vertices
+float64 roll_deg    # [deg] tilt about the world X axis
+float64 pitch_deg   # [deg] tilt about the world Y axis
+float64 delete_top_m # [m] deletion ceiling above the highest clicked vertex (0 = default 2.0)
+---
+bool success
+string message

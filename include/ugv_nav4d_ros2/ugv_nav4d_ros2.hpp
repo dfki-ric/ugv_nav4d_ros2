@@ -37,6 +37,9 @@
 #include "ugv_nav4d_ros2/srv/delete_forbidden_zone.hpp"
 #include "ugv_nav4d_ros2/srv/inspect_traversability.hpp"
 #include "ugv_nav4d_ros2/srv/mission_file.hpp"
+#include "ugv_nav4d_ros2/srv/set_fill_plane.hpp"
+#include "ugv_nav4d_ros2/srv/delete_mls_patches.hpp"
+#include <set>
 
 #include "ugv_nav4d_ros2/msg/trav_map.hpp"
 #include "ugv_nav4d_ros2/msg/trav_patch.hpp"
@@ -175,6 +178,10 @@ private:
                                          std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void publishForbiddenZoneMarkers();
     void applyForbiddenZones();
+    void applyMlsEditZones();
+    void applyMlsEditZone(const ugv_nav4d_ros2::msg::ForbiddenZone& zone);
+    static std::string traversableZoneKey(const ugv_nav4d_ros2::msg::ForbiddenZone& zone);
+    ugv_nav4d_ros2::msg::ForbiddenZone* lastTraversableZone();
     /** Flood-fill one zone onto the (already expanded) traversability map.
      *  KEEP_OUT nodes marked OBSTACLE are appended to @p keep_out_nodes so the
      *  caller can inflate a safety margin around them. Returns marked count. */
@@ -299,6 +306,8 @@ private:
     int rebuild_depth_ = 0;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr recalibrate_height_service;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr calibrate_geometry_service;
+    rclcpp::Service<ugv_nav4d_ros2::srv::DeleteMlsPatches>::SharedPtr mls_delete_last_zone_service;
+    rclcpp::Service<ugv_nav4d_ros2::srv::SetFillPlane>::SharedPtr mls_fill_last_zone_service;
     int height_info_tick_ = 0;
     int height_miss_streak_ = 0;
     double height_last_patch_z_ = std::numeric_limits<double>::quiet_NaN();
@@ -350,6 +359,9 @@ private:
     rclcpp::Publisher<ugv_nav4d_ros2::msg::OperationalZoneArray>::SharedPtr operational_zones_publisher;
     rclcpp::Service<ugv_nav4d_ros2::srv::DeleteForbiddenZone>::SharedPtr delete_forbidden_zone_service;
     std::vector<ugv_nav4d_ros2::msg::ForbiddenZone> forbidden_zones;
+    std::set<std::string> last_traversable_zone_keys_;
+    size_t last_mls_patches_removed_{0};
+    size_t last_mls_patches_added_{0};
     std::vector<std::unordered_set<const traversability_generator3d::TravGenNode*>> speed_zone_node_sets;
     float last_zone_speed_limit{0.0f};
     rclcpp::Time last_zone_speed_limit_match;

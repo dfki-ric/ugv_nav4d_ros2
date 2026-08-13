@@ -41,6 +41,7 @@ ForbiddenZoneTool::ForbiddenZoneTool()
     zone_type_property_->addOption("Preferred corridor", ugv_nav4d_ros2::msg::ForbiddenZone::PREFERRED);
     zone_type_property_->addOption("Direction restricted", ugv_nav4d_ros2::msg::ForbiddenZone::DIRECTION_RESTRICTED);
     zone_type_property_->addOption("Annotation", ugv_nav4d_ros2::msg::ForbiddenZone::ANNOTATION);
+    zone_type_property_->addOption("Traversable fill (MLS edit)", ugv_nav4d_ros2::msg::ForbiddenZone::TRAVERSABLE);
     label_property_ = new rviz_common::properties::StringProperty(
         "Label", "", "Operator note displayed above the zone.", getPropertyContainer());
     cost_multiplier_property_ = new rviz_common::properties::FloatProperty(

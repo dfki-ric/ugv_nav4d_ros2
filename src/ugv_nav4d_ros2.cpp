@@ -113,6 +113,66 @@ PathPlannerNode::PathPlannerNode()
         not_rebuilding.data = false;
         rebuilding_publisher->publish(not_rebuilding);
     }
+    mls_delete_last_zone_service = this->create_service<ugv_nav4d_ros2::srv::DeleteMlsPatches>(
+        "/ugv_nav4d_ros2/mls_delete_last_zone",
+        [this](const std::shared_ptr<ugv_nav4d_ros2::srv::DeleteMlsPatches::Request> request,
+               std::shared_ptr<ugv_nav4d_ros2::srv::DeleteMlsPatches::Response> response){
+            std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+            response->success = false;
+            if (is_planning){
+                response->message = "Cannot edit the MLS while planning is active.";
+            } else if (!got_map || !mls_map_ptr){
+                response->message = "No map loaded; nothing to edit.";
+            } else if (!std::isfinite(request->top_m) || request->top_m < 0.0 || request->top_m > 10.0){
+                response->message = "Deletion ceiling rejected: must be 0 (default) to 10 m.";
+            } else if (auto* zone = lastTraversableZone()){
+                zone->fill_enabled = false;
+                zone->delete_top = static_cast<float>(request->top_m);
+                configurePlanner();
+                publishTravMap();
+                validatePendingPath();
+                response->success = true;
+                response->message = "Deleted " + std::to_string(last_mls_patches_removed_) +
+                                    " MLS patch(es) inside Traversable zone(s); maps rebuilt.";
+            } else {
+                response->message = "No Traversable (MLS edit) zone drawn; draw one with the zone tool first.";
+            }
+            publishStatus(response->message);
+        });
+    mls_fill_last_zone_service = this->create_service<ugv_nav4d_ros2::srv::SetFillPlane>(
+        "/ugv_nav4d_ros2/mls_fill_last_zone",
+        [this](const std::shared_ptr<ugv_nav4d_ros2::srv::SetFillPlane::Request> request,
+               std::shared_ptr<ugv_nav4d_ros2::srv::SetFillPlane::Response> response){
+            std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+            response->success = false;
+            if (is_planning){
+                response->message = "Cannot edit the MLS while planning is active.";
+            } else if (!got_map || !mls_map_ptr){
+                response->message = "No map loaded; nothing to fill.";
+            } else if (!std::isfinite(request->z_offset) || !std::isfinite(request->roll_deg) ||
+                       !std::isfinite(request->pitch_deg) || std::abs(request->roll_deg) > 45.0 ||
+                       std::abs(request->pitch_deg) > 45.0){
+                response->message = "Fill plane rejected: offsets must be finite, tilt within +/-45 degrees.";
+            } else if (auto* zone = lastTraversableZone()){
+                zone->fill_enabled = true;
+                zone->fill_z_offset = static_cast<float>(request->z_offset);
+                zone->fill_roll = static_cast<float>(request->roll_deg * M_PI / 180.0);
+                zone->fill_pitch = static_cast<float>(request->pitch_deg * M_PI / 180.0);
+                zone->delete_top = (std::isfinite(request->delete_top_m) &&
+                                    request->delete_top_m > 0.0 && request->delete_top_m <= 10.0)
+                                   ? static_cast<float>(request->delete_top_m) : 0.0f;
+                configurePlanner();
+                publishTravMap();
+                validatePendingPath();
+                response->success = true;
+                response->message = "Fill applied: removed " + std::to_string(last_mls_patches_removed_) +
+                                    ", added " + std::to_string(last_mls_patches_added_) +
+                                    " patch(es) across Traversable zone(s); maps rebuilt.";
+            } else {
+                response->message = "No Traversable (MLS edit) zone drawn; draw one with the zone tool first.";
+            }
+            publishStatus(response->message);
+        });
     calibrate_geometry_service = this->create_service<std_srvs::srv::Trigger>(
         "/ugv_nav4d_ros2/calibrate_geometry",
         [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
@@ -607,6 +667,7 @@ void PathPlannerNode::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedP
                 RCLCPP_INFO_STREAM(this->get_logger(), "Initial patch (radius " << initial_patch_radius << " m) added to MLS at the robot position.");
             }
 
+            applyMlsEditZones();
             auto startPosition = ground2Mls.translation();
             const auto t_expand = std::chrono::steady_clock::now();
             traversability_generator_ptr->expandAll(startPosition);
@@ -1275,6 +1336,13 @@ void PathPlannerNode::saveMissionCallback(
             << zone.speed_limit << ' ' << zone.preferred_heading << ' '
             << zone.expires_at.sec << ' ' << zone.expires_at.nanosec << ' '
             << zone.vertices.size() << '\n';
+        if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::TRAVERSABLE){
+            // Optional line; loaders older than the TRAVERSABLE type stop at
+            // unknown tokens, and such zones did not exist in old files.
+            out << "fill " << (zone.fill_enabled ? 1 : 0) << ' ' << zone.fill_z_offset
+                << ' ' << zone.fill_roll << ' ' << zone.fill_pitch
+                << ' ' << zone.delete_top << '\n';
+        }
         for (const auto& v : zone.vertices) out << "v " << v.x << ' ' << v.y << ' ' << v.z << '\n';
     }
     // Optional trailing section: photos captured at waypoint pauses during the
@@ -1370,6 +1438,18 @@ void PathPlannerNode::loadMissionCallback(
         }
         zone.zone_type = static_cast<uint8_t>(zone_type);
         zone.header.frame_id = get_parameter("world_frame").as_string();
+        if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::TRAVERSABLE &&
+            (in >> std::ws) && in.peek() == 'f'){
+            int fill_enabled = 0;
+            if (!(in >> token) || token != "fill" ||
+                !(in >> fill_enabled >> zone.fill_z_offset >> zone.fill_roll
+                     >> zone.fill_pitch >> zone.delete_top)){
+                response->success = false;
+                response->message = "Mission file has an invalid zone fill line.";
+                return;
+            }
+            zone.fill_enabled = fill_enabled != 0;
+        }
         for (size_t k = 0; k < vertex_count; ++k){
             geometry_msgs::msg::Point v;
             if (!(in >> token) || token != "v" || !(in >> v.x >> v.y >> v.z)){
@@ -1777,6 +1857,32 @@ void PathPlannerNode::removeLastForbiddenZoneCallback(const std::shared_ptr<std_
 void PathPlannerNode::onForbiddenZonesChanged(bool planning_graph_changed,
                                               const ugv_nav4d_ros2::msg::ForbiddenZone* added_zone){
     publishForbiddenZoneMarkers();
+    // MLS-edit (TRAVERSABLE) zones are destructive: removing one must restore
+    // the original patches, which only rebuilding the MLS from its source can
+    // do. Detect removals via the zone-key set. In live-mapping mode the
+    // patches restore implicitly as new pointclouds are merged in.
+    std::set<std::string> traversable_keys;
+    for (const auto& zone : forbidden_zones){
+        if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::TRAVERSABLE){
+            traversable_keys.insert(traversableZoneKey(zone));
+        }
+    }
+    bool traversable_zone_removed = false;
+    for (const auto& key : last_traversable_zone_keys_){
+        if (!traversable_keys.count(key)){
+            traversable_zone_removed = true;
+            break;
+        }
+    }
+    last_traversable_zone_keys_ = std::move(traversable_keys);
+    if (traversable_zone_removed && got_map){
+        if (get_parameter("load_mls_from_file").as_bool()){
+            RCLCPP_INFO(this->get_logger(), "Traversable (MLS edit) zone removed; reloading the MLS from file to restore the original patches.");
+            initializeMLSMap();
+        } else {
+            RCLCPP_WARN(this->get_logger(), "Traversable (MLS edit) zone removed; original patches only reappear as new map pointclouds are merged in.");
+        }
+    }
     if (!planning_graph_changed){
         rebuildSpeedZoneCache();
         publishZoneSpeedLimit(start_pose.pose.position);
@@ -1788,7 +1894,8 @@ void PathPlannerNode::onForbiddenZonesChanged(bool planning_graph_changed,
     // zones are excluded: they interact with the map-wide baseline cost that
     // applyForbiddenZones computes over the full zone set.
     if (added_zone && is_configured && got_map && planner_ptr && traversability_generator_ptr &&
-        added_zone->zone_type != ugv_nav4d_ros2::msg::ForbiddenZone::PREFERRED){
+        added_zone->zone_type != ugv_nav4d_ros2::msg::ForbiddenZone::PREFERRED &&
+        added_zone->zone_type != ugv_nav4d_ros2::msg::ForbiddenZone::TRAVERSABLE){
         std::vector<traversability_generator3d::TravGenNode*> keep_out_nodes;
         const size_t marked = applyZoneToTravMap(*added_zone, &keep_out_nodes);
         const size_t inflated = inflateZoneObstacles(keep_out_nodes);
@@ -1816,6 +1923,164 @@ void PathPlannerNode::onForbiddenZonesChanged(bool planning_graph_changed,
         route_valid.data = false;
         route_valid_publisher->publish(route_valid);
         clearExecutingPathDisplay();
+    }
+}
+
+std::string PathPlannerNode::traversableZoneKey(const ugv_nav4d_ros2::msg::ForbiddenZone& zone){
+    std::ostringstream key;
+    key << std::fixed << std::setprecision(2);
+    for (const auto& v : zone.vertices){
+        key << v.x << ',' << v.y << ',' << v.z << ';';
+    }
+    return key.str();
+}
+
+ugv_nav4d_ros2::msg::ForbiddenZone* PathPlannerNode::lastTraversableZone(){
+    const auto now = this->get_clock()->now();
+    for (auto it = forbidden_zones.rbegin(); it != forbidden_zones.rend(); ++it){
+        if (it->zone_type != ugv_nav4d_ros2::msg::ForbiddenZone::TRAVERSABLE){
+            continue;
+        }
+        const bool expired = (it->expires_at.sec != 0 || it->expires_at.nanosec != 0) &&
+                             rclcpp::Time(it->expires_at) <= now;
+        if (!expired){
+            return &*it;
+        }
+    }
+    return nullptr;
+}
+
+void PathPlannerNode::applyMlsEditZones(){
+    last_mls_patches_removed_ = 0;
+    last_mls_patches_added_ = 0;
+    if (!mls_map_ptr || !got_map || forbidden_zones.empty()){
+        return;
+    }
+    const auto now = this->get_clock()->now();
+    size_t zones_applied = 0;
+    for (const auto& zone : forbidden_zones){
+        if (zone.zone_type != ugv_nav4d_ros2::msg::ForbiddenZone::TRAVERSABLE){
+            continue;
+        }
+        const bool expired = (zone.expires_at.sec != 0 || zone.expires_at.nanosec != 0) &&
+                             rclcpp::Time(zone.expires_at) <= now;
+        if (expired){
+            continue;
+        }
+        applyMlsEditZone(zone);
+        ++zones_applied;
+    }
+    if (zones_applied){
+        RCLCPP_INFO_STREAM(this->get_logger(), "MLS edit: " << zones_applied
+                           << " Traversable zone(s): removed " << last_mls_patches_removed_
+                           << " patch(es), added " << last_mls_patches_added_
+                           << " synthetic ground patch(es).");
+    }
+}
+
+void PathPlannerNode::applyMlsEditZone(const ugv_nav4d_ros2::msg::ForbiddenZone& zone){
+    if (zone.vertices.size() < 3){
+        return;
+    }
+    double min_x = std::numeric_limits<double>::max();
+    double max_x = std::numeric_limits<double>::lowest();
+    double min_y = min_x, max_y = max_x;
+    double cx = 0.0, cy = 0.0, ref_z = 0.0;
+    for (const auto& v : zone.vertices){
+        min_x = std::min(min_x, v.x); max_x = std::max(max_x, v.x);
+        min_y = std::min(min_y, v.y); max_y = std::max(max_y, v.y);
+        cx += v.x; cy += v.y; ref_z += v.z;
+    }
+    cx /= zone.vertices.size();
+    cy /= zone.vertices.size();
+    ref_z /= zone.vertices.size();
+
+    const auto resolution = mls_map_ptr->getResolution();
+    const maps::grid::Vector2ui num_cells = mls_map_ptr->getNumCells();
+    typedef maps::grid::MLSMap<maps::grid::MLSConfig::SLOPE>::CellType Cell;
+
+    // Pass 1: delete the original patches (grass) inside the polygon. Band
+    // limited so structures on other storeys survive; the ceiling is operator
+    // adjustable so overhead stuff beyond robot height stays in the map.
+    // This also wipes a previous fill before a re-fill with new parameters.
+    double vz_min = std::numeric_limits<double>::max();
+    double vz_max = std::numeric_limits<double>::lowest();
+    for (const auto& v : zone.vertices){
+        vz_min = std::min(vz_min, v.z);
+        vz_max = std::max(vz_max, v.z);
+    }
+    const double delete_top = zone.delete_top > 0.0f ? zone.delete_top : 2.0;
+    const double band_low = vz_min - 2.0;
+    const double band_high = vz_max + delete_top;
+    const int ix0 = std::max(0, static_cast<int>(std::floor((min_x - mls_min_x) / resolution.x())));
+    const int ix1 = std::min(static_cast<int>(num_cells.x()) - 1,
+                             static_cast<int>(std::floor((max_x - mls_min_x) / resolution.x())));
+    const int iy0 = std::max(0, static_cast<int>(std::floor((min_y - mls_min_y) / resolution.y())));
+    const int iy1 = std::min(static_cast<int>(num_cells.y()) - 1,
+                             static_cast<int>(std::floor((max_y - mls_min_y) / resolution.y())));
+    for (int ix = ix0; ix <= ix1; ++ix){
+        for (int iy = iy0; iy <= iy1; ++iy){
+            const double wx = mls_min_x + (ix + 0.5) * resolution.x();
+            const double wy = mls_min_y + (iy + 0.5) * resolution.y();
+            if (!pointInPolygonXY(wx, wy, zone.vertices)){
+                continue;
+            }
+            Cell& list = mls_map_ptr->at(static_cast<size_t>(ix), static_cast<size_t>(iy));
+            for (Cell::iterator it = list.begin(); it != list.end(); ){
+                float patch_min = 0.0f, patch_max = 0.0f;
+                it->getRange(patch_min, patch_max);
+                const double top = static_cast<double>(patch_max);
+                if (top >= band_low && top <= band_high){
+                    it = list.erase(it);
+                    ++last_mls_patches_removed_;
+                } else {
+                    ++it;
+                }
+            }
+        }
+    }
+
+    if (!zone.fill_enabled){
+        return;
+    }
+    // Pass 2: refill with synthetic ground patches on the operator's plane.
+    // Same construction as the proven initial-patch bootstrap in travgen:
+    // oversample at half resolution, skip spots an existing patch covers.
+    const Eigen::Vector3d normal =
+        (Eigen::AngleAxisd(zone.fill_roll, Eigen::Vector3d::UnitX()) *
+         Eigen::AngleAxisd(zone.fill_pitch, Eigen::Vector3d::UnitY())) * Eigen::Vector3d::UnitZ();
+    if (normal.z() < 0.5){
+        RCLCPP_ERROR(this->get_logger(), "MLS edit: fill plane steeper than 60 degrees; skipping fill.");
+        return;
+    }
+    const double z0 = ref_z + zone.fill_z_offset;
+    const double step = resolution.x() / 2.0;
+    for (double x = min_x; x <= max_x; x += step){
+        for (double y = min_y; y <= max_y; y += step){
+            if (!pointInPolygonXY(x, y, zone.vertices)){
+                continue;
+            }
+            const double z = z0 - (normal.x() * (x - cx) + normal.y() * (y - cy)) / normal.z();
+            const Eigen::Vector3d pos(x, y, z);
+            maps::grid::Index idx;
+            if (!mls_map_ptr->toGrid(pos, idx)){
+                continue;
+            }
+            auto& list = mls_map_ptr->at(idx);
+            bool covered = false;
+            for (const auto& patch : list){
+                if (patch.isCovered(static_cast<float>(z), 0.05f)){
+                    covered = true;
+                    break;
+                }
+            }
+            if (covered){
+                continue;
+            }
+            maps::grid::MLSMapSloped::PatchType patch(pos.cast<float>(), traversability_config.initialPatchVariance);
+            list.insert(patch);
+            ++last_mls_patches_added_;
+        }
     }
 }
 
@@ -1867,7 +2132,8 @@ void PathPlannerNode::applyForbiddenZones(){
             continue;
         }
         if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::ANNOTATION ||
-            zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::SPEED_LIMIT){
+            zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::SPEED_LIMIT ||
+            zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::TRAVERSABLE){
             // These are execution/operator semantics and intentionally do not
             // change graph connectivity.
             continue;
@@ -2666,6 +2932,7 @@ void PathPlannerNode::publishForbiddenZoneMarkers(){
         else if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::PREFERRED){ outline.color.r = 0.1; outline.color.g = 1.0; outline.color.b = 0.2; }
         else if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::DIRECTION_RESTRICTED){ outline.color.r = 0.7; outline.color.g = 0.2; outline.color.b = 1.0; }
         else if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::ANNOTATION){ outline.color.r = 1.0; outline.color.g = 1.0; outline.color.b = 1.0; }
+        else if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::TRAVERSABLE){ outline.color.r = 0.3; outline.color.g = 1.0; outline.color.b = 0.7; }
         outline.color.a = 1.0;
         for (size_t k = 0; k <= n_verts; ++k){
             outline.points.push_back(zone.vertices[k % n_verts]);
@@ -2731,8 +2998,8 @@ void PathPlannerNode::publishForbiddenZoneMarkers(){
         label.color.g = 0.3;
         label.color.b = 0.3;
         label.color.a = 1.0;
-        static const std::array<const char*, 6> type_names{
-            "KEEP-OUT", "CAUTION", "SPEED", "PREFERRED", "DIRECTION", "NOTE"};
+        static const std::array<const char*, 7> type_names{
+            "KEEP-OUT", "CAUTION", "SPEED", "PREFERRED", "DIRECTION", "NOTE", "TRAVERSABLE"};
         const std::string type_name = zone.zone_type < type_names.size()
             ? type_names[zone.zone_type] : "ZONE";
         if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::ANNOTATION &&
@@ -4195,6 +4462,7 @@ void PathPlannerNode::configurePlanner(){
         body2Ground.translation() = Eigen::Vector3d(0, 0, -get_parameter("distToGround").as_double());
         Eigen::Affine3d ground2Mls(body2MLS * body2Ground);
 
+        applyMlsEditZones();
         auto startPosition = ground2Mls.translation();
         const auto t_expand = std::chrono::steady_clock::now();
         traversability_generator_ptr->expandAll(startPosition);

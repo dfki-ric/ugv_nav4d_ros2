@@ -1,4 +1,5 @@
 #include "OperatorPanel.hpp"
+#include <QDoubleSpinBox>
 
 #include <algorithm>
 
@@ -213,12 +214,66 @@ OperatorPanel::OperatorPanel(QWidget* parent)
         "Refused while a route is executing or paused.");
     buttons->addWidget(clear_executed_path_button_, 13, 0, 1, 2);
     buttons->addWidget(record_bag_button_, 14, 0, 1, 2);
+
+    mls_delete_button_ = new QPushButton("Delete MLS patches (last Trav zone)");
+    mls_delete_button_->setToolTip(
+        "Deletes all MLS patches inside the last drawn 'Traversable fill (MLS edit)'\n"
+        "zone (within its level band) and rebuilds the maps. Use it to erase tall\n"
+        "grass or phantom obstacles. Draw the polygon with the zone tool first.");
+    buttons->addWidget(mls_delete_button_, 15, 0, 1, 1);
+    auto* del_row = new QHBoxLayout();
+    delete_top_spin_ = new QDoubleSpinBox();
+    delete_top_spin_->setRange(0.2, 10.0);
+    delete_top_spin_->setSingleStep(0.1);
+    delete_top_spin_->setDecimals(1);
+    delete_top_spin_->setValue(2.0);
+    delete_top_spin_->setSuffix(" m");
+    delete_top_spin_->setToolTip(
+        "Deletion ceiling: patches higher than this above the highest clicked\n"
+        "vertex survive, so overhead structures beyond robot height stay in the\n"
+        "map. Used by both Delete and Fill.");
+    del_row->addWidget(new QLabel("up to"));
+    del_row->addWidget(delete_top_spin_);
+    buttons->addLayout(del_row, 15, 1, 1, 1);
+    auto* fill_row = new QHBoxLayout();
+    fill_z_spin_ = new QDoubleSpinBox();
+    fill_z_spin_->setRange(-5.0, 5.0);
+    fill_z_spin_->setSingleStep(0.05);
+    fill_z_spin_->setDecimals(2);
+    fill_z_spin_->setSuffix(" m");
+    fill_z_spin_->setToolTip("Fill plane height relative to the mean z of the polygon's clicked vertices\n(clicks land on grass tops, so start around -0.3 to sink the plane to ground).");
+    fill_roll_spin_ = new QDoubleSpinBox();
+    fill_roll_spin_->setRange(-45.0, 45.0);
+    fill_roll_spin_->setSingleStep(0.5);
+    fill_roll_spin_->setDecimals(1);
+    fill_roll_spin_->setSuffix(QString::fromUtf8("\u00B0"));
+    fill_roll_spin_->setToolTip("Fill plane tilt about the world X axis.");
+    fill_pitch_spin_ = new QDoubleSpinBox();
+    fill_pitch_spin_->setRange(-45.0, 45.0);
+    fill_pitch_spin_->setSingleStep(0.5);
+    fill_pitch_spin_->setDecimals(1);
+    fill_pitch_spin_->setSuffix(QString::fromUtf8("\u00B0"));
+    fill_pitch_spin_->setToolTip("Fill plane tilt about the world Y axis.");
+    fill_row->addWidget(new QLabel("z"));
+    fill_row->addWidget(fill_z_spin_);
+    fill_row->addWidget(new QLabel("roll"));
+    fill_row->addWidget(fill_roll_spin_);
+    fill_row->addWidget(new QLabel("pitch"));
+    fill_row->addWidget(fill_pitch_spin_);
+    buttons->addLayout(fill_row, 16, 0, 1, 1);
+    mls_fill_button_ = new QPushButton("Fill plane");
+    mls_fill_button_->setToolTip(
+        "Refills the last Traversable zone with synthetic flat ground on the plane\n"
+        "set by z / roll / pitch, then rebuilds the maps. Adjust and click again\n"
+        "until the fill lines up with the real ground; each click replaces the\n"
+        "previous fill. The fit persists in the zone and in saved missions.");
+    buttons->addWidget(mls_fill_button_, 16, 1, 1, 1);
     rebuild_sensitive_buttons_ = {
         recover_button_, replan_button_, execute_path_button_, discard_path_button_,
         clear_waypoints_button_, undo_waypoint_button_, reverse_waypoints_button_,
         clear_zones_button_, undo_zone_button_, save_map_button_,
         republish_maps_button_, regenerate_maps_button_, update_footprint_button_,
-        calibrate_geometry_button_,
+        calibrate_geometry_button_, mls_delete_button_, mls_fill_button_,
         save_mission_button_, load_mission_button_, recalibrate_height_button_};
     plan_return_button_ = new QPushButton("Plan return");
     layout->addLayout(buttons);
@@ -304,6 +359,8 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     connect(calibrate_geometry_button_, &QPushButton::clicked, this, [this]() {
         callTrigger(calibrate_geometry_client_, "Calibrate geometry");
     });
+    connect(mls_delete_button_, &QPushButton::clicked, this, [this]() { onDeleteMlsPatches(); });
+    connect(mls_fill_button_, &QPushButton::clicked, this, [this]() { onFillPlane(); });
     connect(pause_at_wp_check_, &QCheckBox::toggled, this, [this](bool checked) {
         auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
         request->data = checked;
@@ -569,6 +626,8 @@ void OperatorPanel::onInitialize()
     set_pause_at_wp_client_ = node_->create_client<std_srvs::srv::SetBool>("/ugv_nav4d_ros2/set_pause_at_waypoints");
     clear_executed_path_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/clear_executed_path");
     calibrate_geometry_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/calibrate_geometry");
+    mls_delete_client_ = node_->create_client<ugv_nav4d_ros2::srv::DeleteMlsPatches>("/ugv_nav4d_ros2/mls_delete_last_zone");
+    mls_fill_client_ = node_->create_client<ugv_nav4d_ros2::srv::SetFillPlane>("/ugv_nav4d_ros2/mls_fill_last_zone");
     start_bag_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/start_bag_recording");
     stop_bag_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/stop_bag_recording");
     save_mission_client_ = node_->create_client<ugv_nav4d_ros2::srv::MissionFile>("/ugv_nav4d_ros2/save_mission");
@@ -880,6 +939,61 @@ void OperatorPanel::updateExecuteEnabled()
             : paused
                 ? "Waiting for the controller to confirm the pause..."
                 : "No paused mission.");
+}
+
+void OperatorPanel::onDeleteMlsPatches()
+{
+    if (!mls_delete_client_ || !node_)
+    {
+        return;
+    }
+    if (!mls_delete_client_->service_is_ready())
+    {
+        setStatusText("Delete MLS patches: service unavailable (is the planner node running?)");
+        return;
+    }
+    setStatusText("Delete MLS patches requested...");
+    auto request = std::make_shared<ugv_nav4d_ros2::srv::DeleteMlsPatches::Request>();
+    request->top_m = delete_top_spin_->value();
+    mls_delete_client_->async_send_request(request,
+        [this, guard = QPointer<OperatorPanel>(this)](rclcpp::Client<ugv_nav4d_ros2::srv::DeleteMlsPatches>::SharedFuture future)
+        {
+            if (!guard)
+            {
+                return;
+            }
+            const auto response = future.get();
+            setStatusText(QString::fromStdString(response->message));
+        });
+}
+
+void OperatorPanel::onFillPlane()
+{
+    if (!mls_fill_client_ || !node_)
+    {
+        return;
+    }
+    if (!mls_fill_client_->service_is_ready())
+    {
+        setStatusText("Fill plane: service unavailable (is the planner node running?)");
+        return;
+    }
+    setStatusText("Fill plane requested...");
+    auto request = std::make_shared<ugv_nav4d_ros2::srv::SetFillPlane::Request>();
+    request->z_offset = fill_z_spin_->value();
+    request->roll_deg = fill_roll_spin_->value();
+    request->pitch_deg = fill_pitch_spin_->value();
+    request->delete_top_m = delete_top_spin_->value();
+    mls_fill_client_->async_send_request(request,
+        [this, guard = QPointer<OperatorPanel>(this)](rclcpp::Client<ugv_nav4d_ros2::srv::SetFillPlane>::SharedFuture future)
+        {
+            if (!guard)
+            {
+                return;
+            }
+            const auto response = future.get();
+            setStatusText(QString::fromStdString(response->message));
+        });
 }
 
 void OperatorPanel::callTrigger(const rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr& client,
