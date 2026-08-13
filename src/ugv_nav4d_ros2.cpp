@@ -676,7 +676,6 @@ void PathPlannerNode::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedP
                 RCLCPP_INFO_STREAM(this->get_logger(), "Initial patch (radius " << initial_patch_radius << " m) added to MLS at the robot position.");
             }
 
-            applyMlsEditZones();
             auto startPosition = ground2Mls.translation();
             const auto t_expand = std::chrono::steady_clock::now();
             traversability_generator_ptr->expandAll(startPosition);
@@ -1888,8 +1887,8 @@ void PathPlannerNode::onForbiddenZonesChanged(bool planning_graph_changed,
         if (get_parameter("load_mls_from_file").as_bool()){
             RCLCPP_INFO(this->get_logger(), "Traversable (MLS edit) zone removed; reloading the MLS from file to restore the original patches.");
             initializeMLSMap();
-            applyMlsEditZones();  // re-apply the remaining zones to the fresh MLS
-            publishStatus("MLS restored from file; regenerate the traversability map to apply.");
+            publishStatus("MLS restored to original from file; use 'Regenerate trav map' "
+                          "to re-apply the remaining Traversable zones (if any).");
         } else {
             RCLCPP_WARN(this->get_logger(), "Traversable (MLS edit) zone removed; original patches only reappear as new map pointclouds are merged in.");
         }
@@ -4530,7 +4529,6 @@ void PathPlannerNode::configurePlanner(){
         body2Ground.translation() = Eigen::Vector3d(0, 0, -get_parameter("distToGround").as_double());
         Eigen::Affine3d ground2Mls(body2MLS * body2Ground);
 
-        applyMlsEditZones();
         auto startPosition = ground2Mls.translation();
         const auto t_expand = std::chrono::steady_clock::now();
         traversability_generator_ptr->expandAll(startPosition);

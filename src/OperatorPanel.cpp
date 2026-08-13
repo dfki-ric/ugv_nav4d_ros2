@@ -270,10 +270,10 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     buttons->addWidget(mls_fill_button_, 16, 1, 1, 1);
     regen_travmap_button_ = new QPushButton("Regenerate trav map (apply MLS edits)");
     regen_travmap_button_->setToolTip(
-        "Rebuilds the traversability map and planner environment from the\n"
-        "CURRENT in-memory MLS, i.e. including your delete/fill edits. The MLS\n"
-        "itself is kept as-is (unlike 'Regenerate maps', which reloads it from\n"
-        "its source and discards nothing-persisted edits).");
+        "Applies ALL Traversable zone recipes (delete + fill) to the current\n"
+        "MLS and rebuilds the traversability map + planner environment.\n"
+        "This is the EDITED state. 'Regenerate maps' is the opposite: it\n"
+        "reloads the original MLS from source with no edits applied.");
     buttons->addWidget(regen_travmap_button_, 17, 0, 1, 2);
     rebuild_sensitive_buttons_ = {
         recover_button_, replan_button_, execute_path_button_, discard_path_button_,
