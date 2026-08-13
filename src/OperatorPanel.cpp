@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <std_srvs/srv/set_bool.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
+#include <geometry_msgs/msg/twist.hpp>
 #include <QPushButton>
 #include <QStringList>
 #include <QSpinBox>
@@ -77,6 +78,9 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     height_label_ = new QLabel("Height: waiting for planner");
     height_label_->setWordWrap(true);
     height_label_->setMaximumHeight(40);
+    cmd_vel_label_ = new QLabel("cmd_vel: (none)");
+    cmd_vel_label_->setWordWrap(true);
+    cmd_vel_label_->setMaximumHeight(40);
     bag_label_ = new QLabel("Bag: recorder not seen");
     bag_label_->setWordWrap(true);
     bag_label_->setMaximumHeight(40);
@@ -89,6 +93,7 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     layout->addWidget(deviation_label_);
     layout->addWidget(footprint_label_);
     layout->addWidget(height_label_);
+    layout->addWidget(cmd_vel_label_);
     layout->addWidget(bag_label_);
     layout->addWidget(health_label_);
     layout->addWidget(readiness_label_);
@@ -189,7 +194,15 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     load_mission_button_ = new QPushButton("Load mission");
     buttons->addWidget(save_mission_button_, 10, 0);
     buttons->addWidget(load_mission_button_, 10, 1);
-    buttons->addWidget(recalibrate_height_button_, 11, 0, 1, 2);
+    calibrate_geometry_button_ = new QPushButton("Calibrate geometry (footprint + height)");
+    calibrate_geometry_button_->setStyleSheet(
+        "QPushButton { font-weight: bold; }");
+    calibrate_geometry_button_->setToolTip(
+        "One-click after-adaptation calibration: measures the footprint via TF\n"
+        "(wheels + tool), recalibrates distToGround against the MLS under the\n"
+        "robot, and triggers a SINGLE map+planner rebuild for both.");
+    buttons->addWidget(calibrate_geometry_button_, 11, 0, 1, 2);
+    buttons->addWidget(recalibrate_height_button_, 12, 0, 1, 2);
     record_bag_button_ = new QPushButton("\u25CF Record nav bag");
     record_bag_button_->setCheckable(true);
     record_bag_button_->setToolTip(
@@ -200,13 +213,14 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     clear_executed_path_button_->setToolTip(
         "Remove the finished/stopped route from the 3D view (display only).\n"
         "Refused while a route is executing or paused.");
-    buttons->addWidget(clear_executed_path_button_, 12, 0, 1, 2);
-    buttons->addWidget(record_bag_button_, 13, 0, 1, 2);
+    buttons->addWidget(clear_executed_path_button_, 13, 0, 1, 2);
+    buttons->addWidget(record_bag_button_, 14, 0, 1, 2);
     rebuild_sensitive_buttons_ = {
         recover_button_, replan_button_, execute_path_button_, discard_path_button_,
         clear_waypoints_button_, undo_waypoint_button_, reverse_waypoints_button_,
         clear_zones_button_, undo_zone_button_, save_map_button_,
         republish_maps_button_, regenerate_maps_button_, update_footprint_button_,
+        calibrate_geometry_button_,
         save_mission_button_, load_mission_button_, recalibrate_height_button_};
     plan_return_button_ = new QPushButton("Plan return");
     layout->addLayout(buttons);
@@ -288,6 +302,9 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     });
     connect(clear_executed_path_button_, &QPushButton::clicked, this, [this]() {
         callTrigger(clear_executed_path_client_, "Clear executed path");
+    });
+    connect(calibrate_geometry_button_, &QPushButton::clicked, this, [this]() {
+        callTrigger(calibrate_geometry_client_, "Calibrate geometry");
     });
     connect(pause_at_wp_check_, &QCheckBox::toggled, this, [this](bool checked) {
         auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
@@ -473,6 +490,17 @@ void OperatorPanel::onInitialize()
                 pause_at_wp_check_->setChecked(on);
             }, Qt::QueuedConnection);
         });
+    cmd_vel_sub_ = node_->create_subscription<geometry_msgs::msg::Twist>(
+        "/arter/mcs/cmd_vel", rclcpp::QoS(10),
+        [this](const geometry_msgs::msg::Twist::SharedPtr msg)
+        {
+            const QString text = QString("cmd_vel: %1 m/s | %2 rad/s")
+                .arg(msg->linear.x, 0, 'f', 2)
+                .arg(msg->angular.z, 0, 'f', 2);
+            QMetaObject::invokeMethod(this, [this, text]() {
+                cmd_vel_label_->setText(text);
+            }, Qt::QueuedConnection);
+        });
     bag_status_sub_ = node_->create_subscription<std_msgs::msg::String>(
         "/ugv_nav4d_ros2/bag_recorder_status", rclcpp::QoS(1).transient_local(),
         [this](const std_msgs::msg::String::SharedPtr msg)
@@ -542,6 +570,7 @@ void OperatorPanel::onInitialize()
     recalibrate_height_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/recalibrate_height");
     set_pause_at_wp_client_ = node_->create_client<std_srvs::srv::SetBool>("/ugv_nav4d_ros2/set_pause_at_waypoints");
     clear_executed_path_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/clear_executed_path");
+    calibrate_geometry_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/calibrate_geometry");
     start_bag_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/start_bag_recording");
     stop_bag_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/stop_bag_recording");
     save_mission_client_ = node_->create_client<ugv_nav4d_ros2::srv::MissionFile>("/ugv_nav4d_ros2/save_mission");

@@ -298,6 +298,7 @@ private:
     uint8_t last_execution_state_ = 255;
     int rebuild_depth_ = 0;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr recalibrate_height_service;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr calibrate_geometry_service;
     int height_info_tick_ = 0;
     int height_miss_streak_ = 0;
     double height_last_patch_z_ = std::numeric_limits<double>::quiet_NaN();

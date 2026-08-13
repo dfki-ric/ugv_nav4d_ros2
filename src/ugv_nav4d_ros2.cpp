@@ -113,6 +113,25 @@ PathPlannerNode::PathPlannerNode()
         not_rebuilding.data = false;
         rebuilding_publisher->publish(not_rebuilding);
     }
+    calibrate_geometry_service = this->create_service<std_srvs::srv::Trigger>(
+        "/ugv_nav4d_ros2/calibrate_geometry",
+        [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+               std::shared_ptr<std_srvs::srv::Trigger::Response> response){
+            // Composite after-adaptation calibration: footprint measurement
+            // and height recalibration back-to-back. Both mark the planner
+            // dirty via set_parameters; the parameter timer batches them into
+            // ONE configurePlanner (map regeneration + expansion). It cannot
+            // fire in between: single-threaded executor.
+            std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+            auto footprint_response = std::make_shared<std_srvs::srv::Trigger::Response>();
+            updateFootprintCallback(request, footprint_response);
+            auto height_response = std::make_shared<std_srvs::srv::Trigger::Response>();
+            recalibrateHeightCallback(request, height_response);
+            response->success = footprint_response->success && height_response->success;
+            response->message = "Footprint: " + footprint_response->message +
+                                " | Height: " + height_response->message;
+            publishStatus(response->message);
+        });
     recalibrate_height_service = this->create_service<std_srvs::srv::Trigger>(
         "/ugv_nav4d_ros2/recalibrate_height",
         [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
@@ -2716,8 +2735,14 @@ void PathPlannerNode::publishForbiddenZoneMarkers(){
             "KEEP-OUT", "CAUTION", "SPEED", "PREFERRED", "DIRECTION", "NOTE"};
         const std::string type_name = zone.zone_type < type_names.size()
             ? type_names[zone.zone_type] : "ZONE";
-        label.text = std::to_string(i + 1) + " " + type_name;
-        if (!zone.label.empty()) label.text += ": " + zone.label;
+        if (zone.zone_type == ugv_nav4d_ros2::msg::ForbiddenZone::ANNOTATION &&
+            !zone.label.empty()){
+            // An annotation IS its text; prefixing "NOTE:" was just clutter.
+            label.text = std::to_string(i + 1) + ": " + zone.label;
+        } else {
+            label.text = std::to_string(i + 1) + " " + type_name;
+            if (!zone.label.empty()) label.text += ": " + zone.label;
+        }
         marker_array.markers.push_back(label);
     }
 
@@ -3337,6 +3362,38 @@ void PathPlannerNode::publishPlannedPath(const std::vector<trajectory_follower::
 
                     path_segment.poses.push_back(ext_pose_half);
                     path_segment.poses.push_back(ext_pose_full);
+
+                    // Draw the extension distinctly: the controller follows
+                    // these poses (goal-tolerance runway), so the deviation
+                    // anchor must land on VISIBLE geometry instead of what
+                    // looked like empty space next to the colored route.
+                    visualization_msgs::msg::Marker ext_line;
+                    ext_line.header.frame_id = get_parameter("world_frame").as_string();
+                    ext_line.header.stamp = now;
+                    ext_line.ns = "trajectory_extension";
+                    ext_line.id = static_cast<int>(seg_idx);
+                    ext_line.type = visualization_msgs::msg::Marker::LINE_STRIP;
+                    ext_line.action = visualization_msgs::msg::Marker::ADD;
+                    ext_line.pose.orientation.w = 1.0;
+                    ext_line.scale.x = 0.08;
+                    ext_line.color.r = 0.75f;
+                    ext_line.color.g = 0.75f;
+                    ext_line.color.b = 0.78f;
+                    ext_line.color.a = 0.9f;
+                    geometry_msgs::msg::Point ext_p0;
+                    ext_p0.x = end_point.x(); ext_p0.y = end_point.y(); ext_p0.z = end_point.z();
+                    geometry_msgs::msg::Point ext_p1;
+                    ext_p1.x = ext_point_half.x(); ext_p1.y = ext_point_half.y(); ext_p1.z = ext_point_half.z();
+                    geometry_msgs::msg::Point ext_p2;
+                    ext_p2.x = ext_point_full.x(); ext_p2.y = ext_point_full.y(); ext_p2.z = ext_point_full.z();
+                    ext_line.points.push_back(ext_p0);
+                    ext_line.points.push_back(ext_p1);
+                    ext_line.points.push_back(ext_p2);
+                    colored_path_message.markers.push_back(ext_line);
+                    visualization_msgs::msg::Marker preview_ext = ext_line;
+                    preview_ext.ns = "preview_extension";
+                    preview_ext.color.a = 0.5f;
+                    preview_colored_message.markers.push_back(preview_ext);
                 }
             }
         }
