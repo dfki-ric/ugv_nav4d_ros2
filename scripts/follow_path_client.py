@@ -65,11 +65,25 @@ class FollowPathClient(Node):
     # body-frame height convention, so same level agrees within slope and
     # calibration error while other storeys differ by meters.
     LEVEL_Z_WINDOW_M = 2.0
-    # Mirrors the controller goal_checker xy_goal_tolerance: within this radius
-    # of a segment's (extended) end pose, nav2 would declare the goal reached
-    # immediately, so resume can skip the remainder instead of creeping along
-    # the extension stubs.
-    SEGMENT_GOAL_TOLERANCE_M = 2.0
+    # Resume-skip: if the along-path remainder of the current segment is no
+    # more than the trajectory extension (mirrors the planner's
+    # extension_distance) plus slack, everything left is extension stubs the
+    # goal checker would immediately declare reached -- resuming would only
+    # creep forward along them. Along-path length (not euclidean distance to
+    # the end) so the check is immune to the waypoint pause stopping up to
+    # ~0.4 m short of the waypoint.
+    SEGMENT_EXTENSION_M = 2.0
+    SEGMENT_SKIP_SLACK_M = 0.5
+    # Cusp anticipation: intermediate segments end at a direction change and
+    # carry sacrificial extension stubs; completing them through the goal
+    # checker overshoots the cusp (wide tolerance + braking + handoff
+    # latency). Detect arrival at the TRUE end by closest approach -- exactly
+    # like the accurate waypoint pause -- cancel, and send the next segment.
+    CUSP_AT_RADIUS_M = 0.4
+    CUSP_REACH_MIN_M = 0.8
+    CUSP_RECEDE_M = 0.3
+    # Closest-approach tracker for the cusp advance (per goal; reset on send).
+    cusp_min_dist = None
     ROBOT_FRAME = 'arter/base_link'
 
     def __init__(self):
@@ -434,6 +448,7 @@ class FollowPathClient(Node):
         self.goal_finished = False
         self.paused = False
         self.cancel_reason = None
+        self.cusp_min_dist = None
         self.publish_status(
             MissionStatus.EXECUTING,
             f'Executing segment {self.current_segment}/{self.total_segments}: {label}')
@@ -545,6 +560,8 @@ class FollowPathClient(Node):
         ry = tf.transform.translation.y
         rz = tf.transform.translation.z
         if self.check_waypoint_pause(rx, ry, rz):
+            return
+        if self.check_cusp_advance(rx, ry, rz):
             return
         # Same-level poses only: on a route that overlaps itself vertically
         # (ramp, underpass of its own path), the XY-nearest pose can lie on
@@ -701,30 +718,98 @@ class FollowPathClient(Node):
         self.current_speed = 0.0
         self.publish_status(MissionStatus.PAUSED, 'Paused; mission retained')
 
+    def check_cusp_advance(self, rx, ry, rz):
+        """Cancel the current segment and advance to the next one the moment
+        the robot reaches the segment's TRUE end (final pose minus the
+        extension stubs). Only for intermediate, extension-carrying segments:
+        the final segment keeps finishing via the goal checker, and segments
+        without stubs (e.g. before a turn-on-the-spot) are left untouched."""
+        if not self.path_queue:
+            return False  # final segment
+        if self.cancel_in_progress or self.current_goal_handle is None:
+            return False
+        path, _ = self.current_item
+        n = len(path.poses)
+        if n < 4:
+            return False
+        # Extension signature: exactly two trailing gaps of ~half the
+        # extension length each (spline samples are much denser). No
+        # signature means no stubs, so no cusp handling.
+        half = self.SEGMENT_EXTENSION_M * 0.5
+        gap1 = self.pose_distance(path.poses[n - 2], path.poses[n - 1])
+        gap2 = self.pose_distance(path.poses[n - 3], path.poses[n - 2])
+        if not (0.7 * half <= gap1 <= 1.3 * half and 0.7 * half <= gap2 <= 1.3 * half):
+            return False
+        end = path.poses[n - 3].pose.position
+        if abs(end.z - rz) > self.LEVEL_Z_WINDOW_M:
+            return False
+        d = math.hypot(end.x - rx, end.y - ry)
+        if d > self.WAYPOINT_ARM_RADIUS_M:
+            self.cusp_min_dist = None
+            return False
+        seen = self.cusp_min_dist
+        self.cusp_min_dist = d if seen is None else min(seen, d)
+        fire = (d <= self.CUSP_AT_RADIUS_M or
+                (self.cusp_min_dist <= self.CUSP_REACH_MIN_M and
+                 d >= self.cusp_min_dist + self.CUSP_RECEDE_M))
+        if not fire:
+            return False
+        self.get_logger().info(
+            f'Segment end (cusp) reached ({d:.2f} m); canceling and advancing '
+            'to the next segment.')
+        self.cancel_reason = 'advance'
+        self.cancel_in_progress = True
+        cancel_future = self.current_goal_handle.cancel_goal_async()
+        cancel_future.add_done_callback(self.after_cancel_advance)
+        return True
+
+    def after_cancel_advance(self, future):
+        if not self.cancel_in_progress:
+            return  # already finalized via the goal result
+        self.cancel_in_progress = False
+        self.current_speed = 0.0
+        self.get_logger().info('Cusp cancel confirmed; sending next segment.')
+        self.current_item = None
+        self.send_next_path()
+
     def segment_end_reached(self):
-        """True if the robot already stands within the controller's goal
-        tolerance of the current segment's final (extended) pose. Resuming
-        such a segment would only creep forward along the extension until the
-        goal checker fires, so the caller advances to the next segment
-        directly instead."""
+        """True if the along-path remainder of the current segment is only
+        the trajectory extension (plus slack). The goal checker (tolerance =
+        extension) would declare such a goal reached at once; resuming it
+        would only creep forward along the extension stubs, so the caller
+        advances to the next segment directly instead."""
         if self.current_item is None:
             return False
         path, _ = self.current_item
-        if not path.poses or not path.header.frame_id:
+        if len(path.poses) < 2 or not path.header.frame_id:
             return False
         try:
             tf = self.tf_buffer.lookup_transform(
                 path.header.frame_id, self.ROBOT_FRAME, Time())
         except Exception:
             return False  # no localization; let the normal resume path handle it
-        end = path.poses[-1].pose.position
-        dx = tf.transform.translation.x - end.x
-        dy = tf.transform.translation.y - end.y
-        if math.hypot(dx, dy) > self.SEGMENT_GOAL_TOLERANCE_M:
-            return False
-        # Same level-window guard as the waypoint logic: on a route that
-        # overlaps itself vertically, never match an end pose on another storey.
-        return abs(tf.transform.translation.z - end.z) <= self.LEVEL_Z_WINDOW_M
+        rx = tf.transform.translation.x
+        ry = tf.transform.translation.y
+        rz = tf.transform.translation.z
+        # Nearest pose, same-level poses preferred (route overlapping itself
+        # vertically must not match a pose on another storey).
+        candidates = [i for i, p in enumerate(path.poses)
+                      if abs(p.pose.position.z - rz) <= self.LEVEL_Z_WINDOW_M]
+        if not candidates:
+            candidates = range(len(path.poses))
+        nearest_idx = min(candidates, key=lambda i: math.hypot(
+            path.poses[i].pose.position.x - rx,
+            path.poses[i].pose.position.y - ry))
+        remaining = 0.0
+        limit = self.SEGMENT_EXTENSION_M + self.SEGMENT_SKIP_SLACK_M
+        for i in range(nearest_idx, len(path.poses) - 1):
+            remaining += self.pose_distance(path.poses[i], path.poses[i + 1])
+            if remaining > limit:
+                return False
+        self.get_logger().info(
+            f'Resume: only {remaining:.1f} m of segment left past the robot '
+            f'(<= extension {self.SEGMENT_EXTENSION_M} m + slack); skipping it.')
+        return True
 
     def resume_callback(self, request, response):
         del request
@@ -897,6 +982,9 @@ class FollowPathClient(Node):
                     pending = self.pending_labeled_path_msg
                     self.pending_labeled_path_msg = None
                     self.replace_queue_and_send(pending)
+                elif reason == 'advance':
+                    self.current_item = None
+                    self.send_next_path()
                 elif self.paused:
                     self.publish_status(MissionStatus.PAUSED, 'Paused; mission retained')
                 elif reason == 'abort':
@@ -927,6 +1015,18 @@ class FollowPathClient(Node):
                     f'Goal ended with status {result.status} while a pause was '
                     'pending; treating it as paused.')
                 self.publish_status(MissionStatus.PAUSED, 'Paused; mission retained')
+                return
+            if (self.cancel_in_progress and self.cancel_reason == 'advance'
+                    and self.current_item is not None):
+                # A cusp-advance cancel can race into ABORTED as well; the next
+                # segment is what the operator expects either way.
+                self.cancel_in_progress = False
+                self.current_speed = 0.0
+                self.get_logger().warn(
+                    f'Goal ended with status {result.status} during a cusp '
+                    'advance; continuing with the next segment.')
+                self.current_item = None
+                self.send_next_path()
                 return
             if self.cancel_in_progress and self.pending_labeled_path_msg is not None:
                 # A replace-cancel can likewise race into ABORTED instead of
