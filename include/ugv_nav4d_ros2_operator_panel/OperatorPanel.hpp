@@ -117,6 +117,7 @@ private:
     QPushButton* calibrate_geometry_button_{nullptr};
     QPushButton* mls_delete_button_{nullptr};
     QPushButton* mls_fill_button_{nullptr};
+    QPushButton* regen_travmap_button_{nullptr};
     QDoubleSpinBox* fill_z_spin_{nullptr};
     QDoubleSpinBox* fill_roll_spin_{nullptr};
     QDoubleSpinBox* fill_pitch_spin_{nullptr};
@@ -213,6 +214,7 @@ private:
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr calibrate_geometry_client_;
     rclcpp::Client<ugv_nav4d_ros2::srv::DeleteMlsPatches>::SharedPtr mls_delete_client_;
     rclcpp::Client<ugv_nav4d_ros2::srv::SetFillPlane>::SharedPtr mls_fill_client_;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr regen_travmap_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr start_bag_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr stop_bag_client_;
     rclcpp::Client<ugv_nav4d_ros2::srv::MissionFile>::SharedPtr save_mission_client_;

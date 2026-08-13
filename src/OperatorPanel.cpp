@@ -218,8 +218,8 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     mls_delete_button_ = new QPushButton("Delete MLS patches (last Trav zone)");
     mls_delete_button_->setToolTip(
         "Deletes all MLS patches inside the last drawn 'Traversable fill (MLS edit)'\n"
-        "zone (within its level band) and rebuilds the maps. Use it to erase tall\n"
-        "grass or phantom obstacles. Draw the polygon with the zone tool first.");
+        "zone, up to the ceiling. Pure MLS edit: planning is untouched until you\n"
+        "click 'Regenerate trav map'. Draw the polygon with the zone tool first.");
     buttons->addWidget(mls_delete_button_, 15, 0, 1, 1);
     auto* del_row = new QHBoxLayout();
     delete_top_spin_ = new QDoubleSpinBox();
@@ -264,16 +264,24 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     mls_fill_button_ = new QPushButton("Fill plane");
     mls_fill_button_->setToolTip(
         "Refills the last Traversable zone with synthetic flat ground on the plane\n"
-        "set by z / roll / pitch, then rebuilds the maps. Adjust and click again\n"
-        "until the fill lines up with the real ground; each click replaces the\n"
-        "previous fill. The fit persists in the zone and in saved missions.");
+        "set by z / roll / pitch. Pure MLS edit: each click wipes the previous\n"
+        "fill and replaces it, so iterate until it lines up with the ground, then\n"
+        "click 'Regenerate trav map'. The fit persists in zones and missions.");
     buttons->addWidget(mls_fill_button_, 16, 1, 1, 1);
+    regen_travmap_button_ = new QPushButton("Regenerate trav map (apply MLS edits)");
+    regen_travmap_button_->setToolTip(
+        "Rebuilds the traversability map and planner environment from the\n"
+        "CURRENT in-memory MLS, i.e. including your delete/fill edits. The MLS\n"
+        "itself is kept as-is (unlike 'Regenerate maps', which reloads it from\n"
+        "its source and discards nothing-persisted edits).");
+    buttons->addWidget(regen_travmap_button_, 17, 0, 1, 2);
     rebuild_sensitive_buttons_ = {
         recover_button_, replan_button_, execute_path_button_, discard_path_button_,
         clear_waypoints_button_, undo_waypoint_button_, reverse_waypoints_button_,
         clear_zones_button_, undo_zone_button_, save_map_button_,
         republish_maps_button_, regenerate_maps_button_, update_footprint_button_,
         calibrate_geometry_button_, mls_delete_button_, mls_fill_button_,
+        regen_travmap_button_,
         save_mission_button_, load_mission_button_, recalibrate_height_button_};
     plan_return_button_ = new QPushButton("Plan return");
     layout->addLayout(buttons);
@@ -361,6 +369,9 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     });
     connect(mls_delete_button_, &QPushButton::clicked, this, [this]() { onDeleteMlsPatches(); });
     connect(mls_fill_button_, &QPushButton::clicked, this, [this]() { onFillPlane(); });
+    connect(regen_travmap_button_, &QPushButton::clicked, this, [this]() {
+        callTrigger(regen_travmap_client_, "Regenerate trav map");
+    });
     connect(pause_at_wp_check_, &QCheckBox::toggled, this, [this](bool checked) {
         auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
         request->data = checked;
@@ -628,6 +639,7 @@ void OperatorPanel::onInitialize()
     calibrate_geometry_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/calibrate_geometry");
     mls_delete_client_ = node_->create_client<ugv_nav4d_ros2::srv::DeleteMlsPatches>("/ugv_nav4d_ros2/mls_delete_last_zone");
     mls_fill_client_ = node_->create_client<ugv_nav4d_ros2::srv::SetFillPlane>("/ugv_nav4d_ros2/mls_fill_last_zone");
+    regen_travmap_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/regenerate_travmap");
     start_bag_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/start_bag_recording");
     stop_bag_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/stop_bag_recording");
     save_mission_client_ = node_->create_client<ugv_nav4d_ros2::srv::MissionFile>("/ugv_nav4d_ros2/save_mission");

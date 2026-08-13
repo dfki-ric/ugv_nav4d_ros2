@@ -36,8 +36,12 @@ namespace {
 
 bool zoneAffectsPlanning(const ugv_nav4d_ros2::msg::ForbiddenZone& zone)
 {
+    // TRAVERSABLE zones are pure MLS-edit regions: drawing one changes nothing
+    // until the operator runs Delete/Fill, and planning only changes on the
+    // explicit travmap regeneration. So they never force a rebuild here.
     return zone.zone_type != ugv_nav4d_ros2::msg::ForbiddenZone::SPEED_LIMIT &&
-           zone.zone_type != ugv_nav4d_ros2::msg::ForbiddenZone::ANNOTATION;
+           zone.zone_type != ugv_nav4d_ros2::msg::ForbiddenZone::ANNOTATION &&
+           zone.zone_type != ugv_nav4d_ros2::msg::ForbiddenZone::TRAVERSABLE;
 }
 
 std::string normalizedFrame(std::string frame)
@@ -128,12 +132,13 @@ PathPlannerNode::PathPlannerNode()
             } else if (auto* zone = lastTraversableZone()){
                 zone->fill_enabled = false;
                 zone->delete_top = static_cast<float>(request->top_m);
-                configurePlanner();
-                publishTravMap();
-                validatePendingPath();
+                last_mls_patches_removed_ = 0;
+                last_mls_patches_added_ = 0;
+                applyMlsEditZone(*zone);
+                publishMaps();
                 response->success = true;
                 response->message = "Deleted " + std::to_string(last_mls_patches_removed_) +
-                                    " MLS patch(es) inside Traversable zone(s); maps rebuilt.";
+                                    " MLS patch(es) (MLS only); click 'Regenerate trav map' to apply to planning.";
             } else {
                 response->message = "No Traversable (MLS edit) zone drawn; draw one with the zone tool first.";
             }
@@ -161,18 +166,22 @@ PathPlannerNode::PathPlannerNode()
                 zone->delete_top = (std::isfinite(request->delete_top_m) &&
                                     request->delete_top_m > 0.0 && request->delete_top_m <= 10.0)
                                    ? static_cast<float>(request->delete_top_m) : 0.0f;
-                configurePlanner();
-                publishTravMap();
-                validatePendingPath();
+                last_mls_patches_removed_ = 0;
+                last_mls_patches_added_ = 0;
+                applyMlsEditZone(*zone);
+                publishMaps();
                 response->success = true;
                 response->message = "Fill applied: removed " + std::to_string(last_mls_patches_removed_) +
                                     ", added " + std::to_string(last_mls_patches_added_) +
-                                    " patch(es) across Traversable zone(s); maps rebuilt.";
+                                    " patch(es) (MLS only); click 'Regenerate trav map' to apply to planning.";
             } else {
                 response->message = "No Traversable (MLS edit) zone drawn; draw one with the zone tool first.";
             }
             publishStatus(response->message);
         });
+    regenerate_travmap_service = this->create_service<std_srvs::srv::Trigger>(
+            "/ugv_nav4d_ros2/regenerate_travmap",
+            std::bind(&PathPlannerNode::regenerateTravMapCallback, this, std::placeholders::_1, std::placeholders::_2));
     calibrate_geometry_service = this->create_service<std_srvs::srv::Trigger>(
         "/ugv_nav4d_ros2/calibrate_geometry",
         [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
@@ -1879,6 +1888,8 @@ void PathPlannerNode::onForbiddenZonesChanged(bool planning_graph_changed,
         if (get_parameter("load_mls_from_file").as_bool()){
             RCLCPP_INFO(this->get_logger(), "Traversable (MLS edit) zone removed; reloading the MLS from file to restore the original patches.");
             initializeMLSMap();
+            applyMlsEditZones();  // re-apply the remaining zones to the fresh MLS
+            publishStatus("MLS restored from file; regenerate the traversability map to apply.");
         } else {
             RCLCPP_WARN(this->get_logger(), "Traversable (MLS edit) zone removed; original patches only reappear as new map pointclouds are merged in.");
         }
@@ -2082,6 +2093,63 @@ void PathPlannerNode::applyMlsEditZone(const ugv_nav4d_ros2::msg::ForbiddenZone&
             ++last_mls_patches_added_;
         }
     }
+}
+
+void PathPlannerNode::regenerateTravMapCallback(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+{
+    std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+    if (is_planning){
+        response->success = false;
+        response->message = "Cannot regenerate the traversability map while planning is active.";
+        publishStatus(response->message);
+        return;
+    }
+    if (!got_map || !mls_map_ptr || !is_configured || !planner_ptr){
+        response->success = false;
+        response->message = "No map loaded / planner not configured; nothing to regenerate.";
+        publishStatus(response->message);
+        return;
+    }
+    if (!get_parameter("read_pose_from_topic").as_bool() && !updatePoseFromTF()){
+        response->success = false;
+        response->message = "Cannot regenerate: TF lookup of the robot pose failed.";
+        publishStatus(response->message);
+        return;
+    }
+    ScopedRebuildFlag rebuild_flag(*this);
+    publishStatus("Regenerating traversability map from the current (edited) MLS...");
+    // Fresh generator: expansion must re-evaluate cells whose MLS patches were
+    // deleted or filled; reusing the old one keeps stale nodes alive. The MLS
+    // itself is kept as-is -- that is the whole point of this service (the
+    // regenerate_maps service is the one that rebuilds the MLS from source).
+    traversability_generator_ptr.reset(
+        new traversability_generator3d::TraversabilityGenerator3d(traversability_config));
+    traversability_generator_ptr->setMLSGrid(mls_map_ptr);
+    applyMlsEditZones();  // idempotent; covers zones loaded from a mission file
+
+    Eigen::Affine3d body2MLS;
+    body2MLS.translation() << start_pose.pose.position.x, start_pose.pose.position.y,
+                              start_pose.pose.position.z;
+    Eigen::Quaterniond quat(start_pose.pose.orientation.w, start_pose.pose.orientation.x,
+                            start_pose.pose.orientation.y, start_pose.pose.orientation.z);
+    body2MLS.linear() = quat.toRotationMatrix();
+    Eigen::Affine3d body2Ground(Eigen::Affine3d::Identity());
+    body2Ground.translation() = Eigen::Vector3d(0, 0, -get_parameter("distToGround").as_double());
+    const auto t_expand = std::chrono::steady_clock::now();
+    traversability_generator_ptr->expandAll((body2MLS * body2Ground).translation());
+    RCLCPP_INFO_STREAM(this->get_logger(), "Timing: trav-map re-expansion took "
+        << std::chrono::duration<double>(std::chrono::steady_clock::now() - t_expand).count()
+        << " s.");
+    applyForbiddenZones();
+    rebuildSpeedZoneCache();
+    planner_ptr->updateMap(traversability_generator_ptr->getTraversabilityMap());
+    publishTravMap();
+    validatePendingPath();
+    response->success = true;
+    response->message = "Traversability map regenerated from the current MLS.";
+    publishStatus(response->message);
 }
 
 void PathPlannerNode::applyForbiddenZones(){
