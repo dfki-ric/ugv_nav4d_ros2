@@ -123,6 +123,7 @@ private:
     QDoubleSpinBox* fill_pitch_spin_{nullptr};
     QDoubleSpinBox* delete_top_spin_{nullptr};
     QCheckBox* pause_at_wp_check_{nullptr};
+    QCheckBox* auto_plan_check_{nullptr};
     QPushButton* stop_button_{nullptr};
     QPushButton* pause_button_{nullptr};
     QPushButton* resume_button_{nullptr};
@@ -184,9 +185,10 @@ private:
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr rebuilding_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr waypoint_poses_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr pause_at_wp_state_sub_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr auto_plan_state_sub_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr bag_status_sub_;
-    std::vector<QPushButton*> rebuild_sensitive_buttons_;
+    std::vector<QWidget*> rebuild_sensitive_buttons_;
     bool rebuilding_ = false;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr stop_execution_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr pause_execution_client_;
@@ -210,6 +212,7 @@ private:
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr update_footprint_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr recalibrate_height_client_;
     rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr set_pause_at_wp_client_;
+    rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr set_auto_plan_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr clear_executed_path_client_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr calibrate_geometry_client_;
     rclcpp::Client<ugv_nav4d_ros2::srv::DeleteMlsPatches>::SharedPtr mls_delete_client_;

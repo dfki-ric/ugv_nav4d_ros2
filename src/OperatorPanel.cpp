@@ -175,7 +175,14 @@ OperatorPanel::OperatorPanel(QWidget* parent)
         "When enabled, execution pauses once near every queued waypoint and only\n"
         "continues after Resume. Needs at least one waypoint in the queue; a plain\n"
         "single-goal route has none, so the toggle stays disabled.");
-    buttons->addWidget(pause_at_wp_check_, 1, 0, 1, 2);
+    auto_plan_check_ = new QCheckBox("Auto plan");
+    auto_plan_check_->setToolTip(
+        "While enabled, every waypoint change replans the whole chain as a\n"
+        "preview: the last waypoint acts as the goal, earlier ones are visited\n"
+        "in order. Execution still requires the Execute button. Works while a\n"
+        "mission is executing (preview only).");
+    buttons->addWidget(pause_at_wp_check_, 1, 0, 1, 1);
+    buttons->addWidget(auto_plan_check_, 1, 1, 1, 1);
     buttons->addWidget(pause_button_, 0, 0);
     buttons->addWidget(resume_button_, 0, 1);
     buttons->addWidget(recover_button_, 2, 0, 1, 2);
@@ -281,7 +288,12 @@ OperatorPanel::OperatorPanel(QWidget* parent)
         clear_zones_button_, undo_zone_button_, save_map_button_,
         republish_maps_button_, regenerate_maps_button_, update_footprint_button_,
         calibrate_geometry_button_, mls_delete_button_, mls_fill_button_,
-        regen_travmap_button_,
+        regen_travmap_button_, auto_plan_check_,
+        clear_executed_path_button_, record_bag_button_,
+        plan_return_button_, return_mode_combo_,
+        waypoint_index_spin_, delete_waypoint_button_,
+        zone_index_spin_, delete_zone_button_,
+        fill_z_spin_, fill_roll_spin_, fill_pitch_spin_, delete_top_spin_,
         save_mission_button_, load_mission_button_, recalibrate_height_button_};
     plan_return_button_ = new QPushButton("Plan return");
     layout->addLayout(buttons);
@@ -371,6 +383,15 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     connect(mls_fill_button_, &QPushButton::clicked, this, [this]() { onFillPlane(); });
     connect(regen_travmap_button_, &QPushButton::clicked, this, [this]() {
         callTrigger(regen_travmap_client_, "Regenerate trav map");
+    });
+    connect(auto_plan_check_, &QCheckBox::toggled, this, [this](bool checked) {
+        auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
+        request->data = checked;
+        if (set_auto_plan_client_->service_is_ready()){
+            set_auto_plan_client_->async_send_request(request);
+        } else {
+            setStatusText("Auto-plan service unavailable (planner not running?)");
+        }
     });
     connect(pause_at_wp_check_, &QCheckBox::toggled, this, [this](bool checked) {
         auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
@@ -556,6 +577,17 @@ void OperatorPanel::onInitialize()
                 pause_at_wp_check_->setChecked(on);
             }, Qt::QueuedConnection);
         });
+    auto_plan_state_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+        "/ugv_nav4d_ros2/auto_plan", rclcpp::QoS(1).transient_local(),
+        [this](const std_msgs::msg::Bool::SharedPtr msg)
+        {
+            QMetaObject::invokeMethod(this, [this, on = msg->data]() {
+                // Follow the planner's latched truth without re-triggering
+                // the service call.
+                QSignalBlocker block(auto_plan_check_);
+                auto_plan_check_->setChecked(on);
+            }, Qt::QueuedConnection);
+        });
     cmd_vel_sub_ = node_->create_subscription<geometry_msgs::msg::Twist>(
         "/arter/mcs/cmd_vel", rclcpp::QoS(10),
         [this](const geometry_msgs::msg::Twist::SharedPtr msg)
@@ -635,6 +667,7 @@ void OperatorPanel::onInitialize()
     update_footprint_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/update_footprint");
     recalibrate_height_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/recalibrate_height");
     set_pause_at_wp_client_ = node_->create_client<std_srvs::srv::SetBool>("/ugv_nav4d_ros2/set_pause_at_waypoints");
+    set_auto_plan_client_ = node_->create_client<std_srvs::srv::SetBool>("/ugv_nav4d_ros2/set_auto_plan");
     clear_executed_path_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/clear_executed_path");
     calibrate_geometry_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/calibrate_geometry");
     mls_delete_client_ = node_->create_client<ugv_nav4d_ros2::srv::DeleteMlsPatches>("/ugv_nav4d_ros2/mls_delete_last_zone");

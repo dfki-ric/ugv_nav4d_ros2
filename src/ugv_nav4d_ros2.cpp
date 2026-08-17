@@ -282,6 +282,34 @@ void PathPlannerNode::setupSubscriptions()
     sub_add_waypoint = create_subscription<geometry_msgs::msg::PoseStamped>("/ugv_nav4d_ros2/add_waypoint", 10,
             bind(&PathPlannerNode::addWaypointCallback, this, std::placeholders::_1));
 
+    auto_plan_state_publisher = create_publisher<std_msgs::msg::Bool>(
+        "/ugv_nav4d_ros2/auto_plan", rclcpp::QoS(1).transient_local());
+    {
+        std_msgs::msg::Bool initial_auto_plan;
+        initial_auto_plan.data = false;
+        auto_plan_state_publisher->publish(initial_auto_plan);
+    }
+    set_auto_plan_service = this->create_service<std_srvs::srv::SetBool>(
+        "/ugv_nav4d_ros2/set_auto_plan",
+        [this](const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
+               std::shared_ptr<std_srvs::srv::SetBool::Response> response){
+            std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+            auto_plan_enabled_ = request->data;
+            std_msgs::msg::Bool state;
+            state.data = auto_plan_enabled_;
+            auto_plan_state_publisher->publish(state);
+            response->success = true;
+            if (auto_plan_enabled_){
+                response->message = waypoint_queue.empty()
+                    ? "Auto plan ON: the next waypoint plans a route to itself."
+                    : "Auto plan ON: planning the current waypoint chain...";
+                publishStatus(response->message);
+                autoPlanIfEnabled();
+            } else {
+                response->message = "Auto plan OFF: waypoints wait for an explicit goal again.";
+                publishStatus(response->message);
+            }
+        });
     clear_waypoints_service = this->create_service<std_srvs::srv::Trigger>(
             "/ugv_nav4d_ros2/clear_waypoints", std::bind(&PathPlannerNode::clearWaypointsCallback, this, std::placeholders::_1, std::placeholders::_2));
 
@@ -769,6 +797,76 @@ void PathPlannerNode::processGoalRequest(const geometry_msgs::msg::PoseStamped::
     plan();
 }
 
+void PathPlannerNode::autoPlanIfEnabled(){
+    // Auto plan: the LAST queued waypoint acts as the goal, the earlier ones
+    // are intermediate stops, and every queue change replans the whole chain
+    // as a PREVIEW (execution still requires the Execute button). Planning
+    // never consumes the queue, so each change replans the full chain.
+    if (!auto_plan_enabled_ || waypoint_queue.empty()){
+        return;
+    }
+    if (!got_map){
+        publishStatus("Auto plan: no map yet; the chain plans once a map is loaded.");
+        return;
+    }
+    if (is_planning){
+        return;  // planning is synchronous; nothing sensible to do re-entrantly
+    }
+    if (!is_configured){
+        configurePlanner();
+    }
+    if (!get_parameter("read_pose_from_topic").as_bool() && !updatePoseFromTF()){
+        publishStatus("Auto plan: TF lookup of the robot pose failed; waypoint kept, not planned.");
+        return;
+    }
+    start_pose_rbs.position = Eigen::Vector3d(start_pose.pose.position.x,
+                                              start_pose.pose.position.y,
+                                              start_pose.pose.position.z);
+    start_pose_rbs.orientation = Eigen::Quaterniond(start_pose.pose.orientation.w,
+                                                    start_pose.pose.orientation.x,
+                                                    start_pose.pose.orientation.y,
+                                                    start_pose.pose.orientation.z);
+    // Move the tail into the goal slot for the duration of the plan, then
+    // restore it: numbering, markers and pause-at-waypoints keep seeing the
+    // full queue.
+    const geometry_msgs::msg::Pose goal_waypoint = waypoint_queue.back();
+    waypoint_queue.pop_back();
+    goal_pose_rbs.position = Eigen::Vector3d(goal_waypoint.position.x,
+                                             goal_waypoint.position.y,
+                                             goal_waypoint.position.z);
+    goal_pose_rbs.orientation = Eigen::Quaterniond(goal_waypoint.orientation.w,
+                                                   goal_waypoint.orientation.x,
+                                                   goal_waypoint.orientation.y,
+                                                   goal_waypoint.orientation.z);
+    if (waypoint_queue.empty()){
+        plan();
+    } else {
+        planThroughWaypoints();
+    }
+    waypoint_queue.push_back(goal_waypoint);
+}
+
+void PathPlannerNode::autoPlanQueueChanged(){
+    if (!auto_plan_enabled_){
+        return;
+    }
+    if (waypoint_queue.empty()){
+        // The preview was a chain through waypoints that no longer exist.
+        if (has_pending_path){
+            has_pending_path = false;
+            path_approved = false;
+            pending_path_is_recovery = false;
+            std_msgs::msg::Bool route_valid;
+            route_valid.data = false;
+            route_valid_publisher->publish(route_valid);
+            clearExecutingPathDisplay();
+            publishStatus("Auto plan: no waypoints left; preview discarded.");
+        }
+        return;
+    }
+    autoPlanIfEnabled();
+}
+
 void PathPlannerNode::addWaypointCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg){
     std::lock_guard<std::recursive_mutex> lock(planner_mutex);
     waypoint_queue.push_back(msg->pose);
@@ -777,6 +875,7 @@ void PathPlannerNode::addWaypointCallback(const geometry_msgs::msg::PoseStamped:
                        << ", " << msg->pose.position.z << ")");
     publishWaypointMarkers();
     publishStatus(std::to_string(waypoint_queue.size()) + " waypoint(s) queued");
+    autoPlanQueueChanged();
 }
 
 void PathPlannerNode::clearWaypointsCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
@@ -789,6 +888,7 @@ void PathPlannerNode::clearWaypointsCallback(const std::shared_ptr<std_srvs::srv
     response->message = "Cleared " + std::to_string(count) + " waypoint(s).";
     RCLCPP_INFO_STREAM(this->get_logger(), response->message);
     publishStatus(response->message);
+    autoPlanQueueChanged();
 }
 
 void PathPlannerNode::removeLastWaypointCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
@@ -805,6 +905,7 @@ void PathPlannerNode::removeLastWaypointCallback(const std::shared_ptr<std_srvs:
     response->message = std::to_string(waypoint_queue.size()) + " waypoint(s) remaining.";
     RCLCPP_INFO_STREAM(this->get_logger(), "Removed last waypoint; " << response->message);
     publishStatus("Removed last waypoint; " + response->message);
+    autoPlanQueueChanged();
 }
 
 void PathPlannerNode::reverseWaypointsCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
@@ -838,6 +939,7 @@ void PathPlannerNode::reverseWaypointsCallback(const std::shared_ptr<std_srvs::s
                         " waypoint(s) and flipped their headings; set a goal and plan.";
     RCLCPP_INFO_STREAM(this->get_logger(), response->message);
     publishStatus(response->message);
+    autoPlanQueueChanged();
 }
 
 void PathPlannerNode::editWaypointCallback(const std::shared_ptr<ugv_nav4d_ros2::srv::EditWaypoint::Request> request,
@@ -863,6 +965,7 @@ void PathPlannerNode::editWaypointCallback(const std::shared_ptr<ugv_nav4d_ros2:
     publishWaypointMarkers();
     RCLCPP_INFO_STREAM(this->get_logger(), response->message);
     publishStatus(response->message);
+    autoPlanQueueChanged();
 }
 
 void PathPlannerNode::publishWaypointMarkers(){
@@ -1516,6 +1619,8 @@ void PathPlannerNode::loadMissionCallback(
     response->message = "Mission loaded from " + filename +
                         " (waypoints + zones); set a goal and plan." + photo_note;
     publishStatus(response->message);
+    // After zones are applied, so an auto-plan preview uses the updated map.
+    autoPlanQueueChanged();
 }
 
 // Even-odd rule point-in-polygon test in the XY plane.

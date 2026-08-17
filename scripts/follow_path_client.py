@@ -116,6 +116,11 @@ class FollowPathClient(Node):
         self.pause_at_waypoints = False
         self.waypoint_xyz = []
         self.waypoints_paused = set()
+        # Waypoints are PAUSED in the order the ROUTE visits them, not queue
+        # order: a return mission drives the queue in reverse. The order is
+        # recomputed from the route whenever route or queue changes.
+        self.waypoint_visit_order = []
+        self.route_poses_xyz = []
         # Waypoints sitting at the END of the current segment (direction
         # change at the waypoint): those pause AFTER the segment completes,
         # so the controller drives its full (extended) trajectory and stops
@@ -349,6 +354,10 @@ class FollowPathClient(Node):
         self.route_valid = True
         self.waypoints_paused = set()
         self.waypoint_min_dist = {}
+        self.route_poses_xyz = [
+            (pp.pose.position.x, pp.pose.position.y, pp.pose.position.z)
+            for path, _ in self.path_queue for pp in path.poses]
+        self.compute_waypoint_visit_order()
         self.waypoint_photos = {}
         self.waypoint_photos_pub.publish(String(data='{}'))
         self.current_item = None
@@ -606,6 +615,35 @@ class FollowPathClient(Node):
         # Queue changed: earlier stops no longer map to the same waypoints.
         self.waypoints_paused = set()
         self.waypoint_min_dist = {}
+        self.compute_waypoint_visit_order()
+
+    def compute_waypoint_visit_order(self):
+        """Order the waypoints by their position ALONG the current route
+        (nearest route pose, same level): a return mission visits the queue
+        in reverse, and loops can reorder arbitrarily. Waypoints that do not
+        project onto the route (farther than the arm radius) are excluded --
+        they belong to a queue that was edited but not replanned."""
+        order = []
+        arm_sq = self.WAYPOINT_ARM_RADIUS_M ** 2
+        for i, (wx, wy, wz) in enumerate(self.waypoint_xyz):
+            best_j = None
+            best_d = None
+            for j, (px, py, pz) in enumerate(self.route_poses_xyz):
+                if abs(pz - wz) > self.LEVEL_Z_WINDOW_M:
+                    continue
+                d = (px - wx) ** 2 + (py - wy) ** 2
+                if best_d is None or d < best_d:
+                    best_d = d
+                    best_j = j
+            if best_j is not None and best_d is not None and best_d <= arm_sq:
+                order.append((best_j, i))
+        order.sort()
+        self.waypoint_visit_order = [i for _, i in order]
+        if self.waypoint_visit_order and self.waypoint_visit_order != list(
+                range(len(self.waypoint_xyz))):
+            self.get_logger().info(
+                'Waypoint visit order along the route: '
+                + ', '.join(str(i + 1) for i in self.waypoint_visit_order))
 
     def photo_frame_callback(self, msg):
         self.latest_photo_msg = msg
@@ -642,17 +680,21 @@ class FollowPathClient(Node):
         """Pause once per waypoint at the moment it is REACHED (closest
         approach), same level only. Returns True if a pause was just
         requested (skip further checks this tick)."""
-        if not self.pause_at_waypoints or not self.waypoint_xyz:
+        if not self.waypoint_xyz:
             return False
+        # Passage is tracked even while the toggle is OFF (waypoints passed
+        # then are consumed silently); only the pause ACTION is gated by the
+        # toggle. Otherwise enabling it mid-route deadlocks: the strict-order
+        # gate waits forever for an already-passed waypoint behind the robot.
         # STRICT ORDER: waypoints are visited in queue order (the planner
         # routes through them in sequence), so only the next un-paused
         # waypoint is ever eligible. Driving past waypoint 2's location on
         # the way to waypoint 1 must not pause.
-        pending = [i for i in range(len(self.waypoint_xyz))
-                   if i not in self.waypoints_paused]
+        eligible = self.waypoint_visit_order or range(len(self.waypoint_xyz))
+        pending = [i for i in eligible if i not in self.waypoints_paused]
         if not pending:
             return False
-        for idx in (min(pending),):
+        for idx in (pending[0],):
             wx, wy, wz = self.waypoint_xyz[idx]
             if abs(wz - rz) > self.LEVEL_Z_WINDOW_M:
                 continue
@@ -666,6 +708,14 @@ class FollowPathClient(Node):
                         seen_min <= self.WAYPOINT_REACH_MIN_M and
                         d >= seen_min + self.WAYPOINT_RECEDE_M))
             if not reached:
+                continue
+            if not self.pause_at_waypoints:
+                # Toggle is off: consume the waypoint without pausing so the
+                # strict-order gate stays aligned with the robot's progress.
+                self.waypoints_paused.add(idx)
+                self.waypoint_min_dist.pop(idx, None)
+                self.get_logger().info(
+                    f'Waypoint {idx + 1} passed (pause-at-waypoints is off).')
                 continue
             # A pause can only take hold while a goal is active; in the gap
             # between two segments it fails and is retried on the next tick.

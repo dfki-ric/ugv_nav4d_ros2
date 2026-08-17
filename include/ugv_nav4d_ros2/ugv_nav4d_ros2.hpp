@@ -179,6 +179,8 @@ private:
     void publishForbiddenZoneMarkers();
     void applyForbiddenZones();
     void applyMlsEditZones();
+    void autoPlanIfEnabled();
+    void autoPlanQueueChanged();
     void regenerateTravMapCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                                    std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void applyMlsEditZone(const ugv_nav4d_ros2::msg::ForbiddenZone& zone);
@@ -309,6 +311,9 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr recalibrate_height_service;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr calibrate_geometry_service;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr regenerate_travmap_service;
+    rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr set_auto_plan_service;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr auto_plan_state_publisher;
+    bool auto_plan_enabled_{false};
     rclcpp::Service<ugv_nav4d_ros2::srv::DeleteMlsPatches>::SharedPtr mls_delete_last_zone_service;
     rclcpp::Service<ugv_nav4d_ros2::srv::SetFillPlane>::SharedPtr mls_fill_last_zone_service;
     int height_info_tick_ = 0;
