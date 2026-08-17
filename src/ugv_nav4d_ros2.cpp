@@ -3284,6 +3284,19 @@ bool PathPlannerNode::loadPlyAsMLS(const std::string& path){
         pcl::PLYReader plyReader;
         if(plyReader.read(path, *cloud) >= 0)
         {
+            const Eigen::Vector3f ply_offset(
+                static_cast<float>(get_parameter("mls_file_offset_x").as_double()),
+                static_cast<float>(get_parameter("mls_file_offset_y").as_double()),
+                static_cast<float>(get_parameter("mls_file_offset_z").as_double()));
+            if (ply_offset.norm() > 1e-9f){
+                for (auto& pt : cloud->points){
+                    pt.x += ply_offset.x();
+                    pt.y += ply_offset.y();
+                    pt.z += ply_offset.z();
+                }
+                RCLCPP_INFO_STREAM(this->get_logger(), "Translated loaded PLY cloud by ("
+                                   << ply_offset.transpose() << ").");
+            }
             pcl::PointXYZ min, max; 
             pcl::getMinMax3D (*cloud, min, max); 
 
@@ -3439,7 +3452,37 @@ bool PathPlannerNode::loadMLSMapFromBin(const std::string& filename){
         mls_map_ptr = std::make_shared<maps::grid::MLSMapSloped>();
         ia >> *mls_map_ptr;  // Deserialize directly into the object pointed by the shared_ptr
 
-        RCLCPP_INFO_STREAM(this->get_logger(), "Loaded MLS Map from " << filename);
+        const Eigen::Vector3d offset(get_parameter("mls_file_offset_x").as_double(),
+                                     get_parameter("mls_file_offset_y").as_double(),
+                                     get_parameter("mls_file_offset_z").as_double());
+        if (offset.norm() > 1e-9){
+            // world = localFrame^-1 * grid, so shifting the map by +offset in
+            // the world means composing the local frame with -offset.
+            mls_map_ptr->getLocalFrame() = mls_map_ptr->getLocalFrame() *
+                                           Eigen::Translation3d(-offset);
+            RCLCPP_INFO_STREAM(this->get_logger(), "Translated loaded MLS by ("
+                               << offset.transpose() << ").");
+        }
+        // The grid's world-frame corner; .bin maps carry their own placement,
+        // so the dist_min_x/y parameters must not be used for index math.
+        const Eigen::Vector3d world_corner =
+            mls_map_ptr->getLocalFrame().inverse(Eigen::Isometry) * Eigen::Vector3d::Zero();
+        mls_min_x = world_corner.x();
+        mls_min_y = world_corner.y();
+        const auto num_cells = mls_map_ptr->getNumCells();
+        const auto res = mls_map_ptr->getResolution();
+        const double span_max_x = mls_min_x + num_cells.x() * res.x();
+        const double span_max_y = mls_min_y + num_cells.y() * res.y();
+        const double applied_x = get_parameter("mls_file_offset_x").as_double();
+        const double applied_y = get_parameter("mls_file_offset_y").as_double();
+        RCLCPP_INFO_STREAM(this->get_logger(), std::fixed << std::setprecision(1)
+                           << "Loaded MLS Map from " << filename
+                           << ": spans x [" << mls_min_x << ", " << span_max_x
+                           << "], y [" << mls_min_y << ", " << span_max_y
+                           << "] in the world frame. To center it on the origin set "
+                           << "mls_file_offset_x: " << applied_x - (mls_min_x + span_max_x) / 2.0
+                           << ", mls_file_offset_y: " << applied_y - (mls_min_y + span_max_y) / 2.0
+                           << " (offsets are absolute, not incremental).");
         return true;
     } catch (const std::exception &e) {
         RCLCPP_ERROR_STREAM(this->get_logger(), "Error loading MLS Map: " << e.what());
@@ -4284,6 +4327,12 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("load_mls_from_file", false, param_desc);
     declare_parameter("mls_file_type", "ply", param_desc);
     declare_parameter("mls_file_path", "default_value", param_desc);
+    // Translation applied to a file-loaded map: maps recorded on the robot sit
+    // at their recording-time world coordinates (e.g. UTM); this pulls them to
+    // the current session's origin. Applied to .bin and .ply alike.
+    declare_parameter("mls_file_offset_x", 0.0, param_desc);
+    declare_parameter("mls_file_offset_y", 0.0, param_desc);
+    declare_parameter("mls_file_offset_z", 0.0, param_desc);
     declare_parameter("robot_frame", "robot", param_desc);
     declare_parameter("world_frame", "map", param_desc);
     declare_parameter("mls_gap_size", 0.1, param_desc);
