@@ -180,6 +180,7 @@ private:
     void applyForbiddenZones();
     void applyMlsEditZones();
     void autoPlanIfEnabled();
+    void groomUnderRobotTick();
     void autoPlanQueueChanged();
     void regenerateTravMapCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                                    std::shared_ptr<std_srvs::srv::Trigger::Response> response);
@@ -214,6 +215,7 @@ private:
     {
         double wheel_min_x{0.0};   //!< wheel centers only: defines the wheelbase
         double wheel_max_x{0.0};
+        double wheel_max_abs_y{0.0}; //!< wheel centers only (grooming footprint)
         double min_x{0.0};         //!< wheels + extra frames (tool/shovel)
         double max_x{0.0};
         double max_abs_y{0.0};
@@ -312,6 +314,14 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr calibrate_geometry_service;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr regenerate_travmap_service;
     rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr set_auto_plan_service;
+    rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr set_groom_service;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr groom_state_publisher;
+    bool groom_under_robot_{false};
+    double last_groom_x_{std::numeric_limits<double>::quiet_NaN()};
+    double last_groom_y_{0.0};
+    double last_groom_yaw_{0.0};
+    size_t groom_removed_total_{0};
+    size_t groom_added_total_{0};
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr auto_plan_state_publisher;
     bool auto_plan_enabled_{false};
     rclcpp::Service<ugv_nav4d_ros2::srv::DeleteMlsPatches>::SharedPtr mls_delete_last_zone_service;
@@ -321,6 +331,7 @@ private:
     double height_last_patch_z_ = std::numeric_limits<double>::quiet_NaN();
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr footprint_marker_publisher;
     rclcpp::Publisher<geometry_msgs::msg::PolygonStamped>::SharedPtr footprint_polygon_publisher;
+    rclcpp::Publisher<geometry_msgs::msg::PolygonStamped>::SharedPtr groom_footprint_publisher;
     rclcpp::TimerBase::SharedPtr wheelbase_status_timer;
 
     //waypoints

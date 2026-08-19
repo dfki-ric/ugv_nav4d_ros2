@@ -1,4 +1,5 @@
 #include "OperatorPanel.hpp"
+#include <rclcpp/parameter_client.hpp>
 #include <QDoubleSpinBox>
 
 #include <algorithm>
@@ -282,6 +283,43 @@ OperatorPanel::OperatorPanel(QWidget* parent)
         "This is the EDITED state. 'Regenerate maps' is the opposite: it\n"
         "reloads the original MLS from source with no edits applied.");
     buttons->addWidget(regen_travmap_button_, 17, 0, 1, 2);
+    groom_check_ = new QCheckBox("Groom MLS under robot (wheels prove ground)");
+    groom_check_->setToolTip(
+        "While enabled, the MLS is flattened under the wheel footprint as the\n"
+        "robot moves: ground = base_link minus the CALIBRATED distToGround\n"
+        "(recalibrate height first!), patches in the band above it are deleted,\n"
+        "and a plane tilted like the chassis is filled in. Pure MLS edit:\n"
+        "'Regenerate trav map' applies it, 'Save map' keeps it, 'Regenerate\n"
+        "maps' discards it.");
+    buttons->addWidget(groom_check_, 18, 0, 1, 1);
+    auto* groom_row = new QHBoxLayout();
+    groom_top_spin_ = new QDoubleSpinBox();
+    groom_top_spin_->setRange(0.2, 5.0);
+    groom_top_spin_->setSingleStep(0.1);
+    groom_top_spin_->setDecimals(1);
+    groom_top_spin_->setValue(2.0);
+    groom_top_spin_->setSuffix(" m");
+    groom_top_spin_->setKeyboardTracking(false);
+    groom_top_spin_->setToolTip(
+        "Grooming ceiling (groom_delete_top): patches higher than this above\n"
+        "the measured ground survive the under-wheel delete. Applied to the\n"
+        "planner parameter when you finish editing; no rebuild involved.");
+    groom_row->addWidget(new QLabel("del top"));
+    groom_row->addWidget(groom_top_spin_);
+    groom_margin_spin_ = new QDoubleSpinBox();
+    groom_margin_spin_->setRange(0.0, 1.5);
+    groom_margin_spin_->setSingleStep(0.05);
+    groom_margin_spin_->setDecimals(2);
+    groom_margin_spin_->setValue(0.2);
+    groom_margin_spin_->setSuffix(" m");
+    groom_margin_spin_->setKeyboardTracking(false);
+    groom_margin_spin_->setToolTip(
+        "Grooming margin (groom_margin) added uniformly around the measured\n"
+        "wheel envelope; independent of the planner's footprint margins.\n"
+        "Applied when you finish editing; no rebuild.");
+    groom_row->addWidget(new QLabel("margin"));
+    groom_row->addWidget(groom_margin_spin_);
+    buttons->addLayout(groom_row, 18, 1, 1, 1);
     rebuild_sensitive_buttons_ = {
         recover_button_, replan_button_, execute_path_button_, discard_path_button_,
         clear_waypoints_button_, undo_waypoint_button_, reverse_waypoints_button_,
@@ -294,6 +332,7 @@ OperatorPanel::OperatorPanel(QWidget* parent)
         waypoint_index_spin_, delete_waypoint_button_,
         zone_index_spin_, delete_zone_button_,
         fill_z_spin_, fill_roll_spin_, fill_pitch_spin_, delete_top_spin_,
+        groom_check_, groom_top_spin_, groom_margin_spin_,
         save_mission_button_, load_mission_button_, recalibrate_height_button_};
     plan_return_button_ = new QPushButton("Plan return");
     layout->addLayout(buttons);
@@ -383,6 +422,61 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     connect(mls_fill_button_, &QPushButton::clicked, this, [this]() { onFillPlane(); });
     connect(regen_travmap_button_, &QPushButton::clicked, this, [this]() {
         callTrigger(regen_travmap_client_, "Regenerate trav map");
+    });
+    connect(groom_top_spin_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double) {
+        if (!planner_param_client_ || !planner_param_client_->service_is_ready()){
+            setStatusText("Groom ceiling: planner parameter service unavailable.");
+            return;
+        }
+        const double v = groom_top_spin_->value();
+        planner_param_client_->set_parameters(
+            {rclcpp::Parameter("groom_delete_top", v)},
+            [this, v, guard = QPointer<OperatorPanel>(this)](
+                std::shared_future<std::vector<rcl_interfaces::msg::SetParametersResult>> future)
+            {
+                if (!guard){
+                    return;
+                }
+                const auto results = future.get();
+                const bool ok = !results.empty() && results[0].successful;
+                QMetaObject::invokeMethod(this, [this, v, ok]() {
+                    setStatusText(ok
+                        ? QString("Groom ceiling set to %1 m").arg(v, 0, 'f', 1)
+                        : QString("Groom ceiling REJECTED by the planner (old build running?)"));
+                }, Qt::QueuedConnection);
+            });
+    });
+    connect(groom_margin_spin_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double) {
+        if (!planner_param_client_ || !planner_param_client_->service_is_ready()){
+            setStatusText("Groom margin: planner parameter service unavailable.");
+            return;
+        }
+        const double v = groom_margin_spin_->value();
+        planner_param_client_->set_parameters(
+            {rclcpp::Parameter("groom_margin", v)},
+            [this, v, guard = QPointer<OperatorPanel>(this)](
+                std::shared_future<std::vector<rcl_interfaces::msg::SetParametersResult>> future)
+            {
+                if (!guard){
+                    return;
+                }
+                const auto results = future.get();
+                const bool ok = !results.empty() && results[0].successful;
+                QMetaObject::invokeMethod(this, [this, v, ok]() {
+                    setStatusText(ok
+                        ? QString("Groom margin set to %1 m").arg(v, 0, 'f', 2)
+                        : QString("Groom margin REJECTED by the planner (old build running?)"));
+                }, Qt::QueuedConnection);
+            });
+    });
+    connect(groom_check_, &QCheckBox::toggled, this, [this](bool checked) {
+        auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
+        request->data = checked;
+        if (set_groom_client_->service_is_ready()){
+            set_groom_client_->async_send_request(request);
+        } else {
+            setStatusText("Grooming service unavailable (planner not running?)");
+        }
     });
     connect(auto_plan_check_, &QCheckBox::toggled, this, [this](bool checked) {
         auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
@@ -588,6 +682,15 @@ void OperatorPanel::onInitialize()
                 auto_plan_check_->setChecked(on);
             }, Qt::QueuedConnection);
         });
+    groom_state_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+        "/ugv_nav4d_ros2/groom_under_robot", rclcpp::QoS(1).transient_local(),
+        [this](const std_msgs::msg::Bool::SharedPtr msg)
+        {
+            QMetaObject::invokeMethod(this, [this, on = msg->data]() {
+                QSignalBlocker block(groom_check_);
+                groom_check_->setChecked(on);
+            }, Qt::QueuedConnection);
+        });
     cmd_vel_sub_ = node_->create_subscription<geometry_msgs::msg::Twist>(
         "/arter/mcs/cmd_vel", rclcpp::QoS(10),
         [this](const geometry_msgs::msg::Twist::SharedPtr msg)
@@ -668,6 +771,28 @@ void OperatorPanel::onInitialize()
     recalibrate_height_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/recalibrate_height");
     set_pause_at_wp_client_ = node_->create_client<std_srvs::srv::SetBool>("/ugv_nav4d_ros2/set_pause_at_waypoints");
     set_auto_plan_client_ = node_->create_client<std_srvs::srv::SetBool>("/ugv_nav4d_ros2/set_auto_plan");
+    set_groom_client_ = node_->create_client<std_srvs::srv::SetBool>("/ugv_nav4d_ros2/set_groom_under_robot");
+    planner_param_client_ = std::make_shared<rclcpp::AsyncParametersClient>(node_, "/ugv_nav4d_ros2");
+    // Seed the spinbox with the planner's current value once it is reachable.
+    planner_param_client_->wait_for_service(std::chrono::seconds(0));
+    planner_param_client_->get_parameters({"groom_delete_top", "groom_margin"},
+        [this, guard = QPointer<OperatorPanel>(this)](
+            std::shared_future<std::vector<rclcpp::Parameter>> future)
+        {
+            if (!guard){
+                return;
+            }
+            const auto params = future.get();
+            if (params.size() >= 2){
+                QMetaObject::invokeMethod(this,
+                    [this, top = params[0].as_double(), margin = params[1].as_double()]() {
+                        QSignalBlocker block_top(groom_top_spin_);
+                        groom_top_spin_->setValue(top);
+                        QSignalBlocker block_margin(groom_margin_spin_);
+                        groom_margin_spin_->setValue(margin);
+                    }, Qt::QueuedConnection);
+            }
+        });
     clear_executed_path_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/clear_executed_path");
     calibrate_geometry_client_ = node_->create_client<std_srvs::srv::Trigger>("/ugv_nav4d_ros2/calibrate_geometry");
     mls_delete_client_ = node_->create_client<ugv_nav4d_ros2::srv::DeleteMlsPatches>("/ugv_nav4d_ros2/mls_delete_last_zone");

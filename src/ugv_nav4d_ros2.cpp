@@ -182,6 +182,33 @@ PathPlannerNode::PathPlannerNode()
     regenerate_travmap_service = this->create_service<std_srvs::srv::Trigger>(
             "/ugv_nav4d_ros2/regenerate_travmap",
             std::bind(&PathPlannerNode::regenerateTravMapCallback, this, std::placeholders::_1, std::placeholders::_2));
+    groom_state_publisher = create_publisher<std_msgs::msg::Bool>(
+        "/ugv_nav4d_ros2/groom_under_robot", rclcpp::QoS(1).transient_local());
+    {
+        std_msgs::msg::Bool initial_groom;
+        initial_groom.data = false;
+        groom_state_publisher->publish(initial_groom);
+    }
+    set_groom_service = this->create_service<std_srvs::srv::SetBool>(
+        "/ugv_nav4d_ros2/set_groom_under_robot",
+        [this](const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
+               std::shared_ptr<std_srvs::srv::SetBool::Response> response){
+            std::lock_guard<std::recursive_mutex> lock(planner_mutex);
+            groom_under_robot_ = request->data;
+            // Force an immediate groom at the current spot on enable.
+            last_groom_x_ = std::numeric_limits<double>::quiet_NaN();
+            std_msgs::msg::Bool state;
+            state.data = groom_under_robot_;
+            groom_state_publisher->publish(state);
+            response->success = true;
+            response->message = groom_under_robot_
+                ? "Grooming ON: the MLS is flattened under the wheels as the robot moves "
+                  "(pure MLS edit; regenerate the trav map to apply, save the map to keep)."
+                : "Grooming OFF (totals this session: removed "
+                  + std::to_string(groom_removed_total_) + ", added "
+                  + std::to_string(groom_added_total_) + " patches).";
+            publishStatus(response->message);
+        });
     calibrate_geometry_service = this->create_service<std_srvs::srv::Trigger>(
         "/ugv_nav4d_ros2/calibrate_geometry",
         [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
@@ -218,6 +245,10 @@ PathPlannerNode::PathPlannerNode()
             "/ugv_nav4d_ros2/footprint_planner", 10);
     footprint_polygon_publisher = this->create_publisher<geometry_msgs::msg::PolygonStamped>(
             "/ugv_nav4d_ros2/footprint_real", 10);
+    // groom_footprint = the wheels-only + margins rectangle the grooming
+    // feature flattens; empty polygon while grooming is off.
+    groom_footprint_publisher = this->create_publisher<geometry_msgs::msg::PolygonStamped>(
+            "/ugv_nav4d_ros2/groom_footprint", 10);
     const double footprint_publish_period = get_parameter("footprint_publish_period").as_double();
     if (footprint_publish_period > 0.0){
         wheelbase_status_timer = this->create_wall_timer(
@@ -491,6 +522,7 @@ void PathPlannerNode::poseUpdateTimerCallback(){
             }
         }
         pose = getStartPose();
+        groomUnderRobotTick();
     }
     geometry_msgs::msg::PoseStamped pose_message = start_pose;
     pose_message.header.stamp = this->get_clock()->now();
@@ -516,6 +548,11 @@ rcl_interfaces::msg::SetParametersResult PathPlannerNode::parametersCallback(con
             // Return is requested, so applying it must not rebuild the planner
             // or regenerate the traversability map.
             if (param.get_name() == "return_face_forward")
+            {
+                continue;
+            }
+            // Grooming params are read live on every tick; no rebuild involved.
+            if (param.get_name().rfind("groom_", 0) == 0)
             {
                 continue;
             }
@@ -2256,6 +2293,152 @@ void PathPlannerNode::regenerateTravMapCallback(
     publishStatus(response->message);
 }
 
+void PathPlannerNode::groomUnderRobotTick(){
+    // The robot's presence proves the ground under it is drivable: while
+    // enabled, replace the MLS content under the WHEEL footprint (no tool --
+    // the shovel hovers, it proves nothing) with a plane derived from the
+    // measured ground level and the chassis attitude. Pure MLS manipulation:
+    // the trav map picks it up on the next regeneration.
+    static constexpr double kStepM = 0.5;          // re-groom every this much travel
+    static constexpr double kYawStepRad = 0.26;    // ... or ~15 deg of heading change
+    static constexpr double kBandBelowM = 0.3;     // delete down to ground minus this
+    if (!groom_under_robot_ || !got_map || !mls_map_ptr){
+        return;
+    }
+    const auto& pos = start_pose.pose.position;
+    const Eigen::Quaterniond q(start_pose.pose.orientation.w, start_pose.pose.orientation.x,
+                               start_pose.pose.orientation.y, start_pose.pose.orientation.z);
+    const double yaw = std::atan2(2.0 * (q.w() * q.z() + q.x() * q.y()),
+                                  1.0 - 2.0 * (q.y() * q.y() + q.z() * q.z()));
+    if (std::isfinite(last_groom_x_)){
+        const double moved = std::hypot(pos.x - last_groom_x_, pos.y - last_groom_y_);
+        const double turned = std::abs(std::remainder(yaw - last_groom_yaw_, 2.0 * M_PI));
+        if (moved < kStepM && turned < kYawStepRad){
+            return;
+        }
+    }
+    // 1) Ground level: base_link z (localization truth) minus the CALIBRATED
+    //    distToGround parameter. Deliberately NOT the live nearest-patch
+    //    query: after the first groom step that query lands on our own
+    //    synthetic fill, whose patch top sits slightly above its seed point,
+    //    and the anchor ratchets upward a few cm per step until the fill is
+    //    airborne (and the delete band no longer reaches the real terrain).
+    const double ground_z = pos.z - get_parameter("distToGround").as_double();
+    std::string err;
+    // Sanity check only: warn when the calibration disagrees with the map.
+    {
+        double patch_z = 0.0;
+        if (groundPatchHeightUnderRobot(patch_z, &err) &&
+            std::abs(patch_z - ground_z) > 0.5){
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 10000,
+                "Grooming: calibrated ground (%.2f) is %.2f m off the nearest MLS patch (%.2f); "
+                "consider Recalibrate height.", ground_z, patch_z - ground_z, patch_z);
+        }
+    }
+    // 2) Wheel envelope (no tool frames) in the robot frame.
+    FootprintEnvelope envelope;
+    if (!measureFootprintEnvelope(envelope, &err)){
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                             "Grooming skipped: %s", err.c_str());
+        return;
+    }
+    // Wheels-only envelope plus the grooming's OWN uniform margin -- kept
+    // independent of the planner's footprint_margin_* safety margins so the
+    // groomed strip width is tunable without touching collision checking.
+    const double margin = get_parameter("groom_margin").as_double();
+    const double fp_min_x = envelope.wheel_min_x - margin;
+    const double fp_max_x = envelope.wheel_max_x + margin;
+    const double fp_half_y = envelope.wheel_max_abs_y + margin;
+    last_groom_x_ = pos.x;
+    last_groom_y_ = pos.y;
+    last_groom_yaw_ = yaw;
+    // 3) Fill plane through the measured ground, tilted like the chassis.
+    const Eigen::Vector3d normal = q * Eigen::Vector3d::UnitZ();
+    if (normal.z() < 0.5){
+        return;  // implausible attitude sample; skip this tick
+    }
+    const double band_above = get_parameter("groom_delete_top").as_double();
+    const double cos_yaw = std::cos(yaw);
+    const double sin_yaw = std::sin(yaw);
+    const auto resolution = mls_map_ptr->getResolution();
+    const maps::grid::Vector2ui num_cells = mls_map_ptr->getNumCells();
+    typedef maps::grid::MLSMap<maps::grid::MLSConfig::SLOPE>::CellType Cell;
+
+    // Delete pass over the world-aligned bbox of the oriented rectangle.
+    const double reach = std::max({std::abs(fp_min_x), std::abs(fp_max_x), fp_half_y}) * M_SQRT2;
+    const int ix0 = std::max(0, static_cast<int>(std::floor((pos.x - reach - mls_min_x) / resolution.x())));
+    const int ix1 = std::min(static_cast<int>(num_cells.x()) - 1,
+                             static_cast<int>(std::floor((pos.x + reach - mls_min_x) / resolution.x())));
+    const int iy0 = std::max(0, static_cast<int>(std::floor((pos.y - reach - mls_min_y) / resolution.y())));
+    const int iy1 = std::min(static_cast<int>(num_cells.y()) - 1,
+                             static_cast<int>(std::floor((pos.y + reach - mls_min_y) / resolution.y())));
+    size_t removed = 0;
+    size_t added = 0;
+    for (int ix = ix0; ix <= ix1; ++ix){
+        for (int iy = iy0; iy <= iy1; ++iy){
+            const double wx = mls_min_x + (ix + 0.5) * resolution.x();
+            const double wy = mls_min_y + (iy + 0.5) * resolution.y();
+            const double dx = wx - pos.x;
+            const double dy = wy - pos.y;
+            const double bx = cos_yaw * dx + sin_yaw * dy;
+            const double by = -sin_yaw * dx + cos_yaw * dy;
+            if (bx < fp_min_x || bx > fp_max_x || std::abs(by) > fp_half_y){
+                continue;
+            }
+            Cell& list = mls_map_ptr->at(static_cast<size_t>(ix), static_cast<size_t>(iy));
+            for (Cell::iterator it = list.begin(); it != list.end(); ){
+                float patch_min = 0.0f, patch_max = 0.0f;
+                it->getRange(patch_min, patch_max);
+                const double top = static_cast<double>(patch_max);
+                if (top >= ground_z - kBandBelowM && top <= ground_z + band_above){
+                    it = list.erase(it);
+                    ++removed;
+                } else {
+                    ++it;
+                }
+            }
+        }
+    }
+    // Fill pass: oversample the rectangle at half resolution (initial-patch
+    // construction, merged where a patch already covers the spot).
+    const double step = resolution.x() / 2.0;
+    for (double bx = fp_min_x; bx <= fp_max_x; bx += step){
+        for (double by = -fp_half_y; by <= fp_half_y; by += step){
+            const double wx = pos.x + cos_yaw * bx - sin_yaw * by;
+            const double wy = pos.y + sin_yaw * bx + cos_yaw * by;
+            const double z = ground_z - (normal.x() * (wx - pos.x) + normal.y() * (wy - pos.y)) / normal.z();
+            const Eigen::Vector3d point(wx, wy, z);
+            maps::grid::Index idx;
+            if (!mls_map_ptr->toGrid(point, idx)){
+                continue;
+            }
+            auto& list = mls_map_ptr->at(idx);
+            bool covered = false;
+            for (const auto& patch : list){
+                if (patch.isCovered(static_cast<float>(z), 0.05f)){
+                    covered = true;
+                    break;
+                }
+            }
+            if (covered){
+                continue;
+            }
+            maps::grid::MLSMapSloped::PatchType patch(point.cast<float>(), traversability_config.initialPatchVariance);
+            list.insert(patch);
+            ++added;
+        }
+    }
+    groom_removed_total_ += removed;
+    groom_added_total_ += added;
+    if (removed || added){
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                             "Grooming at (%.1f, %.1f): removed %zu, added %zu patch(es) "
+                             "(session totals: %zu / %zu).",
+                             pos.x, pos.y, removed, added,
+                             groom_removed_total_, groom_added_total_);
+    }
+}
+
 void PathPlannerNode::applyForbiddenZones(){
     if (forbidden_zones.empty() || !traversability_generator_ptr){
         return;
@@ -2598,10 +2781,11 @@ bool PathPlannerNode::measureFootprintEnvelope(FootprintEnvelope& envelope, std:
         }
         envelope.wheel_min_x = std::min(envelope.wheel_min_x, x);
         envelope.wheel_max_x = std::max(envelope.wheel_max_x, x);
-        envelope.max_abs_y = std::max(envelope.max_abs_y, std::abs(y));
+        envelope.wheel_max_abs_y = std::max(envelope.wheel_max_abs_y, std::abs(y));
     }
     envelope.min_x = envelope.wheel_min_x;
     envelope.max_x = envelope.wheel_max_x;
+    envelope.max_abs_y = envelope.wheel_max_abs_y;
     // Copy: as_string_array() returns a reference into the TEMPORARY returned
     // by get_parameter(); iterating it directly is use-after-free.
     const auto extra_frames = get_parameter("footprint_extra_frames").as_string_array();
@@ -2823,6 +3007,29 @@ void PathPlannerNode::publishWheelbaseStatus(){
         polygon.polygon.points.push_back(p);
     }
     footprint_polygon_publisher->publish(polygon);
+
+    // Groom footprint: wheels-only envelope + the same margin parameters --
+    // exactly the rectangle groomUnderRobotTick() edits. Published empty when
+    // grooming is off so the rviz Polygon display clears.
+    geometry_msgs::msg::PolygonStamped groom_polygon;
+    groom_polygon.header.frame_id = robot_frame;
+    groom_polygon.header.stamp = stamp;
+    if (groom_under_robot_){
+        const double groom_margin = get_parameter("groom_margin").as_double();
+        const double groom_front = envelope.wheel_max_x + groom_margin;
+        const double groom_rear = envelope.wheel_min_x - groom_margin;
+        const double groom_side = envelope.wheel_max_abs_y + groom_margin;
+        const double groom_corners[4][2] = {
+            {groom_front, groom_side}, {groom_front, -groom_side},
+            {groom_rear, -groom_side}, {groom_rear, groom_side}};
+        for (const auto& corner : groom_corners){
+            geometry_msgs::msg::Point32 p;
+            p.x = static_cast<float>(corner[0]);
+            p.y = static_cast<float>(corner[1]);
+            groom_polygon.polygon.points.push_back(p);
+        }
+    }
+    groom_footprint_publisher->publish(groom_polygon);
 
     visualization_msgs::msg::MarkerArray markers;
 
@@ -3305,6 +3512,20 @@ bool PathPlannerNode::loadPlyAsMLS(const std::string& path){
 
             mls_min_x = min.x;
             mls_min_y = min.y;
+            {
+                // Same placement + suggestion report as the .bin loader; the
+                // bounds are measured after the offset was applied, so the
+                // suggested values are absolute, not incremental.
+                const double applied_x = get_parameter("mls_file_offset_x").as_double();
+                const double applied_y = get_parameter("mls_file_offset_y").as_double();
+                RCLCPP_INFO_STREAM(this->get_logger(), std::fixed << std::setprecision(1)
+                                   << "Loaded PLY '" << path << "': spans x [" << min.x
+                                   << ", " << max.x << "], y [" << min.y << ", " << max.y
+                                   << "] in the world frame. To center it on the origin set "
+                                   << "mls_file_offset_x: " << applied_x - (min.x + max.x) / 2.0
+                                   << ", mls_file_offset_y: " << applied_y - (min.y + max.y) / 2.0
+                                   << " (offsets are absolute, not incremental).");
+            }
 
             std::vector<int> indices;
             pcl::removeNaNFromPointCloud(*cloud, *cloud, indices);
@@ -4333,6 +4554,17 @@ void PathPlannerNode::declareParameters(){
     declare_parameter("mls_file_offset_x", 0.0, param_desc);
     declare_parameter("mls_file_offset_y", 0.0, param_desc);
     declare_parameter("mls_file_offset_z", 0.0, param_desc);
+    // Grooming: live-tunable from the operator panel, so NOT the read-only
+    // descriptor the file parameters above use.
+    {
+        rcl_interfaces::msg::ParameterDescriptor groom_desc;
+        groom_desc.description =
+            "Grooming knob; read on every groom tick, never triggers a rebuild.";
+        // Patches higher than groom_delete_top above the measured ground
+        // survive the under-robot delete (structures the robot drives beneath).
+        declare_parameter("groom_delete_top", 2.0, groom_desc);
+        declare_parameter("groom_margin", 0.2, groom_desc);
+    }
     declare_parameter("robot_frame", "robot", param_desc);
     declare_parameter("world_frame", "map", param_desc);
     declare_parameter("mls_gap_size", 0.1, param_desc);
