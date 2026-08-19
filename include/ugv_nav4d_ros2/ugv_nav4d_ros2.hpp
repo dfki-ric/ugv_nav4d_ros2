@@ -216,6 +216,7 @@ private:
         double wheel_min_x{0.0};   //!< wheel centers only: defines the wheelbase
         double wheel_max_x{0.0};
         double wheel_max_abs_y{0.0}; //!< wheel centers only (grooming footprint)
+        double wheel_mean_z{0.0};  //!< mean wheel-center z in the robot frame: tracks ride height
         double min_x{0.0};         //!< wheels + extra frames (tool/shovel)
         double max_x{0.0};
         double max_abs_y{0.0};
@@ -322,6 +323,10 @@ private:
     double last_groom_yaw_{0.0};
     size_t groom_removed_total_{0};
     size_t groom_added_total_{0};
+    // Mean wheel-center z (robot frame) at the moment distToGround was last
+    // known-good; lets grooming correct its ground anchor when active ground
+    // adaptation changes the ride height mid-mission.
+    double groom_wheel_z_baseline_{std::numeric_limits<double>::quiet_NaN()};
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr auto_plan_state_publisher;
     bool auto_plan_enabled_{false};
     rclcpp::Service<ugv_nav4d_ros2::srv::DeleteMlsPatches>::SharedPtr mls_delete_last_zone_service;

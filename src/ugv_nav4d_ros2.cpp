@@ -2317,14 +2317,36 @@ void PathPlannerNode::groomUnderRobotTick(){
             return;
         }
     }
-    // 1) Ground level: base_link z (localization truth) minus the CALIBRATED
-    //    distToGround parameter. Deliberately NOT the live nearest-patch
-    //    query: after the first groom step that query lands on our own
-    //    synthetic fill, whose patch top sits slightly above its seed point,
-    //    and the anchor ratchets upward a few cm per step until the fill is
-    //    airborne (and the delete band no longer reaches the real terrain).
-    const double ground_z = pos.z - get_parameter("distToGround").as_double();
+    // 1) Wheel envelope (no tool frames) in the robot frame. Also carries the
+    //    live mean wheel-center z, which tracks ride-height changes from the
+    //    active ground adaptation.
+    FootprintEnvelope envelope;
     std::string err;
+    if (!measureFootprintEnvelope(envelope, &err)){
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                             "Grooming skipped: %s", err.c_str());
+        return;
+    }
+    // 2) Ground level: base_link z (localization truth) minus the CALIBRATED
+    //    distToGround parameter, corrected by how far the ride height moved
+    //    since that calibration (ground adaptation raises/lowers base_link
+    //    relative to the wheels, which a fixed distToGround cannot see; the
+    //    wheel-z baseline is captured when distToGround is known good).
+    //    Deliberately NOT the live nearest-patch query: after the first groom
+    //    step that query lands on our own synthetic fill, whose patch top
+    //    sits slightly above its seed point, and the anchor ratchets upward a
+    //    few cm per step until the fill is airborne (and the delete band no
+    //    longer reaches the real terrain).
+    if (!std::isfinite(groom_wheel_z_baseline_)){
+        groom_wheel_z_baseline_ = envelope.wheel_mean_z;
+        RCLCPP_INFO(this->get_logger(),
+            "Grooming: captured wheel-z baseline %.3f m; assumes distToGround matches the "
+            "CURRENT ride height (run Recalibrate height if unsure).",
+            groom_wheel_z_baseline_);
+    }
+    // > 0 when the chassis sits higher above the wheels than at calibration.
+    const double ride_height_delta = groom_wheel_z_baseline_ - envelope.wheel_mean_z;
+    const double ground_z = pos.z - (get_parameter("distToGround").as_double() + ride_height_delta);
     // Sanity check only: warn when the calibration disagrees with the map.
     {
         double patch_z = 0.0;
@@ -2334,13 +2356,6 @@ void PathPlannerNode::groomUnderRobotTick(){
                 "Grooming: calibrated ground (%.2f) is %.2f m off the nearest MLS patch (%.2f); "
                 "consider Recalibrate height.", ground_z, patch_z - ground_z, patch_z);
         }
-    }
-    // 2) Wheel envelope (no tool frames) in the robot frame.
-    FootprintEnvelope envelope;
-    if (!measureFootprintEnvelope(envelope, &err)){
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                             "Grooming skipped: %s", err.c_str());
-        return;
     }
     // Wheels-only envelope plus the grooming's OWN uniform margin -- kept
     // independent of the planner's footprint_margin_* safety margins so the
@@ -2755,7 +2770,7 @@ bool PathPlannerNode::measureFootprintEnvelope(FootprintEnvelope& envelope, std:
         }
         return false;
     }
-    const auto lookup = [&](const std::string& frame, double& x, double& y) -> bool {
+    const auto lookup = [&](const std::string& frame, double& x, double& y, double* z = nullptr) -> bool {
         geometry_msgs::msg::TransformStamped tf;
         try {
             tf = tf_buffer_ptr->lookupTransform(robot_frame, frame, tf2::TimePointZero);
@@ -2767,22 +2782,29 @@ bool PathPlannerNode::measureFootprintEnvelope(FootprintEnvelope& envelope, std:
         }
         x = tf.transform.translation.x;
         y = tf.transform.translation.y;
+        if (z){
+            *z = tf.transform.translation.z;
+        }
         return true;
     };
 
     envelope.wheel_min_x = std::numeric_limits<double>::max();
     envelope.wheel_max_x = std::numeric_limits<double>::lowest();
     envelope.max_abs_y = 0.0;
+    double wheel_z_sum = 0.0;
     for (const auto& wheel_frame : wheel_frames){
         double x = 0.0;
         double y = 0.0;
-        if (!lookup(wheel_frame, x, y)){
+        double z = 0.0;
+        if (!lookup(wheel_frame, x, y, &z)){
             return false;
         }
         envelope.wheel_min_x = std::min(envelope.wheel_min_x, x);
         envelope.wheel_max_x = std::max(envelope.wheel_max_x, x);
         envelope.wheel_max_abs_y = std::max(envelope.wheel_max_abs_y, std::abs(y));
+        wheel_z_sum += z;
     }
+    envelope.wheel_mean_z = wheel_z_sum / static_cast<double>(wheel_frames.size());
     envelope.min_x = envelope.wheel_min_x;
     envelope.max_x = envelope.wheel_max_x;
     envelope.max_abs_y = envelope.wheel_max_abs_y;
@@ -2939,6 +2961,17 @@ void PathPlannerNode::recalibrateHeightCallback(const std::shared_ptr<std_srvs::
     }
     const double old_value = get_parameter("distToGround").as_double();
     const double new_value = start_pose.pose.position.z - patch_z;
+    // Either way the calibration is confirmed valid for the CURRENT ride
+    // height: refresh the grooming wheel-z baseline so its ground-adaptation
+    // correction is measured from this moment. On TF failure fall back to
+    // NaN; the groom tick then re-captures the baseline lazily.
+    {
+        FootprintEnvelope envelope;
+        std::string envelope_error;
+        groom_wheel_z_baseline_ = measureFootprintEnvelope(envelope, &envelope_error)
+            ? envelope.wheel_mean_z
+            : std::numeric_limits<double>::quiet_NaN();
+    }
     if (std::abs(new_value - old_value) < 0.01){
         response->success = true;
         response->message = "distToGround already calibrated (change < 1 cm); nothing to do.";
