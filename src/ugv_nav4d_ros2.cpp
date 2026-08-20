@@ -159,10 +159,29 @@ PathPlannerNode::PathPlannerNode()
                        std::abs(request->pitch_deg) > 45.0){
                 response->message = "Fill plane rejected: offsets must be finite, tilt within +/-45 degrees.";
             } else if (auto* zone = lastTraversableZone()){
+                // With auto_fit the request values are trim offsets on top of a
+                // plane fitted to the ground around the polygon; without it they
+                // are the plane itself (original behavior).
+                double fit_roll = 0.0, fit_pitch = 0.0, fit_z = 0.0;
+                std::string fit_err;
+                if (request->auto_fit &&
+                    !fitFillPlaneToSurroundingGround(*zone, fit_roll, fit_pitch, fit_z, fit_err)){
+                    response->message = "Fit to ground failed: " + fit_err;
+                    publishStatus(response->message);
+                    return;
+                }
+                const double roll = fit_roll + request->roll_deg * M_PI / 180.0;
+                const double pitch = fit_pitch + request->pitch_deg * M_PI / 180.0;
+                const double z_offset = fit_z + request->z_offset;
+                if (std::abs(roll) > 45.0 * M_PI / 180.0 || std::abs(pitch) > 45.0 * M_PI / 180.0){
+                    response->message = "Fill plane rejected: fitted tilt plus trim exceeds +/-45 degrees.";
+                    publishStatus(response->message);
+                    return;
+                }
                 zone->fill_enabled = true;
-                zone->fill_z_offset = static_cast<float>(request->z_offset);
-                zone->fill_roll = static_cast<float>(request->roll_deg * M_PI / 180.0);
-                zone->fill_pitch = static_cast<float>(request->pitch_deg * M_PI / 180.0);
+                zone->fill_z_offset = static_cast<float>(z_offset);
+                zone->fill_roll = static_cast<float>(roll);
+                zone->fill_pitch = static_cast<float>(pitch);
                 zone->delete_top = (std::isfinite(request->delete_top_m) &&
                                     request->delete_top_m > 0.0 && request->delete_top_m <= 10.0)
                                    ? static_cast<float>(request->delete_top_m) : 0.0f;
@@ -171,9 +190,22 @@ PathPlannerNode::PathPlannerNode()
                 applyMlsEditZone(*zone);
                 publishMaps();
                 response->success = true;
-                response->message = "Fill applied: removed " + std::to_string(last_mls_patches_removed_) +
-                                    ", added " + std::to_string(last_mls_patches_added_) +
-                                    " patch(es) (MLS only); click 'Regenerate trav map' to apply to planning.";
+                response->applied_z_offset = z_offset;
+                response->applied_roll_deg = roll * 180.0 / M_PI;
+                response->applied_pitch_deg = pitch * 180.0 / M_PI;
+                std::ostringstream msg;
+                msg << "Fill applied";
+                if (request->auto_fit){
+                    msg << std::fixed << std::setprecision(1)
+                        << " (fit: z " << std::setprecision(2) << z_offset << " m"
+                        << std::setprecision(1)
+                        << ", roll " << response->applied_roll_deg
+                        << ", pitch " << response->applied_pitch_deg << " deg)";
+                }
+                msg << ": removed " << last_mls_patches_removed_
+                    << ", added " << last_mls_patches_added_
+                    << " patch(es) (MLS only); click 'Regenerate trav map' to apply to planning.";
+                response->message = msg.str();
             } else {
                 response->message = "No Traversable (MLS edit) zone drawn; draw one with the zone tool first.";
             }
@@ -2234,6 +2266,154 @@ void PathPlannerNode::applyMlsEditZone(const ugv_nav4d_ros2::msg::ForbiddenZone&
             ++last_mls_patches_added_;
         }
     }
+}
+
+static double squaredDistToPolygonEdgeXY(double x, double y,
+                                         const std::vector<geometry_msgs::msg::Point>& poly){
+    double best = std::numeric_limits<double>::max();
+    const size_t n = poly.size();
+    for (size_t i = 0, j = n - 1; i < n; j = i++){
+        const double ax = poly[j].x, ay = poly[j].y;
+        const double dx = poly[i].x - ax, dy = poly[i].y - ay;
+        const double len2 = dx * dx + dy * dy;
+        double t = len2 > 0.0 ? ((x - ax) * dx + (y - ay) * dy) / len2 : 0.0;
+        t = std::min(1.0, std::max(0.0, t));
+        const double px = ax + t * dx - x;
+        const double py = ay + t * dy - y;
+        best = std::min(best, px * px + py * py);
+    }
+    return best;
+}
+
+bool PathPlannerNode::fitFillPlaneToSurroundingGround(
+        const ugv_nav4d_ros2::msg::ForbiddenZone& zone,
+        double& roll_rad, double& pitch_rad, double& z_offset_m, std::string& err)
+{
+    if (zone.vertices.size() < 3 || !mls_map_ptr){
+        err = "no polygon / no map.";
+        return false;
+    }
+    // The real ground the fill should continue lives just OUTSIDE the polygon;
+    // inside there are only the grass tops being replaced. Sample the lowest
+    // plausible patch top per cell in a ring around the boundary and fit a
+    // plane to those.
+    static constexpr double kRingM = 0.75;      // ring width outside the polygon
+    static constexpr size_t kMinSamples = 12;
+    double min_x = std::numeric_limits<double>::max();
+    double max_x = std::numeric_limits<double>::lowest();
+    double min_y = min_x, max_y = max_x;
+    double cx = 0.0, cy = 0.0, ref_z = 0.0;
+    double vz_min = min_x, vz_max = max_x;
+    for (const auto& v : zone.vertices){
+        min_x = std::min(min_x, v.x); max_x = std::max(max_x, v.x);
+        min_y = std::min(min_y, v.y); max_y = std::max(max_y, v.y);
+        vz_min = std::min(vz_min, v.z); vz_max = std::max(vz_max, v.z);
+        cx += v.x; cy += v.y; ref_z += v.z;
+    }
+    cx /= zone.vertices.size();
+    cy /= zone.vertices.size();
+    ref_z /= zone.vertices.size();
+    // Same level band the delete pass trusts: clicks land on grass tops, the
+    // ground is at or below them; canopy and structures above are ignored.
+    const double band_low = vz_min - 2.0;
+    const double band_high = vz_max + 0.5;
+
+    const auto resolution = mls_map_ptr->getResolution();
+    const maps::grid::Vector2ui num_cells = mls_map_ptr->getNumCells();
+    typedef maps::grid::MLSMap<maps::grid::MLSConfig::SLOPE>::CellType Cell;
+    const int ix0 = std::max(0, static_cast<int>(std::floor((min_x - kRingM - mls_min_x) / resolution.x())));
+    const int ix1 = std::min(static_cast<int>(num_cells.x()) - 1,
+                             static_cast<int>(std::floor((max_x + kRingM - mls_min_x) / resolution.x())));
+    const int iy0 = std::max(0, static_cast<int>(std::floor((min_y - kRingM - mls_min_y) / resolution.y())));
+    const int iy1 = std::min(static_cast<int>(num_cells.y()) - 1,
+                             static_cast<int>(std::floor((max_y + kRingM - mls_min_y) / resolution.y())));
+    std::vector<Eigen::Vector3d> samples;   // (x - cx, y - cy, ground z)
+    for (int ix = ix0; ix <= ix1; ++ix){
+        for (int iy = iy0; iy <= iy1; ++iy){
+            const double wx = mls_min_x + (ix + 0.5) * resolution.x();
+            const double wy = mls_min_y + (iy + 0.5) * resolution.y();
+            if (pointInPolygonXY(wx, wy, zone.vertices) ||
+                squaredDistToPolygonEdgeXY(wx, wy, zone.vertices) > kRingM * kRingM){
+                continue;
+            }
+            const Cell& list = mls_map_ptr->at(static_cast<size_t>(ix), static_cast<size_t>(iy));
+            double ground = std::numeric_limits<double>::max();
+            for (const auto& patch : list){
+                float patch_min = 0.0f, patch_max = 0.0f;
+                patch.getRange(patch_min, patch_max);
+                const double top = static_cast<double>(patch_max);
+                if (top >= band_low && top <= band_high){
+                    ground = std::min(ground, top);
+                }
+            }
+            if (ground < std::numeric_limits<double>::max()){
+                samples.emplace_back(wx - cx, wy - cy, ground);
+            }
+        }
+    }
+    if (samples.size() < kMinSamples){
+        err = "only " + std::to_string(samples.size()) +
+              " ground cell(s) in the ring outside the polygon (need " +
+              std::to_string(kMinSamples) + ").";
+        return false;
+    }
+    // Least squares z = a*dx + b*dy + c around the centroid, with one
+    // outlier-trim pass so stray grass/rocks in the ring do not tilt the fit.
+    auto solve = [](const std::vector<Eigen::Vector3d>& pts, Eigen::Vector3d& sol) -> bool {
+        Eigen::Matrix3d A = Eigen::Matrix3d::Zero();
+        Eigen::Vector3d rhs = Eigen::Vector3d::Zero();
+        for (const auto& p : pts){
+            const Eigen::Vector3d row(p.x(), p.y(), 1.0);
+            A += row * row.transpose();
+            rhs += row * p.z();
+        }
+        const Eigen::FullPivLU<Eigen::Matrix3d> lu(A);
+        if (!lu.isInvertible()){
+            return false;
+        }
+        sol = lu.solve(rhs);
+        return sol.allFinite();
+    };
+    Eigen::Vector3d sol;
+    if (!solve(samples, sol)){
+        err = "degenerate ring geometry (ground samples lie on a line).";
+        return false;
+    }
+    double ss = 0.0;
+    for (const auto& p : samples){
+        const double r = p.z() - (sol.x() * p.x() + sol.y() * p.y() + sol.z());
+        ss += r * r;
+    }
+    const double gate = std::max(2.0 * std::sqrt(ss / samples.size()), 0.03);
+    std::vector<Eigen::Vector3d> kept;
+    kept.reserve(samples.size());
+    for (const auto& p : samples){
+        if (std::abs(p.z() - (sol.x() * p.x() + sol.y() * p.y() + sol.z())) <= gate){
+            kept.push_back(p);
+        }
+    }
+    if (kept.size() >= kMinSamples && kept.size() < samples.size()){
+        Eigen::Vector3d refit;
+        if (solve(kept, refit)){
+            sol = refit;
+        }
+    }
+    const Eigen::Vector3d normal = Eigen::Vector3d(-sol.x(), -sol.y(), 1.0).normalized();
+    if (normal.z() < std::cos(45.0 * M_PI / 180.0)){
+        err = "fitted ground is steeper than 45 degrees; set the plane manually.";
+        return false;
+    }
+    // Invert the fill construction normal = Rx(roll)*Ry(pitch)*ez
+    //   = (sin(pitch), -sin(roll)cos(pitch), cos(roll)cos(pitch)).
+    pitch_rad = std::asin(std::min(1.0, std::max(-1.0, normal.x())));
+    roll_rad = std::atan2(-normal.y(), normal.z());
+    z_offset_m = sol.z() - ref_z;   // plane z at the centroid vs. mean vertex z
+    RCLCPP_INFO(this->get_logger(),
+                "Fill plane fit: %zu/%zu ring cells, z %.2f m below clicked vertices, "
+                "roll %.1f deg, pitch %.1f deg.",
+                kept.size(), samples.size(), -z_offset_m,
+                roll_rad * 180.0 / M_PI, pitch_rad * 180.0 / M_PI);
+    return true;
 }
 
 void PathPlannerNode::regenerateTravMapCallback(

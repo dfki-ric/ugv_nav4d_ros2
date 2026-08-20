@@ -185,6 +185,12 @@ private:
     void regenerateTravMapCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                                    std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void applyMlsEditZone(const ugv_nav4d_ros2::msg::ForbiddenZone& zone);
+    /** Least-squares plane through the MLS ground in a ring just outside the
+     *  zone polygon (inside is the grass being replaced). Outputs use the fill
+     *  convention: z relative to mean clicked-vertex z, tilt about world X/Y. */
+    bool fitFillPlaneToSurroundingGround(const ugv_nav4d_ros2::msg::ForbiddenZone& zone,
+                                         double& roll_rad, double& pitch_rad,
+                                         double& z_offset_m, std::string& err);
     static std::string traversableZoneKey(const ugv_nav4d_ros2::msg::ForbiddenZone& zone);
     ugv_nav4d_ros2::msg::ForbiddenZone* lastTraversableZone();
     /** Flood-fill one zone onto the (already expanded) traversability map.

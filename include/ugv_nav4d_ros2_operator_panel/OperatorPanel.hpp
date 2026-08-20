@@ -121,6 +121,7 @@ private:
     QDoubleSpinBox* fill_z_spin_{nullptr};
     QDoubleSpinBox* fill_roll_spin_{nullptr};
     QDoubleSpinBox* fill_pitch_spin_{nullptr};
+    QCheckBox* fill_auto_check_{nullptr};
     QDoubleSpinBox* delete_top_spin_{nullptr};
     QCheckBox* pause_at_wp_check_{nullptr};
     QCheckBox* auto_plan_check_{nullptr};

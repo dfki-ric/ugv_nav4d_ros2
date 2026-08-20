@@ -244,24 +244,35 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     del_row->addWidget(delete_top_spin_);
     buttons->addLayout(del_row, 15, 1, 1, 1);
     auto* fill_row = new QHBoxLayout();
+    fill_auto_check_ = new QCheckBox("auto");
+    fill_auto_check_->setChecked(true);
+    fill_auto_check_->setToolTip(
+        "Fit the fill plane to the ground: the planner least-squares fits a plane\n"
+        "to the MLS ground in a ring just outside the polygon (height AND tilt),\n"
+        "and z / roll / pitch become fine-trim offsets on top of that fit.\n"
+        "Uncheck for the old fully manual plane.");
     fill_z_spin_ = new QDoubleSpinBox();
     fill_z_spin_->setRange(-5.0, 5.0);
     fill_z_spin_->setSingleStep(0.05);
     fill_z_spin_->setDecimals(2);
     fill_z_spin_->setSuffix(" m");
-    fill_z_spin_->setToolTip("Fill plane height relative to the mean z of the polygon's clicked vertices\n(clicks land on grass tops, so start around -0.3 to sink the plane to ground).");
+    fill_z_spin_->setToolTip(
+        "Fill plane height relative to the mean z of the polygon's clicked vertices\n"
+        "(clicks land on grass tops, so manual mode starts around -0.3).\n"
+        "With 'auto' checked this is a trim on top of the fitted height; keep 0 first.");
     fill_roll_spin_ = new QDoubleSpinBox();
     fill_roll_spin_->setRange(-45.0, 45.0);
     fill_roll_spin_->setSingleStep(0.5);
     fill_roll_spin_->setDecimals(1);
     fill_roll_spin_->setSuffix(QString::fromUtf8("\u00B0"));
-    fill_roll_spin_->setToolTip("Fill plane tilt about the world X axis.");
+    fill_roll_spin_->setToolTip("Fill plane tilt about the world X axis.\nWith 'auto' checked this is a trim on top of the fitted tilt.");
     fill_pitch_spin_ = new QDoubleSpinBox();
     fill_pitch_spin_->setRange(-45.0, 45.0);
     fill_pitch_spin_->setSingleStep(0.5);
     fill_pitch_spin_->setDecimals(1);
     fill_pitch_spin_->setSuffix(QString::fromUtf8("\u00B0"));
-    fill_pitch_spin_->setToolTip("Fill plane tilt about the world Y axis.");
+    fill_pitch_spin_->setToolTip("Fill plane tilt about the world Y axis.\nWith 'auto' checked this is a trim on top of the fitted tilt.");
+    fill_row->addWidget(fill_auto_check_);
     fill_row->addWidget(new QLabel("z"));
     fill_row->addWidget(fill_z_spin_);
     fill_row->addWidget(new QLabel("roll"));
@@ -271,10 +282,12 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     buttons->addLayout(fill_row, 16, 0, 1, 1);
     mls_fill_button_ = new QPushButton("Fill plane");
     mls_fill_button_->setToolTip(
-        "Refills the last Traversable zone with synthetic flat ground on the plane\n"
-        "set by z / roll / pitch. Pure MLS edit: each click wipes the previous\n"
-        "fill and replaces it, so iterate until it lines up with the ground, then\n"
-        "click 'Regenerate trav map'. The fit persists in zones and missions.");
+        "Refills the last Traversable zone with synthetic flat ground. With 'auto'\n"
+        "checked the plane is fitted to the surrounding ground (height + tilt) and\n"
+        "z / roll / pitch trim the fit; unchecked they set the plane directly.\n"
+        "Pure MLS edit: each click wipes the previous fill and replaces it, so\n"
+        "iterate until it lines up with the ground, then click 'Regenerate trav\n"
+        "map'. The fit persists in zones and missions.");
     buttons->addWidget(mls_fill_button_, 16, 1, 1, 1);
     regen_travmap_button_ = new QPushButton("Regenerate trav map (apply MLS edits)");
     regen_travmap_button_->setToolTip(
@@ -331,7 +344,7 @@ OperatorPanel::OperatorPanel(QWidget* parent)
         plan_return_button_, return_mode_combo_,
         waypoint_index_spin_, delete_waypoint_button_,
         zone_index_spin_, delete_zone_button_,
-        fill_z_spin_, fill_roll_spin_, fill_pitch_spin_, delete_top_spin_,
+        fill_z_spin_, fill_roll_spin_, fill_pitch_spin_, fill_auto_check_, delete_top_spin_,
         groom_check_, groom_top_spin_, groom_margin_spin_,
         save_mission_button_, load_mission_button_, recalibrate_height_button_};
     plan_return_button_ = new QPushButton("Plan return");
@@ -1150,6 +1163,7 @@ void OperatorPanel::onFillPlane()
     }
     setStatusText("Fill plane requested...");
     auto request = std::make_shared<ugv_nav4d_ros2::srv::SetFillPlane::Request>();
+    request->auto_fit = fill_auto_check_ && fill_auto_check_->isChecked();
     request->z_offset = fill_z_spin_->value();
     request->roll_deg = fill_roll_spin_->value();
     request->pitch_deg = fill_pitch_spin_->value();

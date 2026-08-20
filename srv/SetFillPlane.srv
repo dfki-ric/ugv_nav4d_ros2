@@ -1,10 +1,19 @@
 # Fill the last drawn TRAVERSABLE zone's polygon with synthetic flat MLS
 # ground patches on an operator-adjustable plane, after deleting the original
 # patches inside it. The plane passes through the polygon centroid.
-float64 z_offset    # [m] relative to the mean z of the polygon's clicked vertices
-float64 roll_deg    # [deg] tilt about the world X axis
-float64 pitch_deg   # [deg] tilt about the world Y axis
+# With auto_fit, the plane is least-squares fitted to the MLS ground in a ring
+# just outside the polygon (inside is the grass being replaced); z_offset,
+# roll_deg and pitch_deg then act as trim offsets on top of the fit.
+bool auto_fit
+float64 z_offset    # [m] relative to the mean z of the polygon's clicked vertices (trim when auto_fit)
+float64 roll_deg    # [deg] tilt about the world X axis (trim when auto_fit)
+float64 pitch_deg   # [deg] tilt about the world Y axis (trim when auto_fit)
 float64 delete_top_m # [m] deletion ceiling above the highest clicked vertex (0 = default 2.0)
 ---
 bool success
 string message
+# The plane actually applied (fit + trim), in the manual request convention:
+# z relative to the mean clicked-vertex z, tilt about world X/Y in degrees.
+float64 applied_z_offset
+float64 applied_roll_deg
+float64 applied_pitch_deg
