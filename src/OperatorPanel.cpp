@@ -184,8 +184,9 @@ OperatorPanel::OperatorPanel(QWidget* parent)
         "mission is executing (preview only).");
     buttons->addWidget(pause_at_wp_check_, 1, 0, 1, 1);
     buttons->addWidget(auto_plan_check_, 1, 1, 1, 1);
-    buttons->addWidget(pause_button_, 0, 0);
-    buttons->addWidget(resume_button_, 0, 1);
+    // Pause/Resume are NOT in this grid: they live pinned next to STOP at the
+    // top of the panel, so they stay reachable without scrolling on small
+    // screens (operator request: scrolling mid-mission causes misclicks).
     buttons->addWidget(recover_button_, 2, 0, 1, 2);
     buttons->addWidget(replan_button_, 3, 0, 1, 2);
     buttons->addWidget(execute_path_button_, 4, 0);
@@ -401,17 +402,26 @@ OperatorPanel::OperatorPanel(QWidget* parent)
 
     // The content outgrew typical screen heights, which also stopped RViz
     // from shrinking the panel (a panel's minimum size bounds the window).
-    // Everything except STOP lives in a scroll area, so the panel can be
-    // resized down to roughly the STOP button alone.
+    // Everything except the execution controls (STOP + Pause/Resume) lives in
+    // a scroll area, so the panel can be resized down to roughly those alone
+    // and mid-mission controls never require scrolling (misclick hazard on
+    // small screens).
     auto* content = new QWidget;
     content->setLayout(layout);
     auto* scroll = new QScrollArea;
     scroll->setWidget(content);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
+    pause_button_->setMinimumHeight(32);
+    resume_button_->setMinimumHeight(32);
+    auto* pause_resume_row = new QHBoxLayout;
+    pause_resume_row->setContentsMargins(0, 0, 0, 0);
+    pause_resume_row->addWidget(pause_button_);
+    pause_resume_row->addWidget(resume_button_);
     auto* outer = new QVBoxLayout;
     outer->setContentsMargins(0, 0, 0, 0);
     outer->addWidget(stop_button_);
+    outer->addLayout(pause_resume_row);
     outer->addWidget(scroll);
     setLayout(outer);
 
@@ -577,6 +587,18 @@ void OperatorPanel::onInitialize()
                 execution_label_->setToolTip(text);
                 execution_state_ = state;
                 execution_can_resume_ = can_resume;
+                updateExecuteEnabled();
+            }, Qt::QueuedConnection);
+        });
+    // Latched planner truth "a fresh, not-yet-executed preview exists". Drives
+    // the Execute button's meaning: with a preview Execute promotes it; without
+    // one it acts as Resume (see onExecutePath).
+    preview_pending_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+        "/ugv_nav4d_ros2/preview_pending", rclcpp::QoS(1).transient_local(),
+        [this](const std_msgs::msg::Bool::SharedPtr msg)
+        {
+            QMetaObject::invokeMethod(this, [this, pending = msg->data]() {
+                preview_pending_ = pending;
                 updateExecuteEnabled();
             }, Qt::QueuedConnection);
         });
@@ -1109,22 +1131,30 @@ void OperatorPanel::updateExecuteEnabled()
         execution_state_ == ugv_nav4d_ros2::msg::MissionStatus::PAUSED;
 
     // Execute stays available while PAUSED: the replan/recovery flows produce
-    // a new pending path that the operator confirms with Execute.
+    // a new pending path that the operator confirms with Execute — and without
+    // a fresh preview it acts as Resume for the retained mission (see
+    // onExecutePath), so it is enabled exactly when clicking it moves the robot.
     QString blocking_check;
     const bool health_ok = health_received_ && checkedReadinessOk(&blocking_check);
-    const bool execute_ok = health_ok && route_ready_ && !executing && !rebuilding_;
+    const bool resumable = paused && execution_can_resume_;
+    const bool execute_ok = health_ok && !executing && !rebuilding_ &&
+                            ((preview_pending_ && route_ready_) || resumable);
     execute_path_button_->setEnabled(execute_ok);
     execute_path_button_->setToolTip(
         executing
             ? "A mission is already executing; pause or stop it first."
             : execute_ok
-                ? "Send the reviewed path to the controller."
+                ? (preview_pending_
+                    ? "Send the reviewed path to the controller."
+                    : "No new preview — resumes the retained mission from the "
+                      "robot position.")
                 : !health_received_
                     ? "Waiting for the first system-health report."
                     : !blocking_check.isEmpty()
                         ? QString("Blocked by readiness check \"%1\" — fix it or "
                                   "uncheck it under Execute gating checks.").arg(blocking_check)
-                        : "Execution requires an approved route preview.");
+                        : "Execution requires a route preview (Replan) or a "
+                          "resumable paused mission.");
 
     pause_button_->setEnabled(executing);
     pause_button_->setToolTip(executing
@@ -1442,6 +1472,20 @@ void OperatorPanel::activateNavigationControllers(const QString& context)
 
 void OperatorPanel::onExecutePath()
 {
+    // Without a fresh preview, re-sending the stored path would restart the
+    // mission from its ORIGINAL start segment — far behind a partially-driven
+    // robot, where the controller cannot lock on and aborts ("Execute does
+    // nothing" field symptom). The retained mission is what the operator
+    // wants continued, so act as Resume instead.
+    if (!preview_pending_ &&
+        execution_state_ == ugv_nav4d_ros2::msg::MissionStatus::PAUSED &&
+        execution_can_resume_)
+    {
+        setStatusText("No new preview pending — resuming the retained mission "
+                      "from the robot position.");
+        onResumeExecution();
+        return;
+    }
     callTrigger(execute_path_client_, "Execute path");
     activateNavigationControllers("path executing");
 }

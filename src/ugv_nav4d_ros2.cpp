@@ -402,6 +402,13 @@ void PathPlannerNode::setupSubscriptions()
             "/ugv_nav4d_ros2/route_risk", rclcpp::QoS(1).transient_local());
     route_valid_publisher = this->create_publisher<std_msgs::msg::Bool>(
             "/ugv_nav4d_ros2/route_valid", rclcpp::QoS(1).transient_local());
+    // Latched "a fresh, not-yet-executed preview exists": the panel gates and
+    // dispatches its Execute button on this (no preview -> Execute acts as
+    // Resume) instead of on route_valid, which stays true for the whole
+    // retained mission and made Execute look actionable after a bare pause.
+    preview_pending_publisher = this->create_publisher<std_msgs::msg::Bool>(
+            "/ugv_nav4d_ros2/preview_pending", rclcpp::QoS(1).transient_local());
+    publishPreviewPending();
 
     save_map_service = this->create_service<ugv_nav4d_ros2::srv::MissionFile>(
             "/ugv_nav4d_ros2/save_mls_map", std::bind(&PathPlannerNode::saveMapCallback, this, std::placeholders::_1, std::placeholders::_2));
@@ -678,6 +685,7 @@ void PathPlannerNode::regenerateMapsCallback(
 
     has_pending_path = false;
     path_approved = false;
+    publishPreviewPending();
     pending_path_is_recovery = false;
     std_msgs::msg::Bool route_valid;
     route_valid.data = false;
@@ -925,6 +933,7 @@ void PathPlannerNode::autoPlanQueueChanged(){
         if (has_pending_path){
             has_pending_path = false;
             path_approved = false;
+            publishPreviewPending();
             pending_path_is_recovery = false;
             std_msgs::msg::Bool route_valid;
             route_valid.data = false;
@@ -1273,6 +1282,12 @@ void PathPlannerNode::planThroughWaypoints(bool record_mission){
     // The queue is deliberately kept after planning: re-sending a goal replans
     // through the same waypoints (e.g. after editing one). It is only emptied
     // by the explicit clear_waypoints service / panel button.
+}
+
+void PathPlannerNode::publishPreviewPending(){
+    std_msgs::msg::Bool msg;
+    msg.data = has_pending_path && !path_approved;
+    preview_pending_publisher->publish(msg);
 }
 
 void PathPlannerNode::publishStatus(const std::string& status){
@@ -2130,6 +2145,7 @@ void PathPlannerNode::onForbiddenZonesChanged(bool planning_graph_changed,
     } else if (has_pending_path){
         has_pending_path = false;
         path_approved = false;
+        publishPreviewPending();
         pending_path_is_recovery = false;
         std_msgs::msg::Bool route_valid;
         route_valid.data = false;
@@ -4369,6 +4385,7 @@ void PathPlannerNode::publishPlannedPath(const std::vector<trajectory_follower::
     pending_labeled_path = labeled_path_message;
     has_pending_path = found_solution && !labeled_path_message.paths.empty();
     path_approved = false;
+    publishPreviewPending();
     pending_path_is_recovery = has_pending_path && is_recovery_path;
     // Deliberately do NOT lower route_valid here: a new preview says nothing about
     // the route the follower is currently driving. Lowering it made every mid-drive
@@ -4708,6 +4725,7 @@ bool PathPlannerNode::validatePendingPath(){
         const bool was_approved = path_approved;
         has_pending_path = false;
         path_approved = false;
+        publishPreviewPending();
         pending_path_is_recovery = false;
         if (was_approved){
             clearExecutingPathDisplay();
@@ -4731,6 +4749,7 @@ void PathPlannerNode::executePathCallback(const std::shared_ptr<std_srvs::srv::T
     }
     execute_path_publisher->publish(pending_labeled_path);
     path_approved = true;
+    publishPreviewPending();
     // Commit the mission anchor now that the plan is actually being driven; a
     // preview that was never executed leaves the return-home anchor untouched.
     if (pending_records_mission){
@@ -4771,6 +4790,7 @@ void PathPlannerNode::discardPathCallback(const std::shared_ptr<std_srvs::srv::T
     }
     has_pending_path = false;
     path_approved = false;
+    publishPreviewPending();
     pending_labeled_path = ugv_nav4d_ros2::msg::LabeledPathArray();
     // Clear the preview in RViz as well.
     publishPlannedPath({}, false);

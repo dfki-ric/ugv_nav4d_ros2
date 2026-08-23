@@ -142,6 +142,7 @@ private:
                               std::shared_ptr<ugv_nav4d_ros2::srv::EditWaypoint::Response> response);
     void planThroughWaypoints(bool record_mission = true);
     void publishStatus(const std::string& status);
+    void publishPreviewPending();
     void publishMissionStatus(uint8_t state, const std::string& summary,
                               const std::string& failure_reason = "");
     void publishRouteRisk(const nav_msgs::msg::Path& path,
@@ -359,6 +360,7 @@ private:
     rclcpp::Publisher<ugv_nav4d_ros2::msg::MissionStatus>::SharedPtr mission_status_publisher;
     rclcpp::Publisher<ugv_nav4d_ros2::msg::RouteRisk>::SharedPtr route_risk_publisher;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr route_valid_publisher;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr preview_pending_publisher;
     rclcpp::Service<ugv_nav4d_ros2::srv::MissionFile>::SharedPtr save_map_service;
     rclcpp::Service<ugv_nav4d_ros2::srv::InspectTraversability>::SharedPtr inspect_traversability_service;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr replan_current_mission_service;

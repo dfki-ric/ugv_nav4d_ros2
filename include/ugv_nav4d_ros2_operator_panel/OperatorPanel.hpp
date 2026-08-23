@@ -185,6 +185,7 @@ private:
     rclcpp::Node::SharedPtr node_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr status_sub_;
     rclcpp::Subscription<ugv_nav4d_ros2::msg::MissionStatus>::SharedPtr execution_status_sub_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr preview_pending_sub_;
     rclcpp::Subscription<ugv_nav4d_ros2::msg::RouteRisk>::SharedPtr route_risk_sub_;
     rclcpp::Subscription<ugv_nav4d_ros2::msg::SystemHealth>::SharedPtr system_health_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr inspection_result_sub_;
@@ -241,6 +242,7 @@ private:
     rclcpp::Client<controller_manager_msgs::srv::SwitchController>::SharedPtr switch_controller_client_;
     bool health_received_{false};
     bool route_ready_{false};
+    bool preview_pending_{false};
     uint8_t execution_state_{ugv_nav4d_ros2::msg::MissionStatus::IDLE};
     bool execution_can_resume_{false};
     bool recovery_in_progress_{false};
