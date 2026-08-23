@@ -5,6 +5,9 @@ bool remove
 # true: keep waypoints 1..index and delete every waypoint after it
 # (takes precedence over `remove`; `pose` is ignored)
 bool truncate_after
+# true: keep waypoints index..end and delete every waypoint before it
+# (takes precedence over `remove`; evaluated after `truncate_after`)
+bool truncate_before
 geometry_msgs/Pose pose
 ---
 bool success

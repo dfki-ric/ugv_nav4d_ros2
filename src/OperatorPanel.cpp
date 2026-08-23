@@ -360,6 +360,10 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     truncate_waypoints_button_->setToolTip(
         "Remove every waypoint after WP # (keeps waypoints 1..#).");
     wp_row->addWidget(truncate_waypoints_button_);
+    truncate_before_button_ = new QPushButton("Delete before");
+    truncate_before_button_->setToolTip(
+        "Remove every waypoint before WP # (keeps # and later; remaining renumber from 1).");
+    wp_row->addWidget(truncate_before_button_);
     wp_row->addWidget(new QLabel("Zone #"));
     zone_index_spin_ = new QSpinBox;
     zone_index_spin_->setMinimum(1);
@@ -382,6 +386,7 @@ OperatorPanel::OperatorPanel(QWidget* parent)
         clear_executed_path_button_, record_bag_button_,
         plan_return_button_, return_mode_combo_,
         waypoint_index_spin_, delete_waypoint_button_, truncate_waypoints_button_,
+        truncate_before_button_,
         zone_index_spin_, delete_zone_button_,
         fill_z_spin_, fill_roll_spin_, fill_pitch_spin_, fill_auto_check_, delete_top_spin_,
         groom_check_, groom_top_spin_, groom_margin_spin_,
@@ -419,6 +424,7 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     connect(discard_path_button_, &QPushButton::clicked, this, &OperatorPanel::onDiscardPath);
     connect(delete_waypoint_button_, &QPushButton::clicked, this, &OperatorPanel::onDeleteWaypoint);
     connect(truncate_waypoints_button_, &QPushButton::clicked, this, &OperatorPanel::onTruncateWaypoints);
+    connect(truncate_before_button_, &QPushButton::clicked, this, &OperatorPanel::onTruncateWaypointsBefore);
     connect(delete_zone_button_, &QPushButton::clicked, this, &OperatorPanel::onDeleteZone);
     connect(plan_return_button_, &QPushButton::clicked, this, &OperatorPanel::onPlanReturn);
     connect(return_mode_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -1445,7 +1451,7 @@ void OperatorPanel::onDiscardPath()
     callTrigger(discard_path_client_, "Discard path");
 }
 
-void OperatorPanel::onDeleteWaypoint()
+void OperatorPanel::sendWaypointEdit(bool truncate_after, bool truncate_before, const QString& action)
 {
     if (!edit_waypoint_client_ || !node_)
     {
@@ -1453,12 +1459,14 @@ void OperatorPanel::onDeleteWaypoint()
     }
     if (!edit_waypoint_client_->service_is_ready())
     {
-        setStatusText("Delete waypoint: service unavailable (is the planner node running?)");
+        setStatusText(action + ": service unavailable (is the planner node running?)");
         return;
     }
     auto request = std::make_shared<ugv_nav4d_ros2::srv::EditWaypoint::Request>();
     request->index = static_cast<uint32_t>(waypoint_index_spin_->value());
-    request->remove = true;
+    request->remove = !truncate_after && !truncate_before;
+    request->truncate_after = truncate_after;
+    request->truncate_before = truncate_before;
     edit_waypoint_client_->async_send_request(request,
         [this, guard = QPointer<OperatorPanel>(this)](rclcpp::Client<ugv_nav4d_ros2::srv::EditWaypoint>::SharedFuture future)
         {
@@ -1472,31 +1480,19 @@ void OperatorPanel::onDeleteWaypoint()
         });
 }
 
+void OperatorPanel::onDeleteWaypoint()
+{
+    sendWaypointEdit(false, false, "Delete waypoint");
+}
+
 void OperatorPanel::onTruncateWaypoints()
 {
-    if (!edit_waypoint_client_ || !node_)
-    {
-        return;
-    }
-    if (!edit_waypoint_client_->service_is_ready())
-    {
-        setStatusText("Delete after: service unavailable (is the planner node running?)");
-        return;
-    }
-    auto request = std::make_shared<ugv_nav4d_ros2::srv::EditWaypoint::Request>();
-    request->index = static_cast<uint32_t>(waypoint_index_spin_->value());
-    request->truncate_after = true;
-    edit_waypoint_client_->async_send_request(request,
-        [this, guard = QPointer<OperatorPanel>(this)](rclcpp::Client<ugv_nav4d_ros2::srv::EditWaypoint>::SharedFuture future)
-        {
-            // The panel can be destroyed (rviz closed) while a request to a slow
-            // service is in flight; the response must not touch a dangling this.
-            if (!guard)
-            {
-                return;
-            }
-            setStatusText(QString::fromStdString(future.get()->message));
-        });
+    sendWaypointEdit(true, false, "Delete after");
+}
+
+void OperatorPanel::onTruncateWaypointsBefore()
+{
+    sendWaypointEdit(false, true, "Delete before");
 }
 
 void OperatorPanel::onDeleteZone()

@@ -100,7 +100,8 @@ PathPlannerNode::PathPlannerNode()
     // RViz) must still receive the last map without a manual republish.
     trav_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::TravMap>(
             "/ugv_nav4d_ros2/trav_map", rclcpp::QoS(1).transient_local());
-    mls_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::MLSMap>("/ugv_nav4d_ros2/mls_map", 10);
+    mls_map_publisher = this->create_publisher<ugv_nav4d_ros2::msg::MLSMap>(
+            "/ugv_nav4d_ros2/mls_map", rclcpp::QoS(1).transient_local());
     robot_pose_publisher = this->create_publisher<geometry_msgs::msg::PoseStamped>(
             "/ugv_nav4d_ros2/robot_pose", 10);
     zone_speed_limit_publisher = this->create_publisher<std_msgs::msg::Float32>(
@@ -1035,6 +1036,20 @@ void PathPlannerNode::editWaypointCallback(const std::shared_ptr<ugv_nav4d_ros2:
         response->message = "Removed " + std::to_string(removed) + " waypoint(s) after "
                             + std::to_string(request->index) + "; "
                             + std::to_string(waypoint_queue.size()) + " remaining.";
+    } else if (request->truncate_before){
+        const size_t removed = i;
+        if (removed == 0){
+            response->success = true;
+            response->message = "No waypoints before " + std::to_string(request->index)
+                                + "; queue unchanged.";
+            publishStatus(response->message);
+            return;
+        }
+        waypoint_queue.erase(waypoint_queue.begin(), waypoint_queue.begin() + i);
+        response->message = "Removed " + std::to_string(removed) + " waypoint(s) before "
+                            + std::to_string(request->index) + "; "
+                            + std::to_string(waypoint_queue.size())
+                            + " remaining (renumbered).";
     } else if (request->remove){
         waypoint_queue.erase(waypoint_queue.begin() + i);
         response->message = "Deleted waypoint " + std::to_string(request->index) + "; "
