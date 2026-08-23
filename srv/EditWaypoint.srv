@@ -2,6 +2,9 @@
 uint32 index
 # true: delete the waypoint; false: replace its pose with `pose`
 bool remove
+# true: keep waypoints 1..index and delete every waypoint after it
+# (takes precedence over `remove`; `pose` is ignored)
+bool truncate_after
 geometry_msgs/Pose pose
 ---
 bool success

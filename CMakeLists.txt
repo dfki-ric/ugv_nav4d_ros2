@@ -305,6 +305,7 @@ install(PROGRAMS
   scripts/field_operations.py
   scripts/test_footprint_adaptation.py
   scripts/posture_publisher.py
+  scripts/pc2_to_ply.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -333,20 +333,6 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     groom_row->addWidget(new QLabel("margin"));
     groom_row->addWidget(groom_margin_spin_);
     buttons->addLayout(groom_row, 18, 1, 1, 1);
-    rebuild_sensitive_buttons_ = {
-        recover_button_, replan_button_, execute_path_button_, discard_path_button_,
-        clear_waypoints_button_, undo_waypoint_button_, reverse_waypoints_button_,
-        clear_zones_button_, undo_zone_button_, save_map_button_,
-        republish_maps_button_, regenerate_maps_button_, update_footprint_button_,
-        calibrate_geometry_button_, mls_delete_button_, mls_fill_button_,
-        regen_travmap_button_, auto_plan_check_,
-        clear_executed_path_button_, record_bag_button_,
-        plan_return_button_, return_mode_combo_,
-        waypoint_index_spin_, delete_waypoint_button_,
-        zone_index_spin_, delete_zone_button_,
-        fill_z_spin_, fill_roll_spin_, fill_pitch_spin_, fill_auto_check_, delete_top_spin_,
-        groom_check_, groom_top_spin_, groom_margin_spin_,
-        save_mission_button_, load_mission_button_, recalibrate_height_button_};
     plan_return_button_ = new QPushButton("Plan return");
     layout->addLayout(buttons);
 
@@ -370,6 +356,10 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     wp_row->addWidget(waypoint_index_spin_);
     delete_waypoint_button_ = new QPushButton("Delete waypoint");
     wp_row->addWidget(delete_waypoint_button_);
+    truncate_waypoints_button_ = new QPushButton("Delete after");
+    truncate_waypoints_button_->setToolTip(
+        "Remove every waypoint after WP # (keeps waypoints 1..#).");
+    wp_row->addWidget(truncate_waypoints_button_);
     wp_row->addWidget(new QLabel("Zone #"));
     zone_index_spin_ = new QSpinBox;
     zone_index_spin_->setMinimum(1);
@@ -378,6 +368,24 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     delete_zone_button_ = new QPushButton("Delete zone");
     wp_row->addWidget(delete_zone_button_);
     layout->addLayout(wp_row);
+
+    // Assigned only now that every listed widget exists: entries added to this
+    // list before their `new` would be frozen as nullptr and silently skip the
+    // rebuild lock-out.
+    rebuild_sensitive_buttons_ = {
+        recover_button_, replan_button_, execute_path_button_, discard_path_button_,
+        clear_waypoints_button_, undo_waypoint_button_, reverse_waypoints_button_,
+        clear_zones_button_, undo_zone_button_, save_map_button_,
+        republish_maps_button_, regenerate_maps_button_, update_footprint_button_,
+        calibrate_geometry_button_, mls_delete_button_, mls_fill_button_,
+        regen_travmap_button_, auto_plan_check_,
+        clear_executed_path_button_, record_bag_button_,
+        plan_return_button_, return_mode_combo_,
+        waypoint_index_spin_, delete_waypoint_button_, truncate_waypoints_button_,
+        zone_index_spin_, delete_zone_button_,
+        fill_z_spin_, fill_roll_spin_, fill_pitch_spin_, fill_auto_check_, delete_top_spin_,
+        groom_check_, groom_top_spin_, groom_margin_spin_,
+        save_mission_button_, load_mission_button_, recalibrate_height_button_};
 
     // Configuration-style groups (rarely touched mid-mission) sit below all
     // mission controls, at the end of the scrollable content.
@@ -410,6 +418,7 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     connect(execute_path_button_, &QPushButton::clicked, this, &OperatorPanel::onExecutePath);
     connect(discard_path_button_, &QPushButton::clicked, this, &OperatorPanel::onDiscardPath);
     connect(delete_waypoint_button_, &QPushButton::clicked, this, &OperatorPanel::onDeleteWaypoint);
+    connect(truncate_waypoints_button_, &QPushButton::clicked, this, &OperatorPanel::onTruncateWaypoints);
     connect(delete_zone_button_, &QPushButton::clicked, this, &OperatorPanel::onDeleteZone);
     connect(plan_return_button_, &QPushButton::clicked, this, &OperatorPanel::onPlanReturn);
     connect(return_mode_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -1450,6 +1459,33 @@ void OperatorPanel::onDeleteWaypoint()
     auto request = std::make_shared<ugv_nav4d_ros2::srv::EditWaypoint::Request>();
     request->index = static_cast<uint32_t>(waypoint_index_spin_->value());
     request->remove = true;
+    edit_waypoint_client_->async_send_request(request,
+        [this, guard = QPointer<OperatorPanel>(this)](rclcpp::Client<ugv_nav4d_ros2::srv::EditWaypoint>::SharedFuture future)
+        {
+            // The panel can be destroyed (rviz closed) while a request to a slow
+            // service is in flight; the response must not touch a dangling this.
+            if (!guard)
+            {
+                return;
+            }
+            setStatusText(QString::fromStdString(future.get()->message));
+        });
+}
+
+void OperatorPanel::onTruncateWaypoints()
+{
+    if (!edit_waypoint_client_ || !node_)
+    {
+        return;
+    }
+    if (!edit_waypoint_client_->service_is_ready())
+    {
+        setStatusText("Delete after: service unavailable (is the planner node running?)");
+        return;
+    }
+    auto request = std::make_shared<ugv_nav4d_ros2::srv::EditWaypoint::Request>();
+    request->index = static_cast<uint32_t>(waypoint_index_spin_->value());
+    request->truncate_after = true;
     edit_waypoint_client_->async_send_request(request,
         [this, guard = QPointer<OperatorPanel>(this)](rclcpp::Client<ugv_nav4d_ros2::srv::EditWaypoint>::SharedFuture future)
         {

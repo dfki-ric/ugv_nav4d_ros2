@@ -69,6 +69,7 @@ private Q_SLOTS:
     void onExecutePath();
     void onDiscardPath();
     void onDeleteWaypoint();
+    void onTruncateWaypoints();
     void onDeleteZone();
     void onPlanReturn();
     void onReturnModeChanged(int index);
@@ -137,6 +138,7 @@ private:
     QPushButton* discard_path_button_{nullptr};
     QSpinBox* waypoint_index_spin_{nullptr};
     QPushButton* delete_waypoint_button_{nullptr};
+    QPushButton* truncate_waypoints_button_{nullptr};
     QSpinBox* zone_index_spin_{nullptr};
     QPushButton* delete_zone_button_{nullptr};
     QPushButton* plan_return_button_{nullptr};

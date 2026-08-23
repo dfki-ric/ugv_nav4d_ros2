@@ -1022,7 +1022,20 @@ void PathPlannerNode::editWaypointCallback(const std::shared_ptr<ugv_nav4d_ros2:
         return;
     }
     const size_t i = request->index - 1;
-    if (request->remove){
+    if (request->truncate_after){
+        const size_t removed = waypoint_queue.size() - request->index;
+        if (removed == 0){
+            response->success = true;
+            response->message = "No waypoints after " + std::to_string(request->index)
+                                + "; queue unchanged.";
+            publishStatus(response->message);
+            return;
+        }
+        waypoint_queue.erase(waypoint_queue.begin() + request->index, waypoint_queue.end());
+        response->message = "Removed " + std::to_string(removed) + " waypoint(s) after "
+                            + std::to_string(request->index) + "; "
+                            + std::to_string(waypoint_queue.size()) + " remaining.";
+    } else if (request->remove){
         waypoint_queue.erase(waypoint_queue.begin() + i);
         response->message = "Deleted waypoint " + std::to_string(request->index) + "; "
                             + std::to_string(waypoint_queue.size()) + " remaining (renumbered).";
