@@ -69,6 +69,7 @@ private Q_SLOTS:
     void onExecutePath();
     void onDiscardPath();
     void onDeleteWaypoint();
+    void onPlanFromWaypoint();
     void onTruncateWaypoints();
     void onTruncateWaypointsBefore();
     void sendWaypointEdit(bool truncate_after, bool truncate_before, const QString& action);
@@ -142,6 +143,7 @@ private:
     QPushButton* delete_waypoint_button_{nullptr};
     QPushButton* truncate_waypoints_button_{nullptr};
     QPushButton* truncate_before_button_{nullptr};
+    QPushButton* plan_from_button_{nullptr};
     QSpinBox* zone_index_spin_{nullptr};
     QPushButton* delete_zone_button_{nullptr};
     QPushButton* plan_return_button_{nullptr};
@@ -243,6 +245,7 @@ private:
     bool health_received_{false};
     bool route_ready_{false};
     bool preview_pending_{false};
+    int waypoint_count_{0};
     uint8_t execution_state_{ugv_nav4d_ros2::msg::MissionStatus::IDLE};
     bool execution_can_resume_{false};
     bool recovery_in_progress_{false};

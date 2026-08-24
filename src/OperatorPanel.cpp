@@ -42,14 +42,32 @@ static const QStringList kNavigationControllers = {
 OperatorPanel::OperatorPanel(QWidget* parent)
 : rviz_common::Panel(parent)
 {
+    // Field usability: every button a comfortable click target (small screens,
+    // gloves, sunlight). Panel-wide rule so new buttons inherit it; buttons
+    // with their own stylesheet (Abort/Pause/Resume) still win on conflicts.
+    // Checkbox/spinbox hit areas are bumped for the same reason.
+    setStyleSheet(
+        "QPushButton { min-height: 34px; padding: 4px 10px; }"
+        "QCheckBox { min-height: 30px; spacing: 8px; }"
+        "QCheckBox::indicator { width: 26px; height: 26px; }"
+        "QSpinBox, QDoubleSpinBox { min-height: 38px; font-size: 14px;"
+        " padding: 2px 6px; }"
+        "QSpinBox::up-button, QSpinBox::down-button,"
+        "QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {"
+        " width: 24px; }");
+
     auto* layout = new QVBoxLayout;
 
-    // Safety-critical control: created here but added to the OUTER layout at
-    // the bottom of this constructor, pinned above the scroll area so it can
-    // never be scrolled out of reach.
-    stop_button_ = new QPushButton("STOP");
-    stop_button_->setMinimumHeight(44);
-    stop_button_->setStyleSheet("QPushButton { font-weight: bold; font-size: 16px; background-color: #b71c1c; color: white; padding: 6px; }");
+    // Deliberate mission-ending control. Named for what it does: it cancels
+    // execution AND drops the retained mission (not resumable) — the quick
+    // "make the robot hold" control is Pause, pinned at the top. Sized like
+    // its row neighbours and placed next to Execute; red conveys the danger.
+    stop_button_ = new QPushButton("Abort mission");
+    stop_button_->setStyleSheet(
+        "QPushButton { font-weight: bold; background-color: #b71c1c; color: white; }");
+    stop_button_->setToolTip(
+        "Cancel execution and DROP the mission (Resume will not work).\n"
+        "For a resumable stop use Pause.");
 
     status_label_ = new QLabel("(waiting for planner status)");
     status_label_->setWordWrap(true);
@@ -135,14 +153,14 @@ OperatorPanel::OperatorPanel(QWidget* parent)
 
     auto* buttons = new QGridLayout;
     pause_button_ = new QPushButton("Pause");
-    resume_button_ = new QPushButton("Resume");
+    resume_button_ = new QPushButton("Resume current path");
     recover_button_ = new QPushButton("Recover from obstacle");
     recover_button_->setStyleSheet(
         "QPushButton { font-weight: bold; background-color: #ef6c00; color: white; padding: 6px; }");
     recover_button_->setToolTip(
         "Safely pause active execution, then use ugv_nav4d's native out-of-obstacle recovery to create an approval-gated rescue trajectory.");
     replan_button_ = new QPushButton("Replan from robot");
-    execute_path_button_ = new QPushButton("Execute path");
+    execute_path_button_ = new QPushButton("Start new path");
     // The unconditional green made the button look actionable even while
     // setEnabled(false); the :disabled state must override the background.
     execute_path_button_->setStyleSheet(
@@ -188,8 +206,15 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     // top of the panel, so they stay reachable without scrolling on small
     // screens (operator request: scrolling mid-mission causes misclicks).
     buttons->addWidget(recover_button_, 2, 0, 1, 2);
+    plan_from_button_ = new QPushButton("Plan from WP");
+    plan_from_button_->setToolTip(
+        "Drop every waypoint before WP # (the box to the left), then plan from\n"
+        "the current robot pose through WP # and the remaining waypoints.\n"
+        "Produces a preview — confirm with Start new path.");
     buttons->addWidget(replan_button_, 3, 0, 1, 2);
-    buttons->addWidget(execute_path_button_, 4, 0);
+    // Start (ex-Execute path) lives pinned under Resume at the top of the
+    // panel; this grid row keeps the remaining mission-ending pair.
+    buttons->addWidget(stop_button_, 4, 0);
     buttons->addWidget(discard_path_button_, 4, 1);
     buttons->addWidget(clear_waypoints_button_, 5, 0);
     buttons->addWidget(undo_waypoint_button_, 5, 1);
@@ -349,21 +374,27 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     return_group->setLayout(return_layout);
     layout->addWidget(return_group);
 
-    auto* wp_row = new QHBoxLayout;
-    wp_row->addWidget(new QLabel("WP #"));
+    // The WP # spin box itself lives in the pinned top stack (next to
+    // Plan from WP); these buttons read the same box.
     waypoint_index_spin_ = new QSpinBox;
     waypoint_index_spin_->setMinimum(1);
     waypoint_index_spin_->setMaximum(999);
-    wp_row->addWidget(waypoint_index_spin_);
+    waypoint_index_spin_->setPrefix("WP ");
+    waypoint_index_spin_->setToolTip(
+        "Waypoint number used by Plan from WP and the Delete waypoint /\n"
+        "Delete after / Delete before buttons.");
+    auto* wp_row = new QHBoxLayout;
     delete_waypoint_button_ = new QPushButton("Delete waypoint");
+    delete_waypoint_button_->setToolTip("Delete waypoint WP # (top bar).");
     wp_row->addWidget(delete_waypoint_button_);
     truncate_waypoints_button_ = new QPushButton("Delete after");
     truncate_waypoints_button_->setToolTip(
-        "Remove every waypoint after WP # (keeps waypoints 1..#).");
+        "Remove every waypoint after WP # (top bar; keeps waypoints 1..#).");
     wp_row->addWidget(truncate_waypoints_button_);
     truncate_before_button_ = new QPushButton("Delete before");
     truncate_before_button_->setToolTip(
-        "Remove every waypoint before WP # (keeps # and later; remaining renumber from 1).");
+        "Remove every waypoint before WP # (top bar; keeps # and later; "
+        "remaining renumber from 1).");
     wp_row->addWidget(truncate_before_button_);
     wp_row->addWidget(new QLabel("Zone #"));
     zone_index_spin_ = new QSpinBox;
@@ -387,7 +418,7 @@ OperatorPanel::OperatorPanel(QWidget* parent)
         clear_executed_path_button_, record_bag_button_,
         plan_return_button_, return_mode_combo_,
         waypoint_index_spin_, delete_waypoint_button_, truncate_waypoints_button_,
-        truncate_before_button_,
+        truncate_before_button_, plan_from_button_,
         zone_index_spin_, delete_zone_button_,
         fill_z_spin_, fill_roll_spin_, fill_pitch_spin_, fill_auto_check_, delete_top_spin_,
         groom_check_, groom_top_spin_, groom_margin_spin_,
@@ -402,25 +433,61 @@ OperatorPanel::OperatorPanel(QWidget* parent)
 
     // The content outgrew typical screen heights, which also stopped RViz
     // from shrinking the panel (a panel's minimum size bounds the window).
-    // Everything except the execution controls (STOP + Pause/Resume) lives in
-    // a scroll area, so the panel can be resized down to roughly those alone
-    // and mid-mission controls never require scrolling (misclick hazard on
-    // small screens).
+    // Everything except the pinned Pause/Resume/Start stack lives in a scroll
+    // area, so the panel can be resized down to roughly that stack alone and
+    // the mission-flow controls never require scrolling (misclick hazard on
+    // small screens). Abort mission (ex-STOP) lives in the grid: it is a
+    // deliberate mission-ending action, not the quick-stop — that is Pause.
     auto* content = new QWidget;
     content->setLayout(layout);
     auto* scroll = new QScrollArea;
     scroll->setWidget(content);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
-    pause_button_->setMinimumHeight(32);
-    resume_button_->setMinimumHeight(32);
-    auto* pause_resume_row = new QHBoxLayout;
+    // Big, color-coded, pinned, stacked full-width: these are the two
+    // mid-mission controls, so they must be hittable without scrolling or
+    // aiming. Grey when disabled -- a colored-but-dead button invites the
+    // misclicks this stack exists to avoid.
+    pause_button_->setMinimumHeight(52);
+    pause_button_->setStyleSheet(
+        "QPushButton { font-weight: bold; font-size: 16px;"
+        " background-color: #e65100; color: white; padding: 6px; }"
+        "QPushButton:disabled { background-color: #4a4a4a; color: #9e9e9e; }");
+    resume_button_->setMinimumHeight(52);
+    resume_button_->setStyleSheet(
+        "QPushButton { font-weight: bold; font-size: 16px;"
+        " background-color: #2e7d32; color: white; padding: 6px; }"
+        "QPushButton:disabled { background-color: #4a4a4a; color: #9e9e9e; }");
+    // Start (send the reviewed path / resume the retained mission — see
+    // onExecutePath): third member of the pinned stack, blue to read as
+    // "go" without colliding with Resume's green.
+    execute_path_button_->setMinimumHeight(52);
+    execute_path_button_->setStyleSheet(
+        "QPushButton { font-weight: bold; font-size: 16px;"
+        " background-color: #1565c0; color: white; padding: 6px; }"
+        "QPushButton:disabled { background-color: #4a4a4a; color: #9e9e9e; }");
+    // Plan from WP: fourth member of the pinned stack, paired with the WP #
+    // spin box it (and the waypoint Delete buttons in the scroll area) reads.
+    plan_from_button_->setMinimumHeight(52);
+    plan_from_button_->setStyleSheet(
+        "QPushButton { font-weight: bold; font-size: 16px;"
+        " background-color: #00695c; color: white; padding: 6px; }"
+        "QPushButton:disabled { background-color: #4a4a4a; color: #9e9e9e; }");
+    waypoint_index_spin_->setMinimumHeight(52);
+    auto* plan_from_row = new QHBoxLayout;
+    plan_from_row->setContentsMargins(0, 0, 0, 0);
+    plan_from_row->setSpacing(2);
+    plan_from_row->addWidget(waypoint_index_spin_);
+    plan_from_row->addWidget(plan_from_button_, 1);
+    auto* pause_resume_row = new QVBoxLayout;
     pause_resume_row->setContentsMargins(0, 0, 0, 0);
+    pause_resume_row->setSpacing(2);
     pause_resume_row->addWidget(pause_button_);
     pause_resume_row->addWidget(resume_button_);
+    pause_resume_row->addWidget(execute_path_button_);
+    pause_resume_row->addLayout(plan_from_row);
     auto* outer = new QVBoxLayout;
     outer->setContentsMargins(0, 0, 0, 0);
-    outer->addWidget(stop_button_);
     outer->addLayout(pause_resume_row);
     outer->addWidget(scroll);
     setLayout(outer);
@@ -430,6 +497,7 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     connect(resume_button_, &QPushButton::clicked, this, &OperatorPanel::onResumeExecution);
     connect(recover_button_, &QPushButton::clicked, this, &OperatorPanel::onRecoverMission);
     connect(replan_button_, &QPushButton::clicked, this, &OperatorPanel::onReplanMission);
+    connect(plan_from_button_, &QPushButton::clicked, this, &OperatorPanel::onPlanFromWaypoint);
     connect(execute_path_button_, &QPushButton::clicked, this, &OperatorPanel::onExecutePath);
     connect(discard_path_button_, &QPushButton::clicked, this, &OperatorPanel::onDiscardPath);
     connect(delete_waypoint_button_, &QPushButton::clicked, this, &OperatorPanel::onDeleteWaypoint);
@@ -708,6 +776,14 @@ void OperatorPanel::onInitialize()
                         "Add at least one waypoint first; a plain single-goal "
                         "route has nothing to pause at.");
                 }
+                // Deliberately NOT clamping the spin box maximum to the queue
+                // size: the count can lag over the bridge and fighting the
+                // operator's typing is worse than the planner's own clear
+                // out-of-range reply ("Waypoint 200 does not exist (20
+                // queued)."). The count only gates whether the waypoint
+                // actions are meaningful at all.
+                waypoint_count_ = count;
+                updateExecuteEnabled();
             }, Qt::QueuedConnection);
         });
     pause_at_wp_state_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
@@ -1130,31 +1206,43 @@ void OperatorPanel::updateExecuteEnabled()
     const bool paused =
         execution_state_ == ugv_nav4d_ros2::msg::MissionStatus::PAUSED;
 
-    // Execute stays available while PAUSED: the replan/recovery flows produce
-    // a new pending path that the operator confirms with Execute — and without
-    // a fresh preview it acts as Resume for the retained mission (see
-    // onExecutePath), so it is enabled exactly when clicking it moves the robot.
+    // Start needs a FRESH preview (replan/recovery output confirmed by the
+    // operator). While paused without one, Resume is the single lit "go"
+    // button — Start greys out instead of duplicating it (two enabled
+    // identical buttons read as a choice that does not exist). The
+    // Start-as-Resume dispatch in onExecutePath stays as a safety net for a
+    // stale preview_pending over the bridge.
     QString blocking_check;
     const bool health_ok = health_received_ && checkedReadinessOk(&blocking_check);
     const bool resumable = paused && execution_can_resume_;
     const bool execute_ok = health_ok && !executing && !rebuilding_ &&
-                            ((preview_pending_ && route_ready_) || resumable);
+                            preview_pending_ && route_ready_;
     execute_path_button_->setEnabled(execute_ok);
     execute_path_button_->setToolTip(
         executing
             ? "A mission is already executing; pause or stop it first."
             : execute_ok
-                ? (preview_pending_
-                    ? "Send the reviewed path to the controller."
-                    : "No new preview — resumes the retained mission from the "
-                      "robot position.")
+                ? (resumable
+                    ? "Send the NEW path to the controller (Resume would "
+                      "continue the old mission instead)."
+                    : "Send the reviewed path to the controller.")
                 : !health_received_
                     ? "Waiting for the first system-health report."
                     : !blocking_check.isEmpty()
                         ? QString("Blocked by readiness check \"%1\" — fix it or "
                                   "uncheck it under Execute gating checks.").arg(blocking_check)
-                        : "Execution requires a route preview (Replan) or a "
-                          "resumable paused mission.");
+                        : resumable
+                            ? "No new path planned — use Resume."
+                            : "Execution requires a route preview (Replan first).");
+
+    // Waypoint-number actions need an actual queue; greyed out otherwise
+    // (also re-applied here after the rebuild lock-out blanket-enables).
+    const bool has_waypoints = waypoint_count_ > 0 && !rebuilding_;
+    waypoint_index_spin_->setEnabled(has_waypoints);
+    plan_from_button_->setEnabled(has_waypoints);
+    delete_waypoint_button_->setEnabled(has_waypoints);
+    truncate_waypoints_button_->setEnabled(has_waypoints);
+    truncate_before_button_->setEnabled(has_waypoints);
 
     pause_button_->setEnabled(executing);
     pause_button_->setToolTip(executing
@@ -1527,6 +1615,48 @@ void OperatorPanel::sendWaypointEdit(bool truncate_after, bool truncate_before, 
 void OperatorPanel::onDeleteWaypoint()
 {
     sendWaypointEdit(false, false, "Delete waypoint");
+}
+
+void OperatorPanel::onPlanFromWaypoint()
+{
+    if (!edit_waypoint_client_ || !node_)
+    {
+        return;
+    }
+    if (!edit_waypoint_client_->service_is_ready())
+    {
+        setStatusText("Plan from WP #: service unavailable (is the planner node running?)");
+        return;
+    }
+    auto request = std::make_shared<ugv_nav4d_ros2::srv::EditWaypoint::Request>();
+    request->index = static_cast<uint32_t>(waypoint_index_spin_->value());
+    request->truncate_before = true;
+    edit_waypoint_client_->async_send_request(request,
+        [this, guard = QPointer<OperatorPanel>(this)](rclcpp::Client<ugv_nav4d_ros2::srv::EditWaypoint>::SharedFuture future)
+        {
+            if (!guard)
+            {
+                return;
+            }
+            const auto result = future.get();
+            if (!result->success)
+            {
+                setStatusText(QString::fromStdString(result->message));
+                return;
+            }
+            // Queue now starts at the entered waypoint. With auto-plan on, the
+            // queue change itself already replanned the preview; otherwise
+            // trigger the replan-from-robot explicitly.
+            QMetaObject::invokeMethod(this, [this]() {
+                if (auto_plan_check_ && auto_plan_check_->isChecked())
+                {
+                    setStatusText("Plan from WP #: waypoints dropped; auto-plan "
+                                  "is producing the preview.");
+                    return;
+                }
+                callTrigger(replan_mission_client_, "Plan from WP #");
+            }, Qt::QueuedConnection);
+        });
 }
 
 void OperatorPanel::onTruncateWaypoints()

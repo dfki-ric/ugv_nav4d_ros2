@@ -1122,8 +1122,10 @@ void PathPlannerNode::publishWaypointMarkers(){
         text.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
         text.action = visualization_msgs::msg::Marker::ADD;
         text.pose = waypoint_queue[i];
-        text.pose.position.z += 0.7 - dist_to_ground;
-        text.scale.z = 0.5;
+        // Floating well above the arrows by operator preference: airborne
+        // labels stay readable over terrain relief and marker clutter.
+        text.pose.position.z += 2.5 - dist_to_ground;
+        text.scale.z = 1.0;
         text.color.r = 1.0;
         text.color.g = 1.0;
         text.color.b = 1.0;
