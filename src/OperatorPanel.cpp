@@ -374,26 +374,27 @@ OperatorPanel::OperatorPanel(QWidget* parent)
     return_group->setLayout(return_layout);
     layout->addWidget(return_group);
 
-    // The WP # spin box itself lives in the pinned top stack (next to
-    // Plan from WP); these buttons read the same box.
+    // One shared WP # box: sits here beside the delete buttons; the pinned
+    // "Plan from WP" button at the top reads the same box.
     waypoint_index_spin_ = new QSpinBox;
     waypoint_index_spin_->setMinimum(1);
     waypoint_index_spin_->setMaximum(999);
     waypoint_index_spin_->setPrefix("WP ");
     waypoint_index_spin_->setToolTip(
-        "Waypoint number used by Plan from WP and the Delete waypoint /\n"
-        "Delete after / Delete before buttons.");
+        "Waypoint number used by Plan from WP (top bar) and the Delete\n"
+        "waypoint / Delete after / Delete before buttons.");
     auto* wp_row = new QHBoxLayout;
+    wp_row->addWidget(waypoint_index_spin_);
     delete_waypoint_button_ = new QPushButton("Delete waypoint");
-    delete_waypoint_button_->setToolTip("Delete waypoint WP # (top bar).");
+    delete_waypoint_button_->setToolTip("Delete waypoint WP #.");
     wp_row->addWidget(delete_waypoint_button_);
     truncate_waypoints_button_ = new QPushButton("Delete after");
     truncate_waypoints_button_->setToolTip(
-        "Remove every waypoint after WP # (top bar; keeps waypoints 1..#).");
+        "Remove every waypoint after WP # (keeps waypoints 1..#).");
     wp_row->addWidget(truncate_waypoints_button_);
     truncate_before_button_ = new QPushButton("Delete before");
     truncate_before_button_->setToolTip(
-        "Remove every waypoint before WP # (top bar; keeps # and later; "
+        "Remove every waypoint before WP # (keeps # and later; "
         "remaining renumber from 1).");
     wp_row->addWidget(truncate_before_button_);
     wp_row->addWidget(new QLabel("Zone #"));
@@ -418,7 +419,7 @@ OperatorPanel::OperatorPanel(QWidget* parent)
         clear_executed_path_button_, record_bag_button_,
         plan_return_button_, return_mode_combo_,
         waypoint_index_spin_, delete_waypoint_button_, truncate_waypoints_button_,
-        truncate_before_button_, plan_from_button_,
+        truncate_before_button_, plan_from_button_, plan_from_spin_,
         zone_index_spin_, delete_zone_button_,
         fill_z_spin_, fill_roll_spin_, fill_pitch_spin_, fill_auto_check_, delete_top_spin_,
         groom_check_, groom_top_spin_, groom_margin_spin_,
@@ -466,18 +467,23 @@ OperatorPanel::OperatorPanel(QWidget* parent)
         "QPushButton { font-weight: bold; font-size: 16px;"
         " background-color: #1565c0; color: white; padding: 6px; }"
         "QPushButton:disabled { background-color: #4a4a4a; color: #9e9e9e; }");
-    // Plan from WP: fourth member of the pinned stack, paired with the WP #
-    // spin box it (and the waypoint Delete buttons in the scroll area) reads.
+    // Plan from WP: fourth member of the pinned stack, with its OWN waypoint
+    // spin box (independent of the delete-buttons' WP # box in the scroll area).
     plan_from_button_->setMinimumHeight(52);
     plan_from_button_->setStyleSheet(
         "QPushButton { font-weight: bold; font-size: 16px;"
         " background-color: #00695c; color: white; padding: 6px; }"
         "QPushButton:disabled { background-color: #4a4a4a; color: #9e9e9e; }");
-    waypoint_index_spin_->setMinimumHeight(52);
+    plan_from_spin_ = new QSpinBox;
+    plan_from_spin_->setMinimum(1);
+    plan_from_spin_->setMaximum(999);
+    plan_from_spin_->setPrefix("WP ");
+    plan_from_spin_->setMinimumHeight(52);
+    plan_from_spin_->setToolTip("Waypoint number Plan from WP starts at.");
     auto* plan_from_row = new QHBoxLayout;
     plan_from_row->setContentsMargins(0, 0, 0, 0);
     plan_from_row->setSpacing(2);
-    plan_from_row->addWidget(waypoint_index_spin_);
+    plan_from_row->addWidget(plan_from_spin_);
     plan_from_row->addWidget(plan_from_button_, 1);
     auto* pause_resume_row = new QVBoxLayout;
     pause_resume_row->setContentsMargins(0, 0, 0, 0);
@@ -1239,6 +1245,7 @@ void OperatorPanel::updateExecuteEnabled()
     // (also re-applied here after the rebuild lock-out blanket-enables).
     const bool has_waypoints = waypoint_count_ > 0 && !rebuilding_;
     waypoint_index_spin_->setEnabled(has_waypoints);
+    plan_from_spin_->setEnabled(has_waypoints);
     plan_from_button_->setEnabled(has_waypoints);
     delete_waypoint_button_->setEnabled(has_waypoints);
     truncate_waypoints_button_->setEnabled(has_waypoints);
@@ -1629,7 +1636,7 @@ void OperatorPanel::onPlanFromWaypoint()
         return;
     }
     auto request = std::make_shared<ugv_nav4d_ros2::srv::EditWaypoint::Request>();
-    request->index = static_cast<uint32_t>(waypoint_index_spin_->value());
+    request->index = static_cast<uint32_t>(plan_from_spin_->value());
     request->truncate_before = true;
     edit_waypoint_client_->async_send_request(request,
         [this, guard = QPointer<OperatorPanel>(this)](rclcpp::Client<ugv_nav4d_ros2::srv::EditWaypoint>::SharedFuture future)

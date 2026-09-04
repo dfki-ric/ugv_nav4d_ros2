@@ -144,6 +144,7 @@ private:
     QPushButton* truncate_waypoints_button_{nullptr};
     QPushButton* truncate_before_button_{nullptr};
     QPushButton* plan_from_button_{nullptr};
+    QSpinBox* plan_from_spin_{nullptr};
     QSpinBox* zone_index_spin_{nullptr};
     QPushButton* delete_zone_button_{nullptr};
     QPushButton* plan_return_button_{nullptr};
