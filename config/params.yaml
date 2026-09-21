@@ -1,71 +1,152 @@
 ugv_nav4d_ros2:
   ros__parameters:
-    spline_resolution_distance: 0.1
     read_pose_from_topic: false
-    load_mls_from_file: false
-    mls_file_type: "bin" #Options: bin, ply
-    mls_file_path: '/path/to/my_map.bin'
-    mls_gap_size: 0.1
-    robot_frame: husky/base_link
+    load_mls_from_file: true
+    mls_file_type: "ply" #Options: bin, ply
+    mls_file_path: '/opt/workspace/flat_plane.ply' # sandpit: /opt/workspace/sandpit.ply
+    mls_gap_size: 0.4
+    ply_downsample_leaf_size: 0.0 # voxel leaf size (m) for PLY downsampling; 0 = disabled
+    robot_frame: arter/base_link
     world_frame: map
     grid_resolution: 0.5
     dist_max_x: 1000
     dist_min_x: -1000
     dist_max_y: 1000
     dist_min_y: -1000
-    dist_max_z: 1000
-    dist_min_z: -1000
+    dist_max_z: 1000.0  # height (Z) crop upper bound in m (double; supports sub-meter values)
+    dist_min_z: -1000.0 # height (Z) crop lower bound in m
     dumpOnError: false
     dumpOnSuccess: false
+    return_face_forward: true # rotate return headings 180deg to prefer forward driving
+    mission_file: "ugv_nav4d_mission.txt"
+    speed_zone_surface_tolerance: 0.75 # max vertical error [m] when matching robot/zone to a TravMap surface
+    speed_zone_release_delay: 0.5 # seconds to retain a limit after leaving, preventing localization-edge chatter
     initialPatchRadius: 3.0
     #Mobility Parameters
-    maxMotionCurveLength: 100.0
-    minTurningRadius: 0.8
-    multiplierBackward: 3.0
-    multiplierBackwardTurn: 3.0
+    maxMotionCurveLength: 20.0
+    minTurningRadius: 4.0
+    multiplierBackward: 4.0
+    multiplierBackwardTurn: 4.0
     multiplierForward: 1.0
-    multiplierForwardTurn: 2.0
+    multiplierForwardTurn: 1.0
     multiplierLateral: 4.0
     multiplierLateralCurve: 4.0
-    multiplierPointTurn: 2.0
-    rotationSpeed: 1.0
+    multiplierPointTurn: 3.0
+    rotationSpeed: 0.5
     searchProgressSteps: 0.1
     searchRadius: 1.0
-    translationSpeed: 1.0   
-    spline_sampling_resolution: 0.05
+    translationSpeed: 0.5
+    spline_sampling_resolution: 0.1
     remove_goal_offset: false
+    curvaturePenaltyWeight: 0.5
+    angularCostWeight: 3.0
     #Planner Parameters
     epsilonSteps: 2
     initialEpsilon: 64
-    numThreads: 8
-    planningTime: 14000000
+    numThreads: 4
+    usePathStatistics: false
+    searchUntilFirstSolution: true
+    corridorWidth: 10.0
+    maxTime: 20.0
+    goalOrientationMargin: 1.0
+    goalDistanceMargin: 0.5
+    # Reconstruct the final path from the solution states using Reeds-Shepp steering
+    # (greedy shortcutting) instead of the search motion primitives. Requires minTurningRadius > 0.
+    useReedsSheppFinalPath: true
+    reedsSheppStepSize: 0.0      # RS sampling resolution [m]; <= 0 uses half the grid resolution
+    reedsSheppMaxShortcut: 0     # max waypoints one RS shortcut may span; <= 0 = unlimited
+    # Hybrid-A* analytic goal connection: end the search early when a collision-free Reeds-Shepp
+    # curve reaches the goal directly. Requires useReedsSheppFinalPath: true.
+    useReedsSheppGoalShot: true
+    reedsSheppGoalShotMaxDistance: 15.0 # only attempt within this point-robot distance to goal [m]
+    reedsSheppMaxCusps: 1        # max direction changes per accepted RS curve (incl. seam flip); < 0 = unlimited
     #Motion Primitive Parameters:
-    cellSkipFactor: 0.1
-    destinationCircleRadius: 6
+    cellSkipFactor: 1.0
+    destinationCircleRadius: 10
     generateBackwardMotions: true
     generateForwardMotions: true
-    generateLateralMotions: true
-    generatePointTurnMotions: true
-    numAngles: 16
-    numEndAngles: 8
+    generateLateralMotions: false
+    generatePointTurnMotions: false
+    numAngles: 42
+    numEndAngles: 21
     splineOrder: 4
     #Traversability Parameters:
     allowForwardDownhill: true
+    articulatedSuspension: false # if false, the robot is modeled with a rigid chassis/axles
     costFunctionDist: 0.0
-    distToGround: 0.0
+    distToGround: 0.5
     enableInclineLimitting: false
-    inclineLimittingLimit: 0.1
-    inclineLimittingMinSlope: 0.2
+    inclineLimittingLimit: 0.43
+    inclineLimittingMinSlope: 0.22
     initialPatchVariance: 0.0001
     maxSlope: 0.45
-    maxStepHeight: 0.25
+    maxStepHeight: 0.45
     minTraversablePercentage: 0.4
-    robotHeight: 1.0
-    robotSizeX: 1.2
-    robotSizeY: 0.8
-    slopeMetric: :NONE
+    robotHeight: 0.5
+    # Matches the Nav2 local-costmap footprint [[-3.0,2.215],[6.0,2.215],
+    # [6.0,-2.215],[-3.0,-2.215]] (9.0 x 4.43 m): size 9.0 with the box center
+    # shifted +1.5 m forward gives exactly [-3.0, +6.0] around base_link.
+    # The "Update footprint" panel button re-measures size AND offset from TF.
+    robotSizeX: 9.0
+    robotSizeY: 4.43
+    footprintOffsetX: 1.5
+    # The wheelbase is variable: the update_footprint service (panel button
+    # "Update footprint") measures the wheel-link envelope via TF and sets
+    # robotSize = 2 * (max wheel offset + margin) per axis. Margins cover the
+    # body/tool overhang beyond the wheel centers; calibrate them so the
+    # result matches the machine at a known wheelbase.
+    # Frames beyond the wheels included in the envelope (not in the wheelbase):
+    # all tools (shovels, grippers) attach under tool_link, so the live
+    # manipulator pose is covered. footprint_margin_x then only needs to span
+    # the tool/body extent BEYOND these frames.
+    footprint_extra_frames: ["arter/tool_link"]
+    # Per-side margins beyond the measured frames: front = shovel extent past
+    # tool_link, rear = body past the rear wheel centers, y = half-width past
+    # the widest wheel/tool |y|. Calibrate until the published polygon hugs
+    # the real machine (defaults derived from the 9.0 x 4.43 @ +1.5 footprint
+    # at 4.86 m wheelbase).
+    footprint_margin_front: 1.1
+    footprint_margin_rear: 0.6
+    footprint_margin_y: 0.65
+    # Publish the measured wheelbase (/ugv_nav4d_ros2/wheelbase, Float32), the
+    # TRUE asymmetric footprint polygon incl. tool (/ugv_nav4d_ros2/
+    # footprint_real, like Nav2's published_footprint) and RViz markers
+    # (/ugv_nav4d_ros2/footprint_planner; green box = the planner's centered
+    # robotSize model) every N seconds; <= 0 disables. 0.1 = costmap cadence.
+    footprint_publish_period: 0.1
+    slopeMetric: "NONE"
     slopeMetricScale: 1.0
-    obstacleInflationMultiplier: 0.3
+    obstacleInflationMultiplier: 1.0
+    partiallyTraversableMultiplier: 1.0
+    numYawSamples: 12 # yaw checks over the full circle for partial-cell allowed orientations (12 -> 30deg step), offset-independent
     #Trajectory Extension:
     extend_trajectory: true
-    extension_distance: 2.0 # in meters
+    extension_distance: 2.0
+
+ugv_nav4d_follow_path_client:
+  ros__parameters:
+    # Deviation watchdog: pause when the robot is farther than this from the
+    # nearest point of the executing segment for N consecutive 0.5 s checks.
+    # Live-tunable: ros2 param set /ugv_nav4d_follow_path_client max_path_deviation_m 3.0
+    max_path_deviation_m: 2.0
+    deviation_breaches_to_pause: 2
+
+ugv_nav4d_field_operations:
+  ros__parameters:
+    localization_timeout: 2.0
+    # false: a loaded/pregenerated MLS remains valid after first publication.
+    # true: require periodic trav-map updates according to map_timeout.
+    monitor_map_freshness: false
+    map_timeout: 10.0
+    communications_timeout: 5.0
+    heartbeat_required: false
+    low_battery_percentage: 0.20
+    critical_battery_percentage: 0.10
+    # Policies: warn, pause, return. Return creates a preview and still requires
+    # operator approval before execution.
+    low_battery_policy: "warn"
+    lost_communications_policy: "warn"
+    cpu_load_warning: 90.0
+    cpu_temperature_warning: 85.0
+    disk_free_warning_gb: 2.0
+    mission_audit_file: "ugv_nav4d_mission_audit.jsonl"

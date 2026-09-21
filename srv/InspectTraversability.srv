@@ -1,0 +1,13 @@
+geometry_msgs/Point point
+---
+bool success
+string message
+geometry_msgs/Point matched_point
+float32 distance
+uint8 type
+string type_name
+float32 slope
+float32 slope_direction
+int32 cost
+float32[] allowed_orientation_starts
+float32[] allowed_orientation_widths

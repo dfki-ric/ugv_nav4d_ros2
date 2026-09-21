@@ -9,6 +9,7 @@
 
 #include <OgreManualObject.h>
 
+namespace rviz_common { namespace properties { class BoolProperty; } }
 
 namespace ugv_nav4d_ros2 {
 
@@ -25,10 +26,18 @@ protected:
   virtual void onInitialize() override;
   virtual void reset() override;
   virtual void onDisable() override;
-  
+
+private Q_SLOTS:
+  void updateColorMode();
+
 private:
   void processMessage(ugv_nav4d_ros2::msg::TravMap::ConstSharedPtr msg) override;
+  void renderMap(const ugv_nav4d_ros2::msg::TravMap& msg);
   std::vector<Ogre::ManualObject*> manual_objects_;
+  //Debug view: recolor obstacle patches by WHY they were classified as
+  //obstacles (same palette as the travgen GUI's color_obstacles_by_cause).
+  rviz_common::properties::BoolProperty* color_by_cause_property_{nullptr};
+  ugv_nav4d_ros2::msg::TravMap::ConstSharedPtr last_msg_;
 };
 
 } // ugv_nav4d_ros2_trav_map_plugin

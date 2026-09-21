@@ -1,0 +1,7 @@
+# Delete all MLS patches inside the last drawn TRAVERSABLE zone, from 2.0 m
+# below the lowest clicked vertex up to top_m above the highest one. Patches
+# above the ceiling (overhead structures beyond robot height) survive.
+float64 top_m  # [m] deletion ceiling above the highest clicked vertex (0 = default 2.0)
+---
+bool success
+string message

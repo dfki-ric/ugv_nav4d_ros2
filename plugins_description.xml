@@ -1,3 +1,4 @@
+<class_libraries>
 <library path="ugv_nav4d_ros2_trav_map_plugin">
   <class name="TraversabilityMap"
          type="ugv_nav4d_ros2::ugv_nav4d_ros2_trav_map_plugin::TravMapDisplay"
@@ -17,3 +18,77 @@
     </description>
   </class>
 </library>
+
+<library path="ugv_nav4d_ros2_goal3d_tool">
+  <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_goal3d_tool::Goal3DTool"
+         base_class_type="rviz_common::Tool">
+    <description>
+      Goal tool that picks the true 3D point on the rendered MLS/traversability
+      map (instead of the z=0 ground plane) and publishes it as PoseStamped.
+    </description>
+  </class>
+</library>
+
+<library path="ugv_nav4d_ros2_inspect_orientations_tool">
+  <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_inspect_orientations_tool::InspectOrientationsTool"
+         base_class_type="rviz_common::Tool">
+    <description>
+      Selects a polygonal region on the map; the planner node renders the
+      allowed-orientation wedges of every partially traversable cell inside it.
+      Right-click with no vertices clears the markers.
+    </description>
+  </class>
+
+</library>
+
+<library path="ugv_nav4d_ros2_jump_to_robot_tool">
+  <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_jump_to_robot_tool::JumpToRobotTool"
+         base_class_type="rviz_common::Tool">
+    <description>
+      One-shot tool: click it to center the current view on the robot frame;
+      control returns to the default tool immediately.
+    </description>
+  </class>
+</library>
+
+<library path="ugv_nav4d_ros2_waypoint3d_tool">
+  <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_waypoint3d_tool::Waypoint3DTool"
+         base_class_type="rviz_common::Tool">
+    <description>
+      Appends a 3D waypoint (picked on the rendered MLS/traversability map) to
+      the planner's waypoint queue; the queue is planned through on the next goal.
+    </description>
+  </class>
+</library>
+
+<library path="ugv_nav4d_ros2_forbidden_zone_tool">
+  <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_forbidden_zone_tool::ForbiddenZoneTool"
+         base_class_type="rviz_common::Tool">
+    <description>
+      Draws a polygonal operational zone on the map. Zone properties select
+      keep-out, caution, speed-limit, preferred, direction, note, or traversable
+      (manual MLS edit for tall grass) semantics.
+    </description>
+  </class>
+</library>
+
+<library path="ugv_nav4d_ros2_operator_panel">
+  <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_operator_panel::OperatorPanel"
+         base_class_type="rviz_common::Panel">
+    <description>
+      Field operator panel: planner/execution status, route risk, system health,
+      pause/resume/abort/replan, mission editing, persistence, and map actions.
+    </description>
+  </class>
+</library>
+
+<library path="ugv_nav4d_ros2_inspect_tool">
+  <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_inspect_tool::InspectTraversabilityTool"
+         base_class_type="rviz_common::Tool">
+    <description>
+      Click a traversability patch to show its classification, slope, cost, and
+      permitted heading bands.
+    </description>
+  </class>
+</library>
+</class_libraries>

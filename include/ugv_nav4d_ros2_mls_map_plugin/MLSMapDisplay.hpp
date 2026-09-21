@@ -45,6 +45,9 @@ private:
   rviz_common::properties::BoolProperty*  auto_range_property_{nullptr};
   rviz_common::properties::FloatProperty* min_value_property_{nullptr};
   rviz_common::properties::FloatProperty* max_value_property_{nullptr};
+  rviz_common::properties::BoolProperty*  surface_only_property_{nullptr};
+  rviz_common::properties::BoolProperty*  height_filter_property_{nullptr};
+  rviz_common::properties::FloatProperty* max_height_property_{nullptr};
 
   // ---- Cached settings ----
   ColorMode color_mode_{ColorMode::Height};
@@ -52,6 +55,9 @@ private:
   bool      auto_range_{true};
   float     user_min_{0.0f};
   float     user_max_{1.0f};
+  bool      surface_only_{false};
+  bool      height_filter_{false};
+  float     max_height_{10.0f};
 
   // ---- Rendering (optimized: single object) ----
   Ogre::ManualObject* manual_object_{nullptr};

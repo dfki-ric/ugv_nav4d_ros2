@@ -1,0 +1,14 @@
+# Edit the waypoint queue by number (1-based, as shown in the RViz markers).
+uint32 index
+# true: delete the waypoint; false: replace its pose with `pose`
+bool remove
+# true: keep waypoints 1..index and delete every waypoint after it
+# (takes precedence over `remove`; `pose` is ignored)
+bool truncate_after
+# true: keep waypoints index..end and delete every waypoint before it
+# (takes precedence over `remove`; evaluated after `truncate_after`)
+bool truncate_before
+geometry_msgs/Pose pose
+---
+bool success
+string message

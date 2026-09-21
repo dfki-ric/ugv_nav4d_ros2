@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <unordered_set>
 #include <vector>
 
 namespace ugv_nav4d_ros2 {
@@ -74,11 +75,31 @@ void MLSMapDisplay::onInitialize()
   min_value_property_->setMin(-1e9);
   max_value_property_->setMax(+1e9);
 
+  surface_only_property_ = new rviz_common::properties::BoolProperty(
+      "Surface Only", false,
+      "Render only the first (lowest) patch of each cell instead of all stacked "
+      "levels, like the vizkit MLS surface_only option.",
+      this, SLOT(updateColoring()));
+
+  height_filter_property_ = new rviz_common::properties::BoolProperty(
+      "Height Filter", false,
+      "Hide patches whose bottom starts above 'Max Height'. Scrub the value "
+      "down to peel the map from the top; everything below the cut (including "
+      "obstacles) stays visible.",
+      this, SLOT(updateColoring()));
+
+  max_height_property_ = new rviz_common::properties::FloatProperty(
+      "Max Height (m)", 10.0,
+      "Clipping height in the map frame (used when Height Filter is enabled). "
+      "Click-drag the value to move the cut gradually.",
+      this, SLOT(updateColoring()));
+
   color_mode_ = ColorMode::Height;
   colormap_ = Colormap::Jet;
   auto_range_ = true;
   user_min_ = 0.0f;
   user_max_ = 1.0f;
+  surface_only_ = false;
 
   if (!manual_object_) {
     manual_object_ = scene_manager_->createManualObject();
@@ -115,10 +136,14 @@ void MLSMapDisplay::updateColoring()
   auto_range_ = auto_range_property_->getBool();
   user_min_   = min_value_property_->getFloat();
   user_max_   = max_value_property_->getFloat();
+  surface_only_ = surface_only_property_->getBool();
+  height_filter_ = height_filter_property_->getBool();
+  max_height_ = max_height_property_->getFloat();
 
   const bool hide_fixed = auto_range_;
   min_value_property_->setHidden(hide_fixed);
   max_value_property_->setHidden(hide_fixed);
+  max_height_property_->setHidden(!height_filter_);
 
   if (last_msg_) {
     rebuildGeometry(*last_msg_);
@@ -237,6 +262,41 @@ void MLSMapDisplay::rebuildGeometry(const ugv_nav4d_ros2::msg::MLSMap& msg)
 
   cached_metrics_.resize(num_patches);
 
+  std::vector<bool> skip_patch(num_patches, false);
+
+  // Surface-only mode: keep only the first patch of each cell. Patches arrive
+  // grouped per cell in level-list order (see publishMLSMap), so the first one
+  // seen per cell is the same patch the vizkit surface_only option renders.
+  if (surface_only_) {
+    const double res = (msg.resolution > 1e-9) ? msg.resolution : 1e-3;
+    std::unordered_set<uint64_t> seen_cells;
+    seen_cells.reserve(num_patches);
+    for (std::size_t i = 0; i < num_patches; ++i) {
+      const int64_t cx = static_cast<int64_t>(std::llround(msg.patches[i].position.x / res));
+      const int64_t cy = static_cast<int64_t>(std::llround(msg.patches[i].position.y / res));
+      const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(cx)) << 32) |
+                            static_cast<uint64_t>(static_cast<uint32_t>(cy));
+      if (!seen_cells.insert(key).second) {
+        skip_patch[i] = true;
+      }
+    }
+  }
+
+  // Height filter: peel the map from the top. A patch is hidden only when its
+  // *bottom* is above the cut, so walls and obstacles that start below the cut
+  // remain visible.
+  if (height_filter_) {
+    for (std::size_t i = 0; i < num_patches; ++i) {
+      if (static_cast<float>(msg.patches[i].minz) > max_height_) {
+        skip_patch[i] = true;
+      }
+    }
+  }
+
+  const auto skipped = [&](std::size_t i) {
+    return skip_patch[i];
+  };
+
   float vmin = std::numeric_limits<float>::infinity();
   float vmax = -std::numeric_limits<float>::infinity();
 
@@ -244,7 +304,7 @@ void MLSMapDisplay::rebuildGeometry(const ugv_nav4d_ros2::msg::MLSMap& msg)
     const float m = metricForPatch(msg.patches[i]);
     cached_metrics_[i] = m;
 
-    if (auto_range_) {
+    if (auto_range_ && !skipped(i)) {
       vmin = std::min(vmin, m);
       vmax = std::max(vmax, m);
     }
@@ -275,6 +335,9 @@ void MLSMapDisplay::rebuildGeometry(const ugv_nav4d_ros2::msg::MLSMap& msg)
   std::size_t vertex_base = 0;
 
   for (std::size_t i = 0; i < num_patches; ++i) {
+    if (skipped(i)) {
+      continue;
+    }
     const auto& patch = msg.patches[i];
 
     const float metric = cached_metrics_[i];

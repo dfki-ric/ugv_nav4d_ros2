@@ -25,14 +25,17 @@ class CombinedPathArrowPublisher(Node):
         self.marker_pub = self.create_publisher(MarkerArray, '/ugv_nav4d_ros2/colored_path', 10)
         self.get_logger().info('CombinedPathArrowPublisher ready.')
 
-        self.global_marker_count = 0  # For unique namespaces
-
     def labeled_path_callback(self, msg: LabeledPathArray):
         marker_array = MarkerArray()
 
         if not msg.paths:
-            self.get_logger().warn('No paths in received LabeledPathArray!')
+            # Empty message = "clear the path" (planning failed or path discarded).
+            # An empty MarkerArray would delete nothing, so send an explicit DELETEALL.
+            delete_marker = Marker()
+            delete_marker.action = Marker.DELETEALL
+            marker_array.markers.append(delete_marker)
             self.marker_pub.publish(marker_array)
+            self.get_logger().info('Received empty LabeledPathArray; cleared path markers.')
             return
 
         frame = msg.paths[0].header.frame_id
@@ -51,12 +54,13 @@ class CombinedPathArrowPublisher(Node):
 
             rgba = LABEL_COLORS.get(label, (1.0, 1.0, 1.0, 1.0))
             for i, pose_stamped in enumerate(path.poses):
-                self.global_marker_count += 1
-                ns = f'arrow_{self.global_marker_count}'
                 arrow_marker = Marker()
                 arrow_marker.header = path.header
-                arrow_marker.ns = ns
-                arrow_marker.id = 0
+                # One FIXED namespace with unique ids. A namespace per arrow
+                # (arrow_<global counter>) made rviz persist thousands of
+                # namespace toggles into every saved config file.
+                arrow_marker.ns = 'path_arrows'
+                arrow_marker.id = seg_idx * 100000 + i
                 arrow_marker.type = Marker.ARROW
                 arrow_marker.action = Marker.ADD
                 arrow_marker.scale.x = 0.4   # shaft length

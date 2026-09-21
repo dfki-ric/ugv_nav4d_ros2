@@ -19,6 +19,9 @@ def generate_launch_description():
     declared_arguments.append(
 	DeclareLaunchArgument(
             'use_sim_time',
+            # Pass use_sim_time:=true when launching against the Gazebo sim;
+            # forgetting it produces wall-clock path stamps that the (sim-time)
+            # TF tree rejects as "Transform data too old".
             default_value='false',
         )
     )
@@ -40,7 +43,7 @@ def generate_launch_description():
     declared_arguments.append(
         DeclareLaunchArgument(
             'pointcloud_topic',
-            default_value='/ugv_nav4d_ros2/pointcloud',
+            default_value='/map',
             description='Topic name of the pointcloud used to generate MLS map'
         )
     )
@@ -61,6 +64,7 @@ def generate_launch_description():
         )
     )    
 
+    # 1. Headless planner node
     declared_arguments.append(
         Node(
         package="ugv_nav4d_ros2",
@@ -75,6 +79,16 @@ def generate_launch_description():
         parameters=[LaunchConfiguration("main_param_file")],
         )
     )
+
+    declared_arguments.append(
+        Node(
+            package="ugv_nav4d_ros2",
+            executable="bag_recorder.py",
+            name="nav_bag_recorder",
+            output="screen",
+        )
+    )
+
     declared_arguments.append(
         Node(
         package="ugv_nav4d_ros2",
@@ -83,6 +97,26 @@ def generate_launch_description():
         output="screen",
         remappings=[],
         parameters=[],
+        )
+    )
+
+    declared_arguments.append(
+        Node(
+        package="ugv_nav4d_ros2",
+        executable="follow_path_client.py",
+        name="ugv_nav4d_follow_path_client",
+        output="screen",
+        parameters=[LaunchConfiguration("main_param_file")],
+        )
+    )
+
+    declared_arguments.append(
+        Node(
+        package="ugv_nav4d_ros2",
+        executable="field_operations.py",
+        name="ugv_nav4d_field_operations",
+        output="screen",
+        parameters=[LaunchConfiguration("main_param_file")],
         )
     )
 

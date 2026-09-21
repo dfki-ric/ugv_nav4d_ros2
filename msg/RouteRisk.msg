@@ -1,0 +1,15 @@
+std_msgs/Header header
+bool valid
+string summary
+float32 path_length
+float32 estimated_duration
+float32 max_slope
+float32 max_step
+float32 minimum_clearance
+float32 unknown_percentage
+float32 partial_percentage
+float32 forward_distance
+float32 reverse_distance
+float32 minimum_orientation_margin
+uint32 high_risk_sections
+string[] warnings

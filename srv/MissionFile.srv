@@ -1,0 +1,7 @@
+# Save/load a mission (waypoints + zones) to/from a specific file.
+# filename is the FULL path to the mission file; an empty string falls back to
+# the node's mission_file parameter.
+string filename
+---
+bool success
+string message
