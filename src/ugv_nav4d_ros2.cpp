@@ -1356,7 +1356,7 @@ static std::string nodeTypeName(traversability_generator3d::NodeType type){
 static std::string obstacleCauseName(traversability_generator3d::ObstacleCause cause){
     using traversability_generator3d::ObstacleCause;
     switch(cause){
-        case ObstacleCause::NONE:          return "NONE";
+        case ObstacleCause::CAUSE_NONE:    return "NONE";
         case ObstacleCause::UNMEASURED:    return "UNMEASURED";
         case ObstacleCause::STEEP_SLOPE:   return "STEEP_SLOPE";
         case ObstacleCause::STEP_HEIGHT:   return "STEP_HEIGHT";
