@@ -864,8 +864,10 @@ void PathPlannerNode::processGoalRequest(const geometry_msgs::msg::PoseStamped::
     start_pose_rbs.position = Eigen::Vector3d(start_pose.pose.position.x, start_pose.pose.position.y, start_pose.pose.position.z);
     start_pose_rbs.orientation = Eigen::Quaterniond(start_pose.pose.orientation.w, start_pose.pose.orientation.x, start_pose.pose.orientation.y, start_pose.pose.orientation.z);
 
-    goal_pose_rbs.position = Eigen::Vector3d(msg->pose.position.x, msg->pose.position.y, msg->pose.position.z);
-    goal_pose_rbs.orientation = Eigen::Quaterniond(msg->pose.orientation.w, msg->pose.orientation.x, msg->pose.orientation.y, msg->pose.orientation.z);
+    geometry_msgs::msg::Pose goal = msg->pose;
+    snapToDrivableSurface(goal, "Goal");
+    goal_pose_rbs.position = Eigen::Vector3d(goal.position.x, goal.position.y, goal.position.z);
+    goal_pose_rbs.orientation = Eigen::Quaterniond(goal.orientation.w, goal.orientation.x, goal.orientation.y, goal.orientation.z);
 
     if (!waypoint_queue.empty()){
         planThroughWaypoints();
@@ -946,9 +948,49 @@ void PathPlannerNode::autoPlanQueueChanged(){
     autoPlanIfEnabled();
 }
 
+void PathPlannerNode::snapToDrivableSurface(geometry_msgs::msg::Pose& pose, const std::string& what){
+    if (!traversability_generator_ptr){
+        return;
+    }
+    const auto& trav_map = traversability_generator_ptr->getTraversabilityMap();
+    const double dist_to_ground = get_parameter("distToGround").as_double();
+    const Eigen::Vector3d clicked(pose.position.x, pose.position.y, pose.position.z - dist_to_ground);
+
+    maps::grid::Index idx;
+    if (!trav_map.toGrid(clicked, idx)){
+        return;
+    }
+
+    // Drivable patch of this cell closest to the clicked height (keeps the
+    // intended level where several surfaces are stacked)
+    bool found = false;
+    double best_z = 0.0;
+    for (const traversability_generator3d::TravGenNode* n : trav_map.at(idx)){
+        const auto type = n->getUserData().nodeType;
+        if (type != traversability_generator3d::NodeType::TRAVERSABLE &&
+            type != traversability_generator3d::NodeType::PARTIALLY_TRAVERSABLE){
+            continue;
+        }
+        Eigen::Vector3d position;
+        trav_map.fromGrid(n->getIndex(), position, n->getHeight(), false);
+        if (!found || std::abs(position.z() - clicked.z()) < std::abs(best_z - clicked.z())){
+            best_z = position.z();
+            found = true;
+        }
+    }
+
+    if (found && std::abs(best_z - clicked.z()) > 0.05){
+        RCLCPP_INFO_STREAM(this->get_logger(), what << " at (" << pose.position.x << ", " << pose.position.y
+                           << "): height moved from " << clicked.z() << " to the drivable ground at " << best_z);
+        pose.position.z = best_z + dist_to_ground;
+    }
+}
+
 void PathPlannerNode::addWaypointCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg){
     std::lock_guard<std::recursive_mutex> lock(planner_mutex);
-    waypoint_queue.push_back(msg->pose);
+    geometry_msgs::msg::Pose waypoint = msg->pose;
+    snapToDrivableSurface(waypoint, "Waypoint");
+    waypoint_queue.push_back(waypoint);
     RCLCPP_INFO_STREAM(this->get_logger(), "Added waypoint " << waypoint_queue.size()
                        << " at (" << msg->pose.position.x << ", " << msg->pose.position.y
                        << ", " << msg->pose.position.z << ")");

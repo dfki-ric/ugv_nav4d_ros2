@@ -127,6 +127,10 @@ private:
     void cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
 
     void processGoalRequest(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
+    // Moves a clicked goal/waypoint (body pose) onto the drivable trav patch of
+    // its grid cell; clicks on RViz overlays (costmap, lidar points) carry the
+    // overlay's height, not the ground's.
+    void snapToDrivableSurface(geometry_msgs::msg::Pose& pose, const std::string& what);
     void readStartPose(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
 
     //waypoints
