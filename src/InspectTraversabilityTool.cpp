@@ -1,4 +1,4 @@
-#include "InspectTraversabilityTool.hpp"
+#include "ugv_nav4d_ros2/InspectTraversabilityTool.hpp"
 
 #include <cmath>
 #include <QMetaObject>

@@ -13,8 +13,8 @@
     <depend>libqt5-core</depend>
     <depend>libqt5-widgets</depend>
     <depend>boost</depend>
-    <depend>rclcpp_components</depend>
-    <depend>tf2_geometry_msgs</depend>
+    <depend>rclcpp_action</depend>
+    <depend>eigen</depend>
     <depend>std_msgs</depend>
     <depend>builtin_interfaces</depend>
     <depend>geometry_msgs</depend>

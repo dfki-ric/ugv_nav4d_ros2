@@ -1,5 +1,5 @@
 <class_libraries>
-<library path="ugv_nav4d_ros2_trav_map_plugin">
+<library path="ugv_nav4d_ros2_rviz_plugins">
   <class name="TraversabilityMap"
          type="ugv_nav4d_ros2::ugv_nav4d_ros2_trav_map_plugin::TravMapDisplay"
          base_class_type="rviz_common::Display">
@@ -7,9 +7,7 @@
       Display plugin for a Traversability Map 3D.
     </description>
   </class>
-</library>
 
-<library path="ugv_nav4d_ros2_mls_map_plugin">
   <class name="MultiLayeredSurfaceMap"
          type="ugv_nav4d_ros2::ugv_nav4d_ros2_mls_map_plugin::MLSMapDisplay"
          base_class_type="rviz_common::Display">
@@ -17,9 +15,7 @@
       Display plugin for a Multi-Level Surface Map (MLS).
     </description>
   </class>
-</library>
 
-<library path="ugv_nav4d_ros2_goal3d_tool">
   <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_goal3d_tool::Goal3DTool"
          base_class_type="rviz_common::Tool">
     <description>
@@ -27,9 +23,7 @@
       map (instead of the z=0 ground plane) and publishes it as PoseStamped.
     </description>
   </class>
-</library>
 
-<library path="ugv_nav4d_ros2_inspect_orientations_tool">
   <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_inspect_orientations_tool::InspectOrientationsTool"
          base_class_type="rviz_common::Tool">
     <description>
@@ -39,9 +33,6 @@
     </description>
   </class>
 
-</library>
-
-<library path="ugv_nav4d_ros2_jump_to_robot_tool">
   <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_jump_to_robot_tool::JumpToRobotTool"
          base_class_type="rviz_common::Tool">
     <description>
@@ -49,9 +40,7 @@
       control returns to the default tool immediately.
     </description>
   </class>
-</library>
 
-<library path="ugv_nav4d_ros2_waypoint3d_tool">
   <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_waypoint3d_tool::Waypoint3DTool"
          base_class_type="rviz_common::Tool">
     <description>
@@ -59,9 +48,7 @@
       the planner's waypoint queue; the queue is planned through on the next goal.
     </description>
   </class>
-</library>
 
-<library path="ugv_nav4d_ros2_forbidden_zone_tool">
   <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_forbidden_zone_tool::ForbiddenZoneTool"
          base_class_type="rviz_common::Tool">
     <description>
@@ -70,9 +57,7 @@
       (manual MLS edit for tall grass) semantics.
     </description>
   </class>
-</library>
 
-<library path="ugv_nav4d_ros2_operator_panel">
   <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_operator_panel::OperatorPanel"
          base_class_type="rviz_common::Panel">
     <description>
@@ -80,9 +65,7 @@
       pause/resume/abort/replan, mission editing, persistence, and map actions.
     </description>
   </class>
-</library>
 
-<library path="ugv_nav4d_ros2_inspect_tool">
   <class type="ugv_nav4d_ros2::ugv_nav4d_ros2_inspect_tool::InspectTraversabilityTool"
          base_class_type="rviz_common::Tool">
     <description>

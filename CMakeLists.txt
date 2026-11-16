@@ -19,9 +19,27 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 # Find dependencies
-find_package(Qt5 COMPONENTS Core Widgets REQUIRED)
-find_package(Boost REQUIRED COMPONENTS system filesystem serialization)
+find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_action REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(builtin_interfaces REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
+find_package(controller_manager_msgs REQUIRED)
+find_package(pcl_conversions REQUIRED)
+find_package(pluginlib REQUIRED)
+find_package(rviz_common REQUIRED)
+find_package(rviz_rendering REQUIRED)
+find_package(Qt5 REQUIRED COMPONENTS Widgets)
+find_package(Eigen3 REQUIRED)
+find_package(Boost REQUIRED COMPONENTS serialization)
+find_package(OpenMP)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ugv_nav4d REQUIRED IMPORTED_TARGET ugv_nav4d)
 
@@ -34,31 +52,6 @@ foreach(pkg_target IN ITEMS PkgConfig::ugv_nav4d)
       set_target_properties(${pkg_target} PROPERTIES INTERFACE_COMPILE_OPTIONS "${pkg_opts}")
     endif()
   endif()
-endforeach()
-
-set(THIS_PACKAGE_INCLUDE_DEPENDS
-  ament_cmake
-  Eigen3
-  rclcpp
-  rclcpp_components
-  tf2_geometry_msgs
-  std_msgs
-  builtin_interfaces
-  geometry_msgs
-  sensor_msgs
-  tf2_ros
-  nav_msgs
-  visualization_msgs
-  pcl_conversions
-  rviz_common
-  rviz_rendering
-  pluginlib
-  std_srvs
-  controller_manager_msgs
-)
-
-foreach(Dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
-  find_package(${Dependency} REQUIRED)
 endforeach()
 
 rosidl_generate_interfaces("ugv_nav4d_ros2_msgs"
@@ -86,206 +79,80 @@ rosidl_generate_interfaces("ugv_nav4d_ros2_msgs"
 rosidl_get_typesupport_target(cpp_typesupport_target
   "ugv_nav4d_ros2_msgs" "rosidl_typesupport_cpp")
 
+# Planner library
 add_library(${PROJECT_NAME} SHARED src/ugv_nav4d_ros2.cpp)
-target_link_libraries(${PROJECT_NAME} "${cpp_typesupport_target}")
-ament_target_dependencies(${PROJECT_NAME}  ${THIS_PACKAGE_INCLUDE_DEPENDS})
-target_include_directories(${PROJECT_NAME} PUBLIC 
-  ${ugv_nav4d_INCLUDE_DIRS} 
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/ugv_nav4d_ros2>
+target_include_directories(${PROJECT_NAME} PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
+  # pcl_conversions without exported targets (before kilted)
+  ${pcl_conversions_INCLUDE_DIRS}
 )
-target_link_libraries(${PROJECT_NAME}
-  ${ugv_nav4d_LDFLAGS}
+target_link_libraries(${PROJECT_NAME} PUBLIC
+  ${cpp_typesupport_target}
+  rclcpp::rclcpp
+  rclcpp_action::rclcpp_action
+  tf2_ros::tf2_ros
+  ${std_msgs_TARGETS}
+  ${std_srvs_TARGETS}
+  ${geometry_msgs_TARGETS}
+  ${sensor_msgs_TARGETS}
+  ${nav_msgs_TARGETS}
+  ${visualization_msgs_TARGETS}
+  ${pcl_conversions_TARGETS}
+  ${pcl_conversions_LIBRARIES}
   Eigen3::Eigen
+  Boost::serialization
+  PkgConfig::ugv_nav4d
 )
 # omp_set_num_threads(numThreads) in ugv_nav4d_ros2.cpp caps the traversability
 # generator's wave-parallel expansion with the SAME numThreads parameter the
 # planner uses. Without OpenMP the call compiles out (and travgen runs serial).
-find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
-  target_link_libraries(${PROJECT_NAME} OpenMP::OpenMP_CXX)
+  target_link_libraries(${PROJECT_NAME} PUBLIC OpenMP::OpenMP_CXX)
 endif()
 
-qt5_wrap_cpp(MOC_TRAV_MAP_FILES include/ugv_nav4d_ros2_trav_map_plugin/TravMapDisplay.hpp)
-# Create the plugin library
-add_library(ugv_nav4d_ros2_trav_map_plugin SHARED src/TravMapDisplay.cpp ${MOC_TRAV_MAP_FILES})
-target_link_libraries(ugv_nav4d_ros2_trav_map_plugin "${cpp_typesupport_target}")
-ament_target_dependencies(ugv_nav4d_ros2_trav_map_plugin  ${THIS_PACKAGE_INCLUDE_DEPENDS})
-target_include_directories(ugv_nav4d_ros2_trav_map_plugin PUBLIC 
-  ${ugv_nav4d_INCLUDE_DIRS} 
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/ugv_nav4d_ros2_trav_map_plugin/>
-  $<INSTALL_INTERFACE:include>
+add_executable(ugv_nav4d_ros2_node src/ugv_nav4d_ros2_node.cpp)
+target_link_libraries(ugv_nav4d_ros2_node PRIVATE ${PROJECT_NAME})
+
+# RViz displays, tools and panel (see plugins_description.xml)
+add_library(${PROJECT_NAME}_rviz_plugins SHARED
+  src/ForbiddenZoneTool.cpp include/ugv_nav4d_ros2/ForbiddenZoneTool.hpp
+  src/Goal3DTool.cpp include/ugv_nav4d_ros2/Goal3DTool.hpp
+  src/InspectOrientationsTool.cpp include/ugv_nav4d_ros2/InspectOrientationsTool.hpp
+  src/InspectTraversabilityTool.cpp include/ugv_nav4d_ros2/InspectTraversabilityTool.hpp
+  src/JumpToRobotTool.cpp include/ugv_nav4d_ros2/JumpToRobotTool.hpp
+  src/MLSMapDisplay.cpp include/ugv_nav4d_ros2/MLSMapDisplay.hpp
+  src/OperatorPanel.cpp include/ugv_nav4d_ros2/OperatorPanel.hpp
+  src/TravMapDisplay.cpp include/ugv_nav4d_ros2/TravMapDisplay.hpp
+  src/Waypoint3DTool.cpp include/ugv_nav4d_ros2/Waypoint3DTool.hpp
 )
-target_link_libraries(ugv_nav4d_ros2_trav_map_plugin
-  Eigen3::Eigen  
-  Qt5::Core
+set_target_properties(${PROJECT_NAME}_rviz_plugins PROPERTIES AUTOMOC ON)
+target_include_directories(${PROJECT_NAME}_rviz_plugins PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(${PROJECT_NAME}_rviz_plugins PRIVATE
+  ${cpp_typesupport_target}
+  rclcpp::rclcpp
+  pluginlib::pluginlib
+  rviz_common::rviz_common
+  rviz_rendering::rviz_rendering
+  ${std_msgs_TARGETS}
+  ${std_srvs_TARGETS}
+  ${geometry_msgs_TARGETS}
+  ${controller_manager_msgs_TARGETS}
   Qt5::Widgets
+  Eigen3::Eigen
+  PkgConfig::ugv_nav4d
 )
 
-qt5_wrap_cpp(MOC_MLS_MAP_FILES include/ugv_nav4d_ros2_mls_map_plugin/MLSMapDisplay.hpp)
-# Create the plugin library
-add_library(ugv_nav4d_ros2_mls_map_plugin SHARED src/MLSMapDisplay.cpp ${MOC_MLS_MAP_FILES})
-target_link_libraries(ugv_nav4d_ros2_mls_map_plugin "${cpp_typesupport_target}")
-ament_target_dependencies(ugv_nav4d_ros2_mls_map_plugin  ${THIS_PACKAGE_INCLUDE_DEPENDS})
-target_include_directories(ugv_nav4d_ros2_mls_map_plugin PUBLIC 
-  ${ugv_nav4d_INCLUDE_DIRS} 
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/ugv_nav4d_ros2_mls_map_plugin/>
-  $<INSTALL_INTERFACE:include>
-)
-target_link_libraries(ugv_nav4d_ros2_mls_map_plugin
-  Eigen3::Eigen  
-  Qt5::Core
-  Qt5::Widgets
-)
-
-qt5_wrap_cpp(MOC_GOAL3D_TOOL_FILES include/ugv_nav4d_ros2_goal3d_tool/Goal3DTool.hpp)
-# Create the tool plugin library
-add_library(ugv_nav4d_ros2_goal3d_tool SHARED src/Goal3DTool.cpp ${MOC_GOAL3D_TOOL_FILES})
-ament_target_dependencies(ugv_nav4d_ros2_goal3d_tool  ${THIS_PACKAGE_INCLUDE_DEPENDS})
-target_include_directories(ugv_nav4d_ros2_goal3d_tool PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/ugv_nav4d_ros2_goal3d_tool/>
-  $<INSTALL_INTERFACE:include>
-)
-target_link_libraries(ugv_nav4d_ros2_goal3d_tool
-  Qt5::Core
-  Qt5::Widgets
-)
-
-qt5_wrap_cpp(MOC_FORBIDDEN_ZONE_TOOL_FILES include/ugv_nav4d_ros2_forbidden_zone_tool/ForbiddenZoneTool.hpp)
-# Create the tool plugin library
-add_library(ugv_nav4d_ros2_forbidden_zone_tool SHARED src/ForbiddenZoneTool.cpp ${MOC_FORBIDDEN_ZONE_TOOL_FILES})
-target_link_libraries(ugv_nav4d_ros2_forbidden_zone_tool "${cpp_typesupport_target}")
-ament_target_dependencies(ugv_nav4d_ros2_forbidden_zone_tool  ${THIS_PACKAGE_INCLUDE_DEPENDS})
-target_include_directories(ugv_nav4d_ros2_forbidden_zone_tool PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/ugv_nav4d_ros2_forbidden_zone_tool/>
-  $<INSTALL_INTERFACE:include>
-)
-target_link_libraries(ugv_nav4d_ros2_forbidden_zone_tool
-  Qt5::Core
-  Qt5::Widgets
-)
-
-qt5_wrap_cpp(MOC_INSPECT_ORIENTATIONS_TOOL_FILES include/ugv_nav4d_ros2_inspect_orientations_tool/InspectOrientationsTool.hpp)
-# Create the orientation-inspection tool plugin library
-add_library(ugv_nav4d_ros2_inspect_orientations_tool SHARED src/InspectOrientationsTool.cpp ${MOC_INSPECT_ORIENTATIONS_TOOL_FILES})
-target_link_libraries(ugv_nav4d_ros2_inspect_orientations_tool "${cpp_typesupport_target}")
-ament_target_dependencies(ugv_nav4d_ros2_inspect_orientations_tool  ${THIS_PACKAGE_INCLUDE_DEPENDS})
-target_include_directories(ugv_nav4d_ros2_inspect_orientations_tool PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/ugv_nav4d_ros2_inspect_orientations_tool/>
-  $<INSTALL_INTERFACE:include>
-)
-target_link_libraries(ugv_nav4d_ros2_inspect_orientations_tool
-  Qt5::Core
-  Qt5::Widgets
-)
-
-qt5_wrap_cpp(MOC_JUMP_TO_ROBOT_TOOL_FILES include/ugv_nav4d_ros2_jump_to_robot_tool/JumpToRobotTool.hpp)
-# Create the jump-to-robot tool plugin library
-add_library(ugv_nav4d_ros2_jump_to_robot_tool SHARED src/JumpToRobotTool.cpp ${MOC_JUMP_TO_ROBOT_TOOL_FILES})
-ament_target_dependencies(ugv_nav4d_ros2_jump_to_robot_tool  ${THIS_PACKAGE_INCLUDE_DEPENDS})
-target_include_directories(ugv_nav4d_ros2_jump_to_robot_tool PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/ugv_nav4d_ros2_jump_to_robot_tool/>
-  $<INSTALL_INTERFACE:include>
-)
-target_link_libraries(ugv_nav4d_ros2_jump_to_robot_tool
-  Qt5::Core
-  Qt5::Widgets
-)
-
-qt5_wrap_cpp(MOC_OPERATOR_PANEL_FILES include/ugv_nav4d_ros2_operator_panel/OperatorPanel.hpp)
-# Create the panel plugin library
-add_library(ugv_nav4d_ros2_operator_panel SHARED src/OperatorPanel.cpp ${MOC_OPERATOR_PANEL_FILES})
-target_link_libraries(ugv_nav4d_ros2_operator_panel "${cpp_typesupport_target}")
-ament_target_dependencies(ugv_nav4d_ros2_operator_panel  ${THIS_PACKAGE_INCLUDE_DEPENDS})
-target_include_directories(ugv_nav4d_ros2_operator_panel PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/ugv_nav4d_ros2_operator_panel/>
-  $<INSTALL_INTERFACE:include>
-)
-target_link_libraries(ugv_nav4d_ros2_operator_panel
-  Qt5::Core
-  Qt5::Widgets
-)
-
-qt5_wrap_cpp(MOC_WAYPOINT3D_TOOL_FILES include/ugv_nav4d_ros2_waypoint3d_tool/Waypoint3DTool.hpp)
-# Create the tool plugin library
-add_library(ugv_nav4d_ros2_waypoint3d_tool SHARED src/Waypoint3DTool.cpp ${MOC_WAYPOINT3D_TOOL_FILES})
-target_link_libraries(ugv_nav4d_ros2_waypoint3d_tool "${cpp_typesupport_target}")
-ament_target_dependencies(ugv_nav4d_ros2_waypoint3d_tool  ${THIS_PACKAGE_INCLUDE_DEPENDS})
-target_include_directories(ugv_nav4d_ros2_waypoint3d_tool PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/ugv_nav4d_ros2_waypoint3d_tool/>
-  $<INSTALL_INTERFACE:include>
-)
-target_link_libraries(ugv_nav4d_ros2_waypoint3d_tool
-  Qt5::Core
-  Qt5::Widgets
-)
-
-qt5_wrap_cpp(MOC_INSPECT_TOOL_FILES include/ugv_nav4d_ros2_inspect_tool/InspectTraversabilityTool.hpp)
-add_library(ugv_nav4d_ros2_inspect_tool SHARED src/InspectTraversabilityTool.cpp ${MOC_INSPECT_TOOL_FILES})
-target_link_libraries(ugv_nav4d_ros2_inspect_tool "${cpp_typesupport_target}")
-ament_target_dependencies(ugv_nav4d_ros2_inspect_tool ${THIS_PACKAGE_INCLUDE_DEPENDS})
-target_include_directories(ugv_nav4d_ros2_inspect_tool PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/ugv_nav4d_ros2_inspect_tool/>
-  $<INSTALL_INTERFACE:include>
-)
-target_link_libraries(ugv_nav4d_ros2_inspect_tool Qt5::Core Qt5::Widgets)
-
-add_executable(ugv_nav4d_ros2_node
-	src/ugv_nav4d_ros2_node.cpp
-)
-
-target_link_libraries(ugv_nav4d_ros2_node PRIVATE
-  ${PROJECT_NAME}
-)
-
-install(TARGETS ${PROJECT_NAME}
+install(TARGETS ${PROJECT_NAME} ${PROJECT_NAME}_rviz_plugins
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
-  RUNTIME DESTINATION bin)
+  RUNTIME DESTINATION bin
+)
 
-install(TARGETS ugv_nav4d_ros2_trav_map_plugin
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib
-  RUNTIME DESTINATION bin)
-
-install(TARGETS ugv_nav4d_ros2_mls_map_plugin
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib
-  RUNTIME DESTINATION bin)
-
-install(TARGETS ugv_nav4d_ros2_goal3d_tool
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib
-  RUNTIME DESTINATION bin)
-
-install(TARGETS ugv_nav4d_ros2_waypoint3d_tool
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib
-  RUNTIME DESTINATION bin)
-
-install(TARGETS ugv_nav4d_ros2_operator_panel
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib
-  RUNTIME DESTINATION bin)
-
-install(TARGETS ugv_nav4d_ros2_forbidden_zone_tool
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib
-  RUNTIME DESTINATION bin)
-
-install(TARGETS ugv_nav4d_ros2_inspect_orientations_tool
-  ugv_nav4d_ros2_jump_to_robot_tool
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib
-  RUNTIME DESTINATION bin)
-
-install(TARGETS ugv_nav4d_ros2_inspect_tool
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib
-  RUNTIME DESTINATION bin)
-
-install(TARGETS ugv_nav4d_ros2_node 
-	DESTINATION lib/${PROJECT_NAME}
+install(TARGETS ugv_nav4d_ros2_node
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 install(FILES icons/classes/MultiLayeredSurfaceMap.png
@@ -296,7 +163,6 @@ install(FILES icons/classes/MultiLayeredSurfaceMap.png
 install(FILES plugins_description.xml
         DESTINATION share/${PROJECT_NAME}
 )
-
 
 install(PROGRAMS
   scripts/visualize_path.py

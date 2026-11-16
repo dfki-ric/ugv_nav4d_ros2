@@ -1,4 +1,4 @@
-#include "MLSMapDisplay.hpp"
+#include "ugv_nav4d_ros2/MLSMapDisplay.hpp"
 
 #include <rviz_common/properties/bool_property.hpp>
 #include <rviz_common/properties/color_property.hpp>

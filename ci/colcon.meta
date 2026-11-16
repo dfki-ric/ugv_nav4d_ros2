@@ -1,0 +1,67 @@
+# colcon metadata for the source dependencies in dependencies.repos, to be copied into the
+# workspace root (paths are relative to this file). These Rock packages have no package.xml:
+# set their names, their build type (ros.cmake also adds them to PKG_CONFIG_PATH, which
+# their CMake code needs to find each other) and their dependencies (from manifest.xml).
+paths:
+  src/base/cmake:
+    name: base-cmake
+    type: ros.cmake
+  src/base/logging:
+    name: base-logging
+    type: ros.cmake
+    dependencies: [base-cmake]
+  src/external/sisl:
+    name: external-sisl
+    type: ros.cmake
+  src/base/types:
+    name: base-types
+    type: ros.cmake
+    dependencies: [base-cmake, base-logging, external-sisl]
+    cmake-args: [-DBINDINGS_RUBY=OFF, -DUSE_SISL=ON]
+  src/base/numeric:
+    name: base-numeric
+    type: ros.cmake
+    dependencies: [base-cmake, base-types, base-logging]
+  src/base/boost_serialization:
+    name: base-boost_serialization
+    type: ros.cmake
+    dependencies: [base-cmake, base-types, base-numeric]
+  src/gui/osgviz:
+    name: gui-osgviz
+    type: ros.cmake
+    dependencies: [base-cmake]
+  src/gui/vizkit3d_debug_drawings:
+    name: gui-vizkit3d_debug_drawings
+    type: ros.cmake
+    dependencies: [base-cmake, gui-osgviz]
+    # only the vizkit3d_debug_drawings-commands library is needed, the Qt5 one needs vizkit3d
+    cmake-args: [-DWITH_PORTS=OFF, -DCMAKE_DISABLE_FIND_PACKAGE_Qt5=ON]
+  src/slam/maps:
+    name: slam-maps
+    type: ros.cmake
+    dependencies: [base-cmake, base-types, base-numeric, base-boost_serialization]
+  src/planning/sbpl:
+    name: planning-sbpl
+    type: ros.cmake
+  src/planning/sbpl_spline_primitives:
+    name: planning-sbpl_spline_primitives
+    type: ros.cmake
+    dependencies: [base-cmake, base-types]
+    cmake-args: [-DROCK_TEST_ENABLED=OFF]
+  src/control/trajectory_follower:
+    name: control-trajectory_follower
+    type: ros.cmake
+    dependencies: [base-cmake, base-types, external-sisl, gui-osgviz]
+  src/planning/traversability_generator3d:
+    name: planning-traversability_generator3d
+    type: ros.cmake
+    dependencies: [base-cmake, slam-maps, gui-vizkit3d_debug_drawings]
+  src/planning/ugv_nav4d:
+    name: planning-ugv_nav4d
+    type: ros.cmake
+    dependencies:
+      - base-cmake
+      - planning-sbpl
+      - planning-sbpl_spline_primitives
+      - planning-traversability_generator3d
+      - control-trajectory_follower

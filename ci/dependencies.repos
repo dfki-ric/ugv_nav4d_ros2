@@ -1,0 +1,62 @@
+# Source dependencies of ugv_nav4d for the CI (vcs import --input ci/dependencies.repos src).
+# Paths and colcon names (see colcon.meta) follow the ROS 2 autoproj package set
+# (https://github.com/dfki-ric/ros2-package_set).
+repositories:
+  base/cmake:
+    type: git
+    url: https://github.com/rock-core/base-cmake.git
+    version: master
+  base/logging:
+    type: git
+    url: https://github.com/rock-core/base-logging.git
+    version: master
+  base/types:
+    type: git
+    url: https://github.com/rock-core/base-types.git
+    version: master
+  base/numeric:
+    type: git
+    url: https://github.com/rock-core/base-numeric.git
+    version: master
+  base/boost_serialization:
+    type: git
+    url: https://github.com/envire/base-boost_serialization.git
+    version: master
+  external/sisl:
+    type: git
+    url: https://github.com/SINTEF-Geometry/SISL.git
+    version: master
+  gui/osgviz:
+    type: git
+    url: https://github.com/rock-core/gui-osgviz.git
+    version: master
+  gui/vizkit3d_debug_drawings:
+    type: git
+    url: https://github.com/rock-gui/gui-vizkit3d_debug_drawings.git
+    version: master
+  slam/maps:
+    type: git
+    url: https://github.com/envire/slam-maps.git
+    version: master
+  planning/sbpl:
+    type: git
+    url: https://github.com/sbpl/sbpl.git
+    version: master
+  # fork: changes not merged into rock-planning/planning-sbpl_spline_primitives
+  planning/sbpl_spline_primitives:
+    type: git
+    url: https://github.com/pierrewillenbrockdfki/planning-sbpl_spline_primitives.git
+    version: feature/qt4-qt5
+  # fork: changes not merged into rock-control/control-trajectory_follower
+  control/trajectory_follower:
+    type: git
+    url: https://github.com/pierrewillenbrockdfki/control-trajectory_follower.git
+    version: limit_speed_at_end_of_traj-qt4-qt5
+  planning/traversability_generator3d:
+    type: git
+    url: https://github.com/dfki-ric/traversability_generator3d.git
+    version: main
+  planning/ugv_nav4d:
+    type: git
+    url: https://github.com/dfki-ric/ugv_nav4d.git
+    version: main

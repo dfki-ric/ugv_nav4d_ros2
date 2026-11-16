@@ -1,0 +1,76 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.ros_distro }}
+    runs-on: ubuntu-latest
+    container:
+      image: ros:${{ matrix.ros_distro }}-ros-base
+    strategy:
+      fail-fast: false
+      matrix:
+        ros_distro: [ humble, jazzy, lyrical, rolling ]
+    # Ubuntu 26.04 (lyrical, rolling): some Rock dependencies do not build yet (e.g. Boost 1.90
+    # has no system component), so a failure does not fail the workflow
+    continue-on-error: ${{ matrix.ros_distro == 'lyrical' || matrix.ros_distro == 'rolling' }}
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      # CMake 4 rejects cmake_minimum_required < 3.5, which some Rock dependencies still use
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          path: src/ugv_nav4d_ros2
+
+      # ugv_nav4d and its Rock dependencies are not released into the ROS index:
+      # check them out next to this package and build them with colcon
+      - name: Checkout source dependencies
+        shell: bash
+        run: |
+          apt-get update
+          apt-get install -y python3-vcstool ccache
+          vcs import --input src/ugv_nav4d_ros2/ci/dependencies.repos src
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          rosdep update
+          # build dependencies of this package; planning-ugv_nav4d is built from source
+          rosdep install --from-paths src/ugv_nav4d_ros2 --ignore-src -y \
+            --rosdistro "${{ matrix.ros_distro }}" \
+            --dependency-types build --dependency-types buildtool \
+            --dependency-types build_export --skip-keys planning-ugv_nav4d
+          # system dependencies of the source dependencies (they have no package.xml)
+          apt-get install -y $(rosdep resolve --rosdistro "${{ matrix.ros_distro }}" \
+            eigen boost libpcl-all-dev cgal yaml-cpp libopenscenegraph pkg-config | grep -v '^#')
+
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ matrix.ros_distro }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ matrix.ros_distro }}-
+
+      - name: Build
+        shell: bash
+        run: |
+          source /opt/ros/${{ matrix.ros_distro }}/setup.bash
+          cp src/ugv_nav4d_ros2/ci/colcon.meta .
+          colcon build --event-handlers console_cohesion+ \
+            --cmake-args -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
