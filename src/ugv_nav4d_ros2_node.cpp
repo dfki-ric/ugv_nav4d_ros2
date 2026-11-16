@@ -1,6 +1,6 @@
 #include <rclcpp/rclcpp.hpp>
 
-#include "ugv_nav4d_ros2.hpp"
+#include "ugv_nav4d_ros2/ugv_nav4d_ros2.hpp"
 
 int main(int argc, char * argv[])
 {

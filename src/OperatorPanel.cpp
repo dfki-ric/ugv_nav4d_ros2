@@ -1,4 +1,4 @@
-#include "OperatorPanel.hpp"
+#include "ugv_nav4d_ros2/OperatorPanel.hpp"
 #include <rclcpp/parameter_client.hpp>
 #include <QDoubleSpinBox>
 

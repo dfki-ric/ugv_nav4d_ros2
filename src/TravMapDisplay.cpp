@@ -1,4 +1,4 @@
-#include "TravMapDisplay.hpp"
+#include "ugv_nav4d_ros2/TravMapDisplay.hpp"
 #include <rviz_rendering/objects/shape.hpp>
 #include <rviz_common/properties/bool_property.hpp>
 #include <rviz_common/properties/property.hpp>
